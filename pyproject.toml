@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hydeph"
+version = "0.1.0"
+authors = [
+  { name = "Quantum Materials & Machine Learning Team" },
+]
+description = "HyDePh: High-Definition Hybrid Defect Photoluminescence & Anharmonic Spectroscopy"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+    "numpy>=1.22.0",
+    "scipy>=1.8.0",
+    "matplotlib>=3.5.0",
+    "ase>=3.22.0",
+    "calorine>=2.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/jamesc/hydeph"
+"Bug Tracker" = "https://github.com/jamesc/hydeph/issues"
+
+[tool.setuptools.packages.find]
+include = ["hydeph*"]
