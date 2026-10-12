@@ -1,6 +1,6 @@
 """
-defect_delta_nep.frame_sampler
-==============================
+hydeph.frame_sampler
+====================
 Implements the 4-Phase representative frame generation protocol:
   1. Static Franck-Condon Reaction Coordinate Scan (lambda in [-0.2, 1.2])
   2. Defect-Core Local Rattling & Frozen Phonon Displacements

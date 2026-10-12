@@ -1,6 +1,6 @@
 """
-defect_delta_nep.defect_builder
-===============================
+hydeph.defect_builder
+=====================
 Handles supercell expansion, color center defect creation (vacancies,
 substitutions, complexes), coordination shell identification, and initial
 geometry optimization using the foundation potential (nep89).

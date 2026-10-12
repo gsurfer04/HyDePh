@@ -64,6 +64,7 @@ tmp/
 CRASH
 *.save/
 licl_fcenter_run/
+hydeph_run/
 dft_calculations/
 sampler_md/
 vib/

@@ -38,8 +38,8 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/jamesc/hydeph"
-"Bug Tracker" = "https://github.com/jamesc/hydeph/issues"
+"Homepage" = "https://github.com/gsurfer04/HyDePh"
+"Bug Tracker" = "https://github.com/gsurfer04/HyDePh/issues"
 
 [tool.setuptools.packages.find]
 include = ["hydeph*"]

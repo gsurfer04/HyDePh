@@ -1,6 +1,6 @@
 """
-defect_delta_nep.calculator
-===========================
+hydeph.calculator
+=================
 Defines the HybridDefectCalculator combining the universal foundation potential
 (nep89) with the defect-specific Delta-NEP.
 

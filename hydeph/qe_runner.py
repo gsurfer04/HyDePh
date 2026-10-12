@@ -1,6 +1,6 @@
 """
-defect_delta_nep.qe_runner
-==========================
+hydeph.qe_runner
+================
 Automates Quantum ESPRESSO pw.x single-point calculations to label candidate
 frames with total DFT energies and atomic forces using user-provided pseudopotentials.
 """

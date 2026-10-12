@@ -23,7 +23,7 @@ from hydeph.pipeline import run_pipeline
 
 
 def main():
-    workspace = os.path.abspath("./licl_fcenter_run")
+    workspace = os.path.abspath("./hydeph_run")
     os.makedirs(workspace, exist_ok=True)
     
     # 1. Generate pristine unit cell (conventional rock-salt LiCl, 8 atoms, a = 5.14 A)

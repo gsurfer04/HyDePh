@@ -1,4 +1,4 @@
-# `defect_delta_nep`: Turnkey Color-Center $\Delta$-NEP Toolkit
+# `hydeph`: High-Definition Hybrid Defect Photoluminescence Toolkit
 
 A modular Python framework for training ultra-fast, high-fidelity $\Delta$-Machine Learning Potentials ($\Delta$-NEP) on top of universal foundation models (such as `nep89`) for color centers in solids.
 
@@ -8,7 +8,7 @@ A modular Python framework for training ultra-fast, high-fidelity $\Delta$-Machi
 
 Universal machine learning potentials (e.g. `nep89`) provide broad lattice stability and elastic properties across the periodic table, but lack defect-specific many-body correlation corrections (such as deep defect state localization, Jahn-Teller distortions, and Franck-Condon relaxation forces). 
 
-`defect_delta_nep` automates the construction of a targeted $\Delta$-correction potential:
+`hydeph` automates the construction of a targeted $\Delta$-correction potential:
 $$V_{\mathrm{hybrid}}(\mathbf{R}) = V_{\mathrm{base}}(\mathbf{R}) + \Delta V_{\mathrm{NEP}}(\mathbf{R})$$
 $$\mathbf{F}_{\mathrm{hybrid}}(\mathbf{R}) = \mathbf{F}_{\mathrm{base}}(\mathbf{R}) + \Delta \mathbf{F}_{\mathrm{NEP}}(\mathbf{R})$$
 
@@ -44,10 +44,10 @@ To ensure $\Delta$-NEP learns accurate defect energetics with minimal DFT calls,
 ## 4. Package Architecture
 
 ```
-defect_delta_nep/
+hydeph/
 ├── __init__.py           # Package exports
 ├── config.py             # ToolkitConfig dataclass & input validator
-├── defect_builder.py     # Supercell expansion, vacancy creation, GS/ES relaxation
+├── defect_builder.py     # Supercell expansion, defect embedding, GS/ES relaxation
 ├── frame_sampler.py      # 4-Phase representative frame sampler (FC, rattle, MD+FPS)
 ├── qe_runner.py          # MPI-accelerated Quantum ESPRESSO pw.x runner with caching
 ├── delta_trainer.py      # Delta property extraction & GPU GPUMD NEP trainer
@@ -62,20 +62,20 @@ defect_delta_nep/
 ## 5. Quickstart Example
 
 ```python
-from defect_delta_nep import ToolkitConfig, run_pipeline
+from hydeph import ToolkitConfig, run_pipeline
 
 # 1. Configure the 5 inputs
 config = ToolkitConfig(
-    pristine_cell_path="licl_unitcell.xyz",
-    defect_type="vacancy",
-    defect_site_element="Cl",
+    pristine_cell_path="pristine_unitcell.xyz",
+    defect_cell_path="defect_unitcell.xyz",
     supercell_repeat=(2, 2, 2),
     foundation_potential_path="/path/to/nep89_20250409.txt",
     pseudopotentials={
         "Li": "li_pbe_v1.4.uspp.F.UPF",
         "Cl": "cl_pbe_v1.4.uspp.F.UPF"
     },
-    temperatures=[10.0, 77.0, 150.0, 300.0]
+    temperatures=[10.0, 77.0, 150.0, 300.0],
+    workspace_dir="./hydeph_run"  # Generic default run directory
 )
 
 # 2. Run automated pipeline
@@ -86,8 +86,11 @@ summary = run_pipeline(config)
 
 ## 6. Physical Outputs
 
+Generated inside `workspace_dir` (`./hydeph_run` by default):
+
 - `relaxed_gs.xyz` & `relaxed_es.xyz`: Ground and excited equilibrium geometries.
 - `candidate_frames.xyz`: 4-phase representative frame ensemble.
 - `labeled_dft_frames.xyz`: First-principles DFT energies and atomic forces.
 - `nep_delta.txt`: Trained defect $\Delta$-NEP potential.
-- `licl_fcenter_lineshapes.png`: Publication-grade electron-phonon spectral density $S(\hbar\omega)$ and multi-temperature emission lineshapes $A(E - E_{\mathrm{ZPL}}, T)$.
+- `lineshapes.png`: Multi-temperature optical emission lineshapes and electron-phonon spectral density.
+- `anharmonic_lineshapes.png`: Finite-temperature anharmonic MD lineshapes and defect-core VDOS.

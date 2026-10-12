@@ -1,6 +1,6 @@
 """
-defect_delta_nep.lineshape
-==========================
+hydeph.lineshape
+================
 Computes normal modes, electron-phonon spectral density S(hbar omega),
 total Huang-Rhys factor S, and optical lineshapes A(E, T) across user temperatures.
 Includes both harmonic generating-function lineshapes and finite-temperature
@@ -293,7 +293,8 @@ class LineshapeEngine:
         ax3.legend(frameon=True, loc='upper left', framealpha=0.92, fontsize=9.0)
 
         plt.tight_layout()
-        out_fig = os.path.join(self.config.workspace_dir, "licl_fcenter_anharmonic_lineshapes.png")
+        fig_name = getattr(self.config, "anharmonic_figure_name", "anharmonic_lineshapes.png")
+        out_fig = os.path.join(self.config.workspace_dir, fig_name)
         plt.savefig(out_fig, dpi=300)
         print(f"[+] Anharmonic comparison figure saved: {out_fig}")
 
@@ -325,6 +326,7 @@ class LineshapeEngine:
         ax.legend(frameon=True, loc='upper left', framealpha=0.92)
         
         plt.tight_layout()
-        out_fig = os.path.join(self.config.workspace_dir, "licl_fcenter_lineshapes.png")
+        fig_name = getattr(self.config, "lineshape_figure_name", "lineshapes.png")
+        out_fig = os.path.join(self.config.workspace_dir, fig_name)
         plt.savefig(out_fig, dpi=300)
         print(f"[+] Multi-temperature lineshape figure saved: {out_fig}")

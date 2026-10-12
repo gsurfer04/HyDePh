@@ -1,6 +1,6 @@
 """
-defect_delta_nep.delta_trainer
-==============================
+hydeph.delta_trainer
+====================
 Computes Delta E and Delta F between target DFT and foundation potential (nep89),
 assembles train.xyz and test.xyz, writes nep.in, and trains the Delta-NEP in GPUMD.
 """

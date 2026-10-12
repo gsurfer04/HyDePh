@@ -1,6 +1,6 @@
 """
-defect_delta_nep.config
-=======================
+hydeph.config
+=============
 Defines the input specification and configuration validator for the automated
 color center Delta-NEP toolkit.
 
@@ -27,7 +27,7 @@ class ToolkitConfig:
     # 2. Defect cell or specification
     defect_cell_path: Optional[str] = None
     defect_type: str = "vacancy"  # "vacancy", "substitutional", or "file"
-    defect_site_element: Optional[str] = "Cl"
+    defect_site_element: Optional[str] = None
     defect_site_index: Optional[int] = None
     supercell_repeat: Tuple[int, int, int] = (2, 2, 2)
     
@@ -66,8 +66,10 @@ class ToolkitConfig:
     anharmonic_md_steps: int = 2500 # MD steps per temperature for thermal sampling
     anharmonic_dt_fs: float = 1.0   # Timestep in fs
     
-    # Output workspace
-    workspace_dir: str = "./licl_fcenter_run"
+    # Output workspace and figure naming
+    workspace_dir: str = "./hydeph_run"
+    lineshape_figure_name: str = "lineshapes.png"
+    anharmonic_figure_name: str = "anharmonic_lineshapes.png"
 
     def validate(self):
         """Validate input existence and parameters."""

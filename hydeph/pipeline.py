@@ -1,6 +1,6 @@
 """
-defect_delta_nep.pipeline
-=========================
+hydeph.pipeline
+===============
 Top-level turnkey workflow orchestrating the automated color-center Delta-NEP
 training and multi-temperature lineshape generation.
 
