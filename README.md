@@ -36,6 +36,14 @@ From a minimal set of user inputs, **HyDePh** executes:
 
 ---
 
+## 📖 Theory & Literature Walkthrough
+
+For a comprehensive breakdown of the physics, mathematical formulation, and article citations justifying each stage (defect supercell embedding, $\Delta$-learning, 4-phase active sampling, $\Delta$SCF excited states, quantum generating functions, and finite-temperature anharmonic MD), please read our:
+
+👉 **[Theoretical Walkthrough & Article Justifications](docs/THEORY_WALKTHROUGH.md)**
+
+---
+
 ## ⚡ Quickstart
 
 ### 1. Installation
@@ -148,6 +156,8 @@ hydeph/
 ├── lineshape.py          # Harmonic generating function & anharmonic MD engine
 ├── pipeline.py           # Turnkey pipeline orchestrator
 └── run_licl_fcenter.py   # Complete runnable benchmark driver for LiCl F-center
+docs/
+└── THEORY_WALKTHROUGH.md # Theoretical physics walkthrough & article citations
 scripts/
 └── make_github_diagram.py # Generates the 2-panel publication benchmark diagram
 assets/
