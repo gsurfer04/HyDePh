@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <b>Automated First-Principles $\Delta$-Machine Learning Potentials for High-Definition Color-Center Spectroscopy</b>
+  <b>Automated First-Principles &Delta;-Machine Learning Potentials for High-Definition Color-Center Spectroscopy</b>
 </p>
 
 <p align="center">
@@ -24,8 +24,12 @@ Universal machine learning potentials (e.g., `nep89`) provide broad lattice stab
 
 **HyDePh** (*"Hi-Def"*: **Hy**brid **De**fect **Ph**otoluminescence) bridges this gap by automatically training a localized $\Delta$-Neuroevolution Potential ($\Delta$-NEP) on top of universal foundation models:
 
-$$V_{\mathrm{hybrid}}(\mathbf{R}) = V_{\mathrm{foundation}}(\mathbf{R}) + \Delta V_{\mathrm{NEP}}(\mathbf{R})$$
-$$\mathbf{F}_{\mathrm{hybrid}}(\mathbf{R}) = \mathbf{F}_{\mathrm{foundation}}(\mathbf{R}) + \Delta \mathbf{F}_{\mathrm{NEP}}(\mathbf{R})$$
+$$
+\begin{aligned}
+V_{\mathrm{hybrid}}(\mathbf{R}) &= V_{\mathrm{foundation}}(\mathbf{R}) + \Delta V_{\mathrm{NEP}}(\mathbf{R}) \\
+\mathbf{F}_{\mathrm{hybrid}}(\mathbf{R}) &= \mathbf{F}_{\mathrm{foundation}}(\mathbf{R}) + \Delta \mathbf{F}_{\mathrm{NEP}}(\mathbf{R})
+\end{aligned}
+$$
 
 From a minimal set of user inputs, **HyDePh** executes:
 1. **Automated Defect Embedding**: Tiling pristine bulk unit cells around a pre-made defect unit cell with automatic defect-site coordinate detection.
@@ -55,8 +59,8 @@ pip install -e .
 ```
 
 Prerequisites:
-- [GPUMD / NEP](https://github.com/brucefan992/GPUMD) (`gpumd` and `nep` binaries on `$PATH`)
-- [Quantum ESPRESSO](https://www.quantum-espresso.org/) (`pw.x` on `$PATH`)
+- [GPUMD / NEP](https://github.com/brucefan992/GPUMD) (`gpumd` and `nep` executables on system `PATH`)
+- [Quantum ESPRESSO](https://www.quantum-espresso.org/) (`pw.x` executable on system `PATH`)
 - NVIDIA GPU with CUDA support
 
 ### 2. Python API Example
