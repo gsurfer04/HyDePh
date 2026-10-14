@@ -17,6 +17,7 @@ from calorine.calculators import CPUNEP
 class DefectBuilder:
     def __init__(self, config):
         self.config = config
+        os.makedirs(self.config.workspace_dir, exist_ok=True)
         self.calc_foundation = CPUNEP(config.foundation_potential_path)
 
     def build_supercell_and_defect(self):
@@ -130,29 +131,73 @@ class DefectBuilder:
 
     def generate_excited_state_geometry(self, at_gs):
         """
-        Generates excited-state equilibrium geometry.
-        For F-centers in alkali halides, optical excitation (A_1g -> T_1u) causes
-        the 6 nearest-neighbor cations (Li) to undergo breathing/Jahn-Teller displacement.
+        Generates or loads the optical excited-state equilibrium geometry.
+        Supports explicit user-supplied excited-state structure (excited_cell_path)
+        or procedural defect coordination shell breathing/Jahn-Teller displacement.
         """
+        # Option A: User-supplied excited state cell/supercell
+        if getattr(self.config, "excited_cell_path", None) and os.path.isfile(self.config.excited_cell_path):
+            excited_input = ase.io.read(self.config.excited_cell_path)
+            v_input = excited_input.get_volume()
+            pristine = ase.io.read(self.config.pristine_cell_path)
+            v_pristine_uc = pristine.get_volume()
+            
+            if abs(v_input - v_pristine_uc) / v_pristine_uc < 0.25:
+                print(f"[+] Pre-made excited state unit cell provided ({len(excited_input)} atoms).")
+                print(f"    Surrounding with pristine unit cells to build {self.config.supercell_repeat} supercell...")
+                at_es, _ = self.embed_defect_unitcell(pristine, excited_input, self.config.supercell_repeat)
+            else:
+                at_es = excited_input
+                print(f"[+] Loaded existing excited state supercell ({len(at_es)} atoms)")
+                
+            es_path = os.path.join(self.config.workspace_dir, "relaxed_es.xyz")
+            ase.io.write(es_path, at_es)
+            dr_fc = at_es.positions - at_gs.positions
+            m = at_gs.get_masses()
+            dq_fc = np.sqrt(np.sum(np.repeat(m, 3) * dr_fc.flatten()**2))
+            print(f"[+] Loaded Optical Excited State from file (Franck-Condon Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
+            return at_es, dq_fc
+
+        # Option B: Automated procedural defect core relaxation
         at_es = at_gs.copy()
         center = self.vac_pos if hasattr(self, 'vac_pos') and self.vac_pos is not None else (at_gs.get_cell().sum(axis=0) / 2.0)
         
-        # Identify 6 nearest Li atoms
+        # Identify coordinating atoms in first coordination shell around defect center
         dists = np.linalg.norm(at_es.positions - center, axis=1)
-        li_indices = [i for i, s in enumerate(at_es.get_chemical_symbols()) if s == 'Li']
-        nn_li = sorted(li_indices, key=lambda idx: dists[idx])[:6]
+        valid_mask = dists > 0.05
+        if not np.any(valid_mask):
+            raise ValueError("No valid atoms found around defect center for excited state relaxation.")
         
-        # Outward breathing relaxation (typical ~0.15 A for F-center p-state)
-        disp_mag = 0.15
-        for idx in nn_li:
+        d_min = np.min(dists[valid_mask])
+        # First coordination shell: all atoms within 1.25 * d_min (e.g. 6 cations in rock-salt, 4 C/N in diamond)
+        coord_indices = [i for i, d in enumerate(dists) if 0.05 < d <= 1.25 * d_min]
+        if len(coord_indices) < 2:
+            coord_indices = list(np.argsort(dists[valid_mask])[:6])
+            
+        # Physical displacement magnitude:
+        # Default ~0.08 A for stiff covalent hosts (diamond, SiC), ~0.15 A for softer ionic lattices (alkali halides)
+        if getattr(self.config, "excited_state_displacement", None) is not None:
+            disp_mag = float(self.config.excited_state_displacement)
+        elif d_min > 1.85:
+            disp_mag = 0.15  # Soft ionic lattice (e.g. LiCl, LiF, NaCl)
+        else:
+            disp_mag = 0.08  # Stiff covalent lattice (e.g. Diamond NV, SiV, SiC)
+
+        coord_symbols = [at_es[i].symbol for i in coord_indices]
+        print(f"[+] Defect coordinating shell: {len(coord_indices)} atoms ({coord_symbols}), d_min = {d_min:.3f} A")
+        print(f"    Applying optical breathing displacement disp_mag = {disp_mag:.3f} A...")
+        
+        for idx in coord_indices:
             dr = at_es.positions[idx] - center
-            unit_dr = dr / np.linalg.norm(dr)
-            at_es.positions[idx] += disp_mag * unit_dr
+            norm_dr = np.linalg.norm(dr)
+            if norm_dr > 1e-4:
+                unit_dr = dr / norm_dr
+                at_es.positions[idx] += disp_mag * unit_dr
 
         # Refine outer shell with foundation potential while constraining the breathing core
         from ase.constraints import FixAtoms
         at_es.calc = self.calc_foundation
-        at_es.set_constraint(FixAtoms(indices=nn_li))
+        at_es.set_constraint(FixAtoms(indices=coord_indices))
         opt = BFGS(at_es, logfile=None)
         opt.run(fmax=0.02, steps=30)
         at_es.set_constraint()
@@ -166,3 +211,4 @@ class DefectBuilder:
         dq_fc = np.sqrt(np.sum(np.repeat(m, 3) * dr_fc.flatten()**2))
         print(f"[+] Built Optical Excited State (Franck-Condon Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
         return at_es, dq_fc
+

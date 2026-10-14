@@ -19,7 +19,7 @@ Outputs:
   - Multi-temperature harmonic & anharmonic emission lineshapes A(E - E_ZPL, T)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .config import ToolkitConfig
 from .defect_builder import DefectBuilder

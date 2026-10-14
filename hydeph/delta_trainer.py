@@ -6,12 +6,54 @@ assembles train.xyz and test.xyz, writes nep.in, and trains the Delta-NEP in GPU
 """
 
 import os
+import sys
 import time
+import shutil
 import subprocess
 import numpy as np
 import ase.io
 from ase import Atoms
 from calorine.calculators import CPUNEP
+
+
+def resolve_nep_executable(nep_exe=None):
+    """
+    Resolves the GPUMD nep executable across Windows and Linux.
+    """
+    if nep_exe:
+        if os.path.isfile(nep_exe):
+            return os.path.abspath(nep_exe)
+        found = shutil.which(nep_exe)
+        if found:
+            return found
+        return nep_exe
+
+    env_nep = os.environ.get("NEP_EXE") or os.environ.get("GPUMD_NEP")
+    if env_nep:
+        if os.path.isfile(env_nep):
+            return os.path.abspath(env_nep)
+        found = shutil.which(env_nep)
+        if found:
+            return found
+        return env_nep
+
+    if sys.platform.startswith("win"):
+        for name in ["nep.exe", "nep"]:
+            found = shutil.which(name)
+            if found:
+                return found
+        for p in [r"C:\GPUMD\bin\nep.exe", r"C:\Program Files\GPUMD\bin\nep.exe"]:
+            if os.path.isfile(p):
+                return os.path.abspath(p)
+        return "nep.exe"
+    else:
+        found = shutil.which("nep") or shutil.which("nep.exe")
+        if found:
+            return found
+        for p in ["/usr/local/bin/nep", "/usr/bin/nep"]:
+            if os.path.isfile(p):
+                return p
+        return "/usr/local/bin/nep"
 
 
 def write_delta_nep_in(out_path, unique_elements, neurons=30, batch=2000, steps=30000):
@@ -96,16 +138,20 @@ class DeltaTrainer:
         
         print(f"\n[-] Training Delta-NEP on GPU (train={len(train_frames)}, test={len(test_frames)}, steps={self.config.nep_steps})...")
         t0 = time.time()
-        res = subprocess.run(["/usr/local/bin/nep"], cwd=train_dir, capture_output=True, text=True)
+        nep_cmd = resolve_nep_executable(getattr(self.config, "nep_exe", None))
+        res = subprocess.run([nep_cmd], cwd=train_dir, capture_output=True, text=True)
         if res.returncode != 0:
-            raise RuntimeError(f"NEP training failed:\n{res.stderr}\n{res.stdout}")
+            raise RuntimeError(f"NEP training failed using '{nep_cmd}':\n{res.stderr}\n{res.stdout}")
             
         print(f"[+] Delta-NEP training completed in {time.time()-t0:.2f} s")
         
         # Copy trained potential
         pot_src = os.path.join(train_dir, "nep.txt")
         pot_dest = os.path.join(self.config.workspace_dir, "nep_delta.txt")
-        os.system(f"cp {pot_src} {pot_dest}")
+        if os.path.isfile(pot_src):
+            shutil.copy2(pot_src, pot_dest)
+        else:
+            raise FileNotFoundError(f"Trained NEP potential '{pot_src}' was not found after training.")
         print(f"[+] Trained Delta-NEP saved: {pot_dest}")
         
         # Parity analysis

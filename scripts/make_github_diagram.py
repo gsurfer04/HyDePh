@@ -130,13 +130,10 @@ ax2.legend(frameon=True, loc='upper right', framealpha=0.92, fontsize=8.8)
 
 plt.tight_layout()
 
-out_asset = '/home/jamesc/gemini/nep4nvminus/assets/licl_anharmonic_benchmark.png'
-out_artifact = '/home/jamesc/.gemini/antigravity-cli/brain/aaa22dc2-89d3-4263-aeeb-5d5c8775a988/licl_anharmonic_benchmark.png'
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+out_asset = os.path.join(repo_root, "assets", "licl_anharmonic_benchmark.png")
 os.makedirs(os.path.dirname(out_asset), exist_ok=True)
-os.makedirs(os.path.dirname(out_artifact), exist_ok=True)
 
 plt.savefig(out_asset, dpi=300)
-plt.savefig(out_artifact, dpi=300)
 print(f"Successfully generated clean 2-panel benchmark diagram:")
 print(f"  -> {out_asset}")
-print(f"  -> {out_artifact}")

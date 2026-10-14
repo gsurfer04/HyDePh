@@ -50,14 +50,17 @@ def main():
         supercell_repeat=(2, 2, 2),
         
         # Input 3: General-purpose foundation potential
-        foundation_potential_path="/home/jamesc/GPUMD/potentials/nep/nep89_20250409/nep89_20250409.txt",
+        foundation_potential_path=os.environ.get(
+            "NEP_FOUNDATION_PATH",
+            os.path.join(workspace, "nep89_20250409.txt")
+        ),
         
         # Input 4: Pseudopotentials
         pseudopotentials={
             "Li": "li_pbe_v1.4.uspp.F.UPF",
             "Cl": "cl_pbe_v1.4.uspp.F.UPF",
         },
-        pseudo_dir="/home/jamesc/quantumespresso/pseudo",
+        pseudo_dir=os.environ.get("ESPRESSO_PSEUDO", os.path.join(workspace, "pseudo")),
         
         # Input 5: Temperatures of interest (K)
         temperatures=[10.0, 77.0, 150.0, 300.0],

@@ -59,8 +59,8 @@ ax2.grid(True, linestyle=':', alpha=0.55)
 ax2.legend(frameon=True, loc='upper left', framealpha=0.92, fontsize=9.5)
 
 plt.tight_layout()
-out_dir = '/home/jamesc/gemini/nep4nvminus'
-plt.savefig(os.path.join(out_dir, 'licl_fcenter_experimental_comparison.png'), dpi=300)
-artifact_dir = '/home/jamesc/.gemini/antigravity-cli/brain/aaa22dc2-89d3-4263-aeeb-5d5c8775a988'
-plt.savefig(os.path.join(artifact_dir, 'licl_fcenter_experimental_comparison.png'), dpi=300)
-print('Experimental comparison figure generated successfully!')
+out_dir = os.environ.get("HYDEPH_WORKSPACE", os.path.abspath("./hydeph_run"))
+os.makedirs(out_dir, exist_ok=True)
+out_fig = os.path.join(out_dir, "licl_fcenter_experimental_comparison.png")
+plt.savefig(out_fig, dpi=300)
+print(f"Experimental comparison figure generated successfully: {out_fig}")

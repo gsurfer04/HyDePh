@@ -70,9 +70,16 @@ def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: 
     candidate_frames = sampler.assemble_candidate_dataset(at_gs, at_es)
 
     # Step 3: First-Principles Quantum ESPRESSO Labeling
-    print("\n[STEP 3/6] High-Fidelity DFT Labeling (Quantum ESPRESSO pw.x)...")
-    qe = QERunner(config, n_procs=n_procs_qe)
-    labeled_frames = qe.label_all_frames(candidate_frames, max_frames=max_dft_frames)
+    print("\n[STEP 3/6] High-Fidelity DFT Labeling (Quantum ESPRESSO)...")
+    qe = QERunner(
+        config,
+        n_procs=n_procs_qe,
+        pw_exe=getattr(config, "pw_exe", None),
+        mpi_command=getattr(config, "mpi_command", None),
+        mpi_args=getattr(config, "mpi_args", None),
+    )
+    dft_limit = max_dft_frames if max_dft_frames is not None else getattr(config, "max_dft_frames", None)
+    labeled_frames = qe.label_all_frames(candidate_frames, max_frames=dft_limit)
 
     # Step 4: Foundation Baseline Extraction & Delta-NEP Training
     print("\n[STEP 4/6] Delta Baseline Extraction & GPU GPUMD Training...")
