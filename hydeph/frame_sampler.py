@@ -41,7 +41,10 @@ def farthest_point_sampling(descriptor_matrix, n_select):
 class FrameSampler:
     def __init__(self, config):
         self.config = config
-        self.calc_foundation = CPUNEP(config.foundation_potential_path)
+        if getattr(config, "foundation_potential_path", None) and os.path.isfile(config.foundation_potential_path):
+            self.calc_foundation = CPUNEP(config.foundation_potential_path)
+        else:
+            self.calc_foundation = None
 
     def sample_franck_condon_path(self, at_gs, at_es, n_points=7):
         """Phase 1: Generates structures along linear optical coordinate."""
@@ -52,11 +55,14 @@ class FrameSampler:
         lambdas = base_lams + extra_lams
         
         fc_frames = []
-        for lam in lambdas[:n_points]:
+        for i, lam in enumerate(lambdas[:n_points]):
             at = at_gs.copy()
             at.positions = at_gs.positions + lam * dr
+            label = f"fc_{i:02d}"
             at.info["sample_type"] = "franck_condon"
-            at.info["lambda"] = lam
+            at.info["frame_id"] = label
+            at.info["label"] = label
+            at.info["lambda"] = float(lam)
             fc_frames.append(at)
         print(f"[+] Phase 1: Generated {len(fc_frames)} Franck-Condon path frames (lambda in [-0.2, 1.2])")
         return fc_frames
@@ -67,15 +73,21 @@ class FrameSampler:
         dists = np.linalg.norm(at_gs.positions - center, axis=1)
         core_mask = dists < r_cutoff
         
+        seed = getattr(self.config, "random_seed", 42)
+        rng = np.random.RandomState(seed)
+        
         rattle_frames = []
         for i in range(n_frames):
             at = at_gs.copy()
             sigma = 0.08 if i % 2 == 0 else 0.14
-            displacements = np.random.normal(0.0, sigma, at.positions.shape)
+            displacements = rng.normal(0.0, sigma, at.positions.shape)
             displacements[~core_mask] *= 0.15
             at.positions += displacements
+            label = f"rattle_{i:02d}"
             at.info["sample_type"] = "core_rattle"
-            at.info["rattle_sigma"] = sigma
+            at.info["frame_id"] = label
+            at.info["label"] = label
+            at.info["rattle_sigma"] = float(sigma)
             rattle_frames.append(at)
             
         print(f"[+] Phase 2: Generated {len(rattle_frames)} defect-core rattle frames (r < {r_cutoff} A)")
@@ -90,11 +102,14 @@ class FrameSampler:
         os.makedirs(scratch_dir, exist_ok=True)
         
         from ase.md.langevin import Langevin
+        from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
         from ase import units
         
+        seed = getattr(self.config, "random_seed", 42) + 101
         at = at_gs.copy()
         at.calc = self.calc_foundation
         temp_k = self.config.md_temp_exploration
+        MaxwellBoltzmannDistribution(at, temperature_K=temp_k, rng=np.random.RandomState(seed))
         dyn = Langevin(at, dt_fs * units.fs, temperature_K=temp_k, friction=0.01 / units.fs, logfile=None)
         
         trajectory = []
@@ -117,16 +132,40 @@ class FrameSampler:
         
         selected_indices = farthest_point_sampling(feature_matrix, n_select)
         selected_frames = []
-        for idx in selected_indices:
+        for i, idx in enumerate(selected_indices):
             fr = trajectory[idx]
+            label = f"md_fps_{i:02d}"
             fr.info["sample_type"] = "foundation_md_fps"
+            fr.info["frame_id"] = label
+            fr.info["label"] = label
             selected_frames.append(fr)
             
         print(f"[+] Phase 3: Farthest Point Sampling selected {len(selected_frames)} maximally diverse frames")
         return selected_frames
 
-    def assemble_candidate_dataset(self, at_gs, at_es):
-        """Assembles the complete candidate dataset across all sampling phases."""
+    def assemble_candidate_dataset(self, at_gs, at_es, force_resample=False):
+        """Assembles the complete candidate dataset across all sampling phases, reusing existing pool if present."""
+        out_path = os.path.join(self.config.workspace_dir, "candidate_frames.xyz")
+        force = force_resample or getattr(self.config, "force_resample", False)
+        
+        if not force and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+            try:
+                cached_candidates = ase.io.read(out_path, ":")
+                if len(cached_candidates) > 0:
+                    for idx, fr in enumerate(cached_candidates):
+                        if "frame_id" not in fr.info:
+                            stype = fr.info.get("sample_type", "frame")
+                            fr.info["frame_id"] = f"{stype}_{idx:02d}"
+                        if "label" not in fr.info:
+                            fr.info["label"] = fr.info["frame_id"]
+                        fr.info["candidate_index"] = idx
+                        fr.info["frame_name"] = f"frame_{idx:03d}_{fr.info['frame_id']}"
+                    print(f"[i] Found existing candidate dataset ({len(cached_candidates)} frames) in {out_path}.")
+                    print("    Reusing candidate pool to preserve geometry and labels across runs.")
+                    return cached_candidates
+            except Exception as e:
+                print(f"    [!] Could not read existing candidate_frames.xyz ({e}). Generating fresh pool.")
+
         fc_frames = self.sample_franck_condon_path(at_gs, at_es, self.config.n_fc_frames)
         rattle_frames = self.sample_defect_core_rattling(at_gs, self.config.n_phonon_frames)
         md_frames = self.sample_foundation_md_with_fps(at_gs, self.config.n_md_frames)
@@ -142,7 +181,10 @@ class FrameSampler:
             if i < len(md_frames):
                 all_candidates.append(md_frames[i])
                 
-        out_path = os.path.join(self.config.workspace_dir, "candidate_frames.xyz")
-        ase.io.write(out_path, all_candidates)
+        for idx, fr in enumerate(all_candidates):
+            fr.info["candidate_index"] = idx
+            fr.info["frame_name"] = f"frame_{idx:03d}_{fr.info['frame_id']}"
+            
+        ase.io.write(out_path, all_candidates, format="extxyz")
         print(f"[+] Assembled candidate dataset: {len(all_candidates)} total representative frames -> {out_path}")
         return all_candidates

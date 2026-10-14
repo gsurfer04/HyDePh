@@ -137,6 +137,11 @@ summary = run_pipeline(config)
 | `phonon_smearing_meV` | `float` | `6.0` | Gaussian smearing ($\text{meV}$) for $S(\hbar\omega)$ to bridge supercell discrete mode gaps (finite-size correction). If `None`, auto-detects from median mode gap. |
 | `dephasing_gamma_meV` | `float` | `None` | ZPL dephasing damping ($\text{meV}$). Defaults to $\gamma(T) = 1.5 + 2.0\times 10^{-4} T^2\ \text{meV}$. |
 | `finite_size_acoustic_cutoff` | `bool` | `True` | Enforces acoustic phonon scaling $S(\hbar\omega) \to 0$ as $\omega \to 0$ to prevent finite-size boundary artifacts. |
+| `random_seed` | `int` | `42` | Deterministic RNG seed for rattling displacements and MD velocities across runs. |
+| `force_resample` | `bool` | `False` | Reuses existing `candidate_frames.xyz` in workspace when `False`; regenerates fresh pool when `True`. |
+| `max_dft_frames` | `int` | `None` | Target total number of converged DFT frames. Resumes pending frames prioritizing missing sample types without re-running completed frames. |
+| `max_new_dft_frames` | `int` | `None` | Optional limit on new DFT calculations to execute per run. |
+| `dft_resume_mode` | `str` | `"target_total"` | Resumption budget mode (`"target_total"` or `"max_new"`). |
 
 
 

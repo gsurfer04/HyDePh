@@ -162,6 +162,17 @@ summary = run_pipeline(config)
 | `dephasing_gamma_meV` | `float` | `None` | ZPL dephasing damping ($\text{meV}$). Defaults to temperature-dependent dephasing $\gamma(T) = 1.5 + 2.0\times 10^{-4} T^2\ \text{meV}$. |
 | `finite_size_acoustic_cutoff` | `bool` | `True` | Enforces acoustic phonon scaling $S(\hbar\omega) \to 0$ as $\omega \to 0$, preventing spurious finite-size boundary modes at low frequencies. |
 
+#### Smart Resumption & Candidate Sampling Parameter Reference
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `random_seed` | `int` | `42` | Deterministic RNG seed for rattling displacements and MD velocities, ensuring identical candidate geometries across runs. |
+| `force_resample` | `bool` | `False` | When `False` (default), reuses `candidate_frames.xyz` if present in the workspace, preserving candidate structures and labels. Set `True` to force fresh regeneration. |
+| `max_dft_frames` | `int` | `None` | Target total number of converged DFT frames in the dataset. When resuming an interrupted run with $N_{\mathrm{done}}$ frames already finished, calculates only $\max(0, \text{max\_dft\_frames} - N_{\mathrm{done}})$ additional frames, prioritizing underrepresented sample types (e.g. Rattle, MD) so the budget is not consumed by previously calculated FC frames. |
+| `max_new_dft_frames` | `int` | `None` | Optional limit on the number of *new* DFT calculations to execute in the current invocation. |
+| `dft_resume_mode` | `str` | `"target_total"` | Resumption budget policy: `"target_total"` (satisfies total target frames) or `"max_new"` (runs up to `max_dft_frames` / `max_new_dft_frames` new calculations). |
+
+
 
 ---
 

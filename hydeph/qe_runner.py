@@ -104,10 +104,12 @@ def parse_qe_output(pw_out_path):
                 
         if "Forces acting on atoms (cartesian axes, Ry/au):" in line:
             forces_list = []
-            for j in range(i + 2, len(lines)):
+            for j in range(i + 1, len(lines)):
                 fline = lines[j].strip()
-                if not fline or "total force" in fline:
+                if "total force" in fline:
                     break
+                if not fline:
+                    continue
                 m = re.search(r"force =\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)", fline)
                 if m:
                     fx = float(m.group(1)) * (Ry / Bohr)
@@ -256,6 +258,60 @@ def build_qe_command(pw_exe, pw_in="pw.in", n_procs=2, mpi_command=None, mpi_arg
     return cmd_args
 
 
+def check_pw_in_matches_atoms(pw_in, atoms, tol=1e-3):
+    """Verifies that atomic positions in existing pw.in match atoms to prevent stale cache hits."""
+    if not os.path.isfile(pw_in):
+        return True
+    try:
+        with open(pw_in, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        in_pos = False
+        coords = []
+        for line in lines:
+            line_str = line.strip()
+            if "ATOMIC_POSITIONS" in line_str.upper():
+                in_pos = True
+                continue
+            if in_pos:
+                if line_str.startswith("/") or line_str.startswith("&") or "K_POINTS" in line_str.upper():
+                    break
+                parts = line_str.split()
+                if len(parts) >= 4:
+                    coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
+        if len(coords) != len(atoms):
+            return False
+        diff = np.abs(np.array(coords) - atoms.positions)
+        return bool(np.max(diff) < tol)
+    except Exception:
+        return True
+
+
+def find_frame_calc_dir(dft_dir, cand_idx, frame_id, atoms):
+    """
+    Finds the calculation directory for a frame, checking canonical and legacy names.
+    Returns (calc_dir, is_converged).
+    """
+    canonical_dir = os.path.join(dft_dir, f"frame_{cand_idx:03d}_{frame_id}")
+    candidates = [
+        canonical_dir,
+        os.path.join(dft_dir, frame_id),
+        os.path.join(dft_dir, f"frame_{cand_idx:03d}"),
+    ]
+    for cdir in candidates:
+        if os.path.isdir(cdir):
+            pw_out = os.path.join(cdir, "pw.out")
+            pw_in = os.path.join(cdir, "pw.in")
+            if os.path.isfile(pw_out):
+                try:
+                    with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    if "JOB DONE." in content and check_pw_in_matches_atoms(pw_in, atoms):
+                        return cdir, True
+                except Exception:
+                    pass
+    return canonical_dir, False
+
+
 class QERunner:
     def __init__(self, config, n_procs=2, pw_exe=None, mpi_command=None, mpi_args=None):
         self.config = config
@@ -268,23 +324,43 @@ class QERunner:
         self.mpi_args = mpi_args or getattr(config, "mpi_args", None)
 
     def label_single_frame(self, atoms, calc_dir):
-        """Runs single-point QE calculation for one frame with live output streaming and caching."""
+        """Runs single-point QE calculation for one frame with live output streaming, geometry verification, and caching."""
         os.makedirs(calc_dir, exist_ok=True)
         pw_in = os.path.join(calc_dir, "pw.in")
         pw_out = os.path.join(calc_dir, "pw.out")
         
-        # Check cache
+        # Check cache with geometry verification
         if os.path.isfile(pw_out):
-            with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+            try:
+                with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except Exception:
+                content = ""
             if "JOB DONE." in content:
-                e_ev, f_ev_a = parse_qe_output(pw_out)
-                if e_ev is not None and f_ev_a is not None and len(f_ev_a) == len(atoms):
-                    print(f"      [Cache hit] Reusing converged calculation in {calc_dir}", flush=True)
-                    at_labeled = atoms.copy()
-                    at_labeled.info["energy"] = e_ev
-                    at_labeled.arrays["forces"] = f_ev_a
-                    return at_labeled
+                if check_pw_in_matches_atoms(pw_in, atoms):
+                    e_ev, f_ev_a = parse_qe_output(pw_out)
+                    if e_ev is not None and f_ev_a is not None and len(f_ev_a) == len(atoms):
+                        print(f"      [Cache hit] Reusing converged calculation in {calc_dir}", flush=True)
+                        at_labeled = atoms.copy()
+                        at_labeled.info["energy"] = e_ev
+                        at_labeled.arrays["forces"] = f_ev_a
+                        return at_labeled
+                else:
+                    print(f"      [Cache mismatch] Atomic positions in {pw_in} differ from frame. Recomputing...", flush=True)
+            else:
+                # Incomplete previous calculation: clean scratch tmp directory before restart
+                tmp_dir = os.path.join(calc_dir, "tmp")
+                if os.path.isdir(tmp_dir):
+                    try:
+                        for item in os.listdir(tmp_dir):
+                            item_p = os.path.join(tmp_dir, item)
+                            if os.path.isfile(item_p) or os.path.islink(item_p):
+                                os.unlink(item_p)
+                            elif os.path.isdir(item_p):
+                                shutil.rmtree(item_p, ignore_errors=True)
+                    except Exception:
+                        pass
+                print(f"      [Resuming] Incomplete calculation in {calc_dir}. Cleaned scratch tmp/ and restarting...", flush=True)
 
         write_qe_input(atoms, pw_in, self.config)
         
@@ -365,22 +441,135 @@ class QERunner:
         at_labeled.arrays["forces"] = f_ev_a
         return at_labeled
 
-    def label_all_frames(self, frames, max_frames=None):
-        """Labels all frames in the dataset."""
-        frames_to_run = frames[:max_frames] if max_frames else frames
-        labeled_frames = []
+    def label_all_frames(self, frames, max_frames=None, max_new_frames=None):
+        """
+        Labels candidate frames with first-principles DFT, with smart resumption of interrupted runs,
+        persistent frame labels, and intelligent budget allocation across sampling types.
+        """
         dft_dir = os.path.join(self.config.workspace_dir, "dft_calculations")
         os.makedirs(dft_dir, exist_ok=True)
-        
-        print(f"\n[-] Running Quantum ESPRESSO on {len(frames_to_run)} representative frames (np={self.n_procs})...")
-        for idx, fr in enumerate(frames_to_run):
-            cdir = os.path.join(dft_dir, f"frame_{idx:03d}")
-            t0 = time.time()
-            labeled_fr = self.label_single_frame(fr, cdir)
-            labeled_frames.append(labeled_fr)
-            print(f"    [+] Frame {idx+1:2d}/{len(frames_to_run)} labeled | E = {labeled_fr.info['energy']:.4f} eV | Max F = {np.abs(labeled_fr.arrays['forces']).max():.4f} eV/A ({time.time()-t0:.1f} s)")
-            
         out_xyz = os.path.join(self.config.workspace_dir, "labeled_dft_frames.xyz")
-        ase.io.write(out_xyz, labeled_frames)
-        print(f"[+] All frames successfully labeled -> {out_xyz}")
-        return labeled_frames
+        
+        # 1. Inspect status of all candidate frames
+        completed_entries = []
+        pending_entries = []
+        
+        for idx, fr in enumerate(frames):
+            cand_idx = fr.info.get("candidate_index", idx)
+            frame_id = fr.info.get("frame_id") or fr.info.get("label") or f"frame_{cand_idx:02d}"
+            stype = fr.info.get("sample_type", "unknown")
+            cdir, is_done = find_frame_calc_dir(dft_dir, cand_idx, frame_id, fr)
+            entry = {
+                "index": cand_idx,
+                "frame_id": frame_id,
+                "sample_type": stype,
+                "atoms": fr,
+                "calc_dir": cdir,
+            }
+            if is_done:
+                completed_entries.append(entry)
+            else:
+                pending_entries.append(entry)
+
+        # Status summary
+        print(f"\n[-] High-Fidelity DFT Labeling (Quantum ESPRESSO, np={self.n_procs})...")
+        print(f"    Total candidate pool: {len(frames)} frames")
+        
+        type_completed = {}
+        for e in completed_entries:
+            st = e["sample_type"]
+            type_completed[st] = type_completed.get(st, 0) + 1
+
+        type_pending = {}
+        for e in pending_entries:
+            st = e["sample_type"]
+            type_pending[st] = type_pending.get(st, 0) + 1
+
+        if completed_entries:
+            comp_str = ", ".join(f"{k}: {v}" for k, v in sorted(type_completed.items()))
+            print(f"    [i] Already converged: {len(completed_entries)} frames ({comp_str})")
+        if pending_entries:
+            pend_str = ", ".join(f"{k}: {v}" for k, v in sorted(type_pending.items()))
+            print(f"    [i] Pending / uncalculated: {len(pending_entries)} frames ({pend_str})")
+        else:
+            print(f"    [i] All {len(frames)} candidate frames are already converged!")
+
+        # 2. Determine frames to calculate based on budget and resume policy
+        resume_mode = getattr(self.config, "dft_resume_mode", "target_total")
+        dft_target = max_frames if max_frames is not None else getattr(self.config, "max_dft_frames", None)
+        new_limit = max_new_frames if max_new_frames is not None else getattr(self.config, "max_new_dft_frames", None)
+
+        to_calculate = []
+        if not pending_entries:
+            to_calculate = []
+        elif resume_mode == "max_new" or (dft_target is None and new_limit is not None):
+            budget = new_limit if new_limit is not None else len(pending_entries)
+            # Prioritize underrepresented sample types
+            sorted_pending = sorted(
+                pending_entries,
+                key=lambda e: (type_completed.get(e["sample_type"], 0), e["index"])
+            )
+            to_calculate = sorted_pending[:budget]
+        elif dft_target is not None:
+            n_done = len(completed_entries)
+            if n_done >= dft_target:
+                print(f"    [i] Target max_dft_frames={dft_target} already satisfied by {n_done} converged frames.")
+                print("        Reusing all converged frames without duplicate DFT execution.")
+                to_calculate = []
+            else:
+                needed = dft_target - n_done
+                if new_limit is not None:
+                    needed = min(needed, new_limit)
+                # Prioritize underrepresented sample types among pending frames
+                # so that e.g. Rattle and MD frames are chosen rather than duplicating/over-sampling FC frames
+                sorted_pending = sorted(
+                    pending_entries,
+                    key=lambda e: (type_completed.get(e["sample_type"], 0), e["index"])
+                )
+                to_calculate = sorted_pending[:needed]
+                calc_str = ", ".join(f"{e['frame_id']} ({e['sample_type']})" for e in to_calculate)
+                print(f"    [i] Need {needed} additional frames to reach target {dft_target}. Selected: {calc_str}")
+        else:
+            to_calculate = pending_entries
+
+        # 3. Collect completed frames from cache
+        labeled_dict = {}
+        for entry in completed_entries:
+            at = self.label_single_frame(entry["atoms"], entry["calc_dir"])
+            labeled_dict[entry["index"]] = at
+
+        # 4. Execute pending calculations
+        if to_calculate:
+            print(f"\n[-] Executing {len(to_calculate)} DFT calculation(s)...")
+            for step_num, entry in enumerate(to_calculate, 1):
+                idx = entry["index"]
+                fr = entry["atoms"]
+                cdir = entry["calc_dir"]
+                label = entry["frame_id"]
+                stype = entry["sample_type"]
+                
+                t0 = time.time()
+                print(f"\n    ---> [{step_num}/{len(to_calculate)}] Calculating {label} ({stype}) in {os.path.basename(cdir)}...")
+                labeled_fr = self.label_single_frame(fr, cdir)
+                labeled_dict[idx] = labeled_fr
+                dt = time.time() - t0
+                print(f"    [+] {label} labeled | E = {labeled_fr.info['energy']:.4f} eV | Max F = {np.abs(labeled_fr.arrays['forces']).max():.4f} eV/A ({dt:.1f} s)")
+                
+                # Update completed counts
+                type_completed[stype] = type_completed.get(stype, 0) + 1
+                
+                # Incremental write to labeled_dft_frames.xyz so progress is never lost on interruption
+                current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
+                ase.io.write(out_xyz, current_frames, format="extxyz")
+
+        # 5. Assemble final dataset sorted by candidate index
+        final_labeled = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
+        ase.io.write(out_xyz, final_labeled, format="extxyz")
+        
+        final_types = {}
+        for fr in final_labeled:
+            st = fr.info.get("sample_type", "unknown")
+            final_types[st] = final_types.get(st, 0) + 1
+        summary_str = ", ".join(f"{k}: {v}" for k, v in sorted(final_types.items()))
+        print(f"\n[+] DFT Labeling Complete: {len(final_labeled)} total frames ({summary_str}) -> {out_xyz}")
+        return final_labeled

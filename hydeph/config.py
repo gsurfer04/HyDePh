@@ -81,7 +81,11 @@ class ToolkitConfig:
     n_phonon_frames: int = 12       # Frozen phonon / thermal rattle frames
     n_md_frames: int = 20           # Diverse frames selected via FPS from nep89 MD
     md_temp_exploration: float = 500.0 # Elevated temperature for exploratory MD
-    max_dft_frames: Optional[int] = None # Optional limit on number of DFT frames to calculate
+    random_seed: int = 42           # RNG seed for deterministic frame sampling across runs
+    force_resample: bool = False    # If True, regenerates candidate_frames.xyz even if already present
+    max_dft_frames: Optional[int] = None # Target limit on number of converged DFT frames
+    max_new_dft_frames: Optional[int] = None # Optional limit on new DFT calculations to execute per run
+    dft_resume_mode: str = "target_total" # "target_total" or "max_new"
     
     # Delta-NEP training parameters
     delta_nep_generation: int = 1
@@ -161,6 +165,12 @@ class ToolkitConfig:
             raise ValueError(
                 f"Invalid lineshape_y_scale: '{self.lineshape_y_scale}'. "
                 "Must be 'linear' or 'log'."
+            )
+
+        if self.dft_resume_mode.lower() not in ("target_total", "max_new"):
+            raise ValueError(
+                f"Invalid dft_resume_mode: '{self.dft_resume_mode}'. "
+                "Must be 'target_total' or 'max_new'."
             )
 
         os.makedirs(self.workspace_dir, exist_ok=True)
