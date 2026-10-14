@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <b>Automated First-Principles $\Delta$-Machine Learning Potentials for High-Definition Color-Center Spectroscopy</b>
+  <b>Automated First-Principles &Delta;-Machine Learning Potentials for High-Definition Color-Center Spectroscopy</b>
 </p>
 
 <p align="center">
@@ -25,8 +25,12 @@ Universal machine learning potentials (e.g., `nep89`) provide broad lattice stab
 
 **HyDePh** (*"Hi-Def"*: **Hy**brid **De**fect **Ph**otoluminescence) bridges this gap by automatically training a localized $\Delta$-Neuroevolution Potential ($\Delta$-NEP) on top of universal foundation models:
 
-$$V_{\mathrm{hybrid}}(\mathbf{R}) = V_{\mathrm{foundation}}(\mathbf{R}) + \Delta V_{\mathrm{NEP}}(\mathbf{R})$$
-$$\mathbf{F}_{\mathrm{hybrid}}(\mathbf{R}) = \mathbf{F}_{\mathrm{foundation}}(\mathbf{R}) + \Delta \mathbf{F}_{\mathrm{NEP}}(\mathbf{R})$$
+$$
+\begin{aligned}
+V_{\mathrm{hybrid}}(\mathbf{R}) &= V_{\mathrm{foundation}}(\mathbf{R}) + \Delta V_{\mathrm{NEP}}(\mathbf{R}) \\
+\mathbf{F}_{\mathrm{hybrid}}(\mathbf{R}) &= \mathbf{F}_{\mathrm{foundation}}(\mathbf{R}) + \Delta \mathbf{F}_{\mathrm{NEP}}(\mathbf{R})
+\end{aligned}
+$$
 
 From a minimal set of user inputs, **HyDePh** executes:
 1. **Automated Defect Embedding**: Tiling pristine bulk unit cells around a pre-made defect unit cell with automatic defect-site coordinate detection.
@@ -35,6 +39,14 @@ From a minimal set of user inputs, **HyDePh** executes:
 4. **GPU-Accelerated $\Delta$-NEP Training**: Fitting the compact delta potential in GPUMD in seconds.
 5. **High-Definition Lineshapes**: Computing Huang-Rhys factors $S$, electron-phonon spectral densities $S(\hbar\omega)$, and multi-temperature optical emission spectra $A(E - E_{\mathrm{ZPL}}, T)$ using both **quantum generating functions** and **finite-temperature anharmonic molecular dynamics free energy sampling**.
 6. **Native Cross-Platform Support (v0.2.0)**: Seamless execution across **Linux** and **Windows**, with automatic Microsoft MPI / OpenMPI negotiation and native Windows Quantum ESPRESSO binaries from [QMatSuite](https://github.com/QMatSuite/quantum-espresso-windows-exe).
+
+---
+
+## 📖 Theory & Literature Walkthrough
+
+For a comprehensive breakdown of the physics, mathematical formulation, and article citations justifying each stage (defect supercell embedding, $\Delta$-learning, 4-phase active sampling, $\Delta$SCF excited states, quantum generating functions, and finite-temperature anharmonic MD), please read our:
+
+👉 **[Theoretical Walkthrough & Article Justifications](docs/THEORY_WALKTHROUGH.md)**
 
 ---
 
@@ -49,9 +61,9 @@ pip install -e .
 ```
 
 Prerequisites:
-- [GPUMD / NEP](https://github.com/brucefan992/GPUMD) (`gpumd` and `nep` / `nep.exe` binaries)
+- [GPUMD / NEP](https://github.com/brucefan992/GPUMD) (`gpumd` and `nep` / `nep.exe` executables)
 - [Quantum ESPRESSO](https://www.quantum-espresso.org/):
-  - **Linux**: `pw.x` on `$PATH` or in `/usr/local/bin/pw.x`.
+  - **Linux**: `pw.x` executable on system `PATH` or in `/usr/local/bin/pw.x`.
   - **Windows**: `pw.exe` from [QMatSuite/quantum-espresso-windows-exe](https://github.com/QMatSuite/quantum-espresso-windows-exe) with Microsoft MPI.
 - NVIDIA GPU with CUDA support (or CPU fallback for foundation evaluation)
 
@@ -268,6 +280,8 @@ hydeph/
 ├── lineshape.py          # Harmonic generating function & anharmonic MD engine
 ├── pipeline.py           # Turnkey pipeline orchestrator
 └── run_licl_fcenter.py   # Complete runnable benchmark driver for LiCl F-center
+docs/
+└── THEORY_WALKTHROUGH.md # Theoretical physics walkthrough & article citations
 scripts/
 └── make_github_diagram.py # Generates the 2-panel publication benchmark diagram
 assets/
