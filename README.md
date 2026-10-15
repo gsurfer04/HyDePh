@@ -1,7 +1,7 @@
 # HyDePh: High-Definition Hybrid Defect Photoluminescence
 
 <p align="center">
-  <img src="assets/licl_anharmonic_benchmark.png" width="96%" alt="HyDePh LiCl Benchmark Banner">
+  <img src="assets/hydeph_stiff_vs_soft_benchmark.png" width="96%" alt="HyDePh Stiff vs Soft Benchmark Banner">
 </p>
 
 <p align="center">
@@ -37,8 +37,8 @@ From a minimal set of user inputs, **HyDePh** executes:
 2. **4-Phase Representative Sampling**: Generating diverse candidate configurations spanning the Franck-Condon coordinate, defect-core rattling, and high-temperature foundation MD with Farthest Point Sampling (FPS).
 3. **High-Throughput DFT Labeling**: Automating Quantum ESPRESSO (`pw.x` / `pw.exe`) calculations with MPI + GPU acceleration, live SCF iteration streaming, and disk-level caching.
 4. **GPU-Accelerated $\Delta$-NEP Training**: Fitting the compact delta potential in GPUMD in seconds.
-5. **High-Definition Lineshapes**: Computing Huang-Rhys factors $S$, electron-phonon spectral densities $S(\hbar\omega)$, and multi-temperature optical emission spectra $A(E - E_{\mathrm{ZPL}}, T)$ using both **quantum generating functions** and **finite-temperature anharmonic molecular dynamics free energy sampling**.
-6. **Native Cross-Platform Support (v0.2.0)**: Seamless execution across **Linux** and **Windows**, with automatic Microsoft MPI / OpenMPI negotiation and native Windows Quantum ESPRESSO binaries from [QMatSuite](https://github.com/QMatSuite/quantum-espresso-windows-exe).
+5. **High-Definition Multi-Regime Lineshapes**: Computing Huang-Rhys factors $S$, electron-phonon spectral densities $S(\hbar\omega)$, and multi-temperature optical emission spectra $A(E - E_{\mathrm{ZPL}}, T)$ using **mass-weighted optical projection ($\mathbf{u}_{\mathrm{opt}}$)** and **dual coupling regimes**: quantum generating functions for stiff crystals ($S < 10$) to resolve discrete zero-phonon lines and vibronic sidebands, and semiclassical Marcus convolution for strongly-coupled soft crystals ($S \ge 10$).
+6. **Native Cross-Platform Support & Smart Resumption (v0.3.0)**: Seamless execution across **Linux** and **Windows**, with automatic Microsoft MPI / OpenMPI negotiation, native Windows Quantum ESPRESSO binaries from [QMatSuite](https://github.com/QMatSuite/quantum-espresso-windows-exe), and intelligent resumption of interrupted runs with candidate frame preservation and type-balanced DFT budget allocation.
 
 ---
 
@@ -176,9 +176,9 @@ summary = run_pipeline(config)
 
 ---
 
-## 🪟 Windows Support & MPI Execution (v0.2.0)
+## 🪟 Windows Support & MPI Execution (v0.3.0)
 
-Starting with **v0.2.0**, **HyDePh** provides full first-class support for **Windows** without requiring WSL, MinGW, or Cygwin emulation.
+Starting with **v0.2.0** and expanded in **v0.3.0**, **HyDePh** provides full first-class support for **Windows** without requiring WSL, MinGW, or Cygwin emulation.
 
 ### 1. Quantum ESPRESSO on Windows ([QMatSuite](https://github.com/QMatSuite/quantum-espresso-windows-exe))
 
@@ -192,7 +192,7 @@ Quantum ESPRESSO native Windows binaries are maintained and distributed by the *
 
 Running parallel DFT calculations differs significantly between POSIX (Linux) and Windows environments:
 
-| Feature | Linux (OpenMPI / MPICH) | Windows (Microsoft MPI / QMatSuite) | HyDePh v0.2.0 Handling |
+| Feature | Linux (OpenMPI / MPICH) | Windows (Microsoft MPI / QMatSuite) | HyDePh v0.3.0 Handling |
 |---|---|---|---|
 | **MPI Launcher** | `mpirun` or `mpiexec` | `mpiexec.exe` (`mpirun` does not exist in MS-MPI) | Auto-detects `mpiexec` on Windows (via `PATH`, `%MSMPI_BIN%`, or Anaconda) and `mpirun` on Linux. |
 | **Process Count Flag** | `-np <N>` (or `-n`) | `-n <N>` | Selects `-n` on Windows and `-np` on Linux. |
@@ -255,15 +255,22 @@ flowchart TD
 
 ---
 
-## 📊 Benchmark: F-Center in Lithium Chloride (LiCl)
+## 📊 Multi-System Benchmark Suite (v0.3.0)
 
-HyDePh was benchmarked against the seminal experimental photoluminescence study by **Ken Takiyama** (*Journal of the Physical Society of Japan*, **44**, 1627–1634, 1978).
+**HyDePh v0.3.0** has been systematically benchmarked across four distinct crystal host classes, demonstrating why **quantum generating functions are required for stiff crystals** and **finite-temperature anharmonic MD is required for soft crystals**:
+
+| System | Crystal Class | Debye Temp $\Theta_D$ | Huang-Rhys $S$ | Coupling Regime | Key Physical Result |
+|---|---|---|---|---|---|
+| **Diamond $\mathrm{NV}^-$** | Covalent | $\sim 2200\ \mathrm{K}$ | $3.166$ | **Quantum** ($S < 10$) | Sharp ZPL at $0\ \mathrm{meV}$ ($\mathrm{DWF} = 4.22\%$), discrete vibronic sidebands at $-65, -135, -205\ \mathrm{meV}$. Classical MD equipartition dome washed out sidebands. |
+| **4H-SiC $kk$-VV$^0$** | Polar Covalent | $\sim 1200\ \mathrm{K}$ | $4.766$ | **Quantum** ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 0.85\%$) & quasi-local modes at $-38, -76\ \mathrm{meV}$. Optical projection $\mathbf{u}_{\mathrm{opt}}$ cleanly removes bulk non-coupling $90\text{--}115\ \mathrm{meV}$ phonon artifacts. |
+| **LiCl F-Center** | Ionic (Rocksalt) | $\sim 420\ \mathrm{K}$ | $3.999$ | **Quantum** ($S < 10$) | Captures $3.4\times$ bandwidth expansion ($265\ \mathrm{meV}$) and mode softening ($27.8 \to 19.8\ \mathrm{meV}$) matching Takiyama 1978 exp ($19.7\ \mathrm{meV}$). Harmonic theory is $5.9\times$ too narrow ($78\ \mathrm{meV}$). |
+| **LiF F-Center** | Ionic (Fluorite) | $\sim 730\ \mathrm{K}$ | $23.930$ | **Semiclassical Marcus** ($S \ge 10$) | Massive structural displacement ($\Delta Q = 2.39\ \mathrm{amu}^{1/2}\text{Å}$) suppresses ZPL to zero. Semiclassical Marcus convolution reproduces the broad Gaussian band ($\mathrm{FWHM} = 490\ \mathrm{meV}$ at $10\ \mathrm{K}$, $1101\ \mathrm{meV}$ at $300\ \mathrm{K}$). |
 
 <p align="center">
   <img src="assets/licl_anharmonic_benchmark.png" width="96%" alt="LiCl F-center Anharmonic Benchmark">
 </p>
 
-### Spectroscopic Highlights:
+### Spectroscopic Highlights (LiCl F-Center vs. Takiyama 1978):
 
 | Metric | Harmonic Theory | HyDePh Anharmonic MD | Takiyama (1978) Exp. | Physical Impact of HyDePh Anharmonicity |
 |---|---|---|---|---|
@@ -272,31 +279,38 @@ HyDePh was benchmarked against the seminal experimental photoluminescence study 
 | **Room Temperature ($300\ \text{K}$)** | $0.15\ \text{eV}$ | **$0.28\ \text{eV}$ ($284\ \text{meV}$)** | Thermally quenched | Reproduces broad, smooth Gaussian luminescence band |
 | **Computational Walltime** | — | **$17\ \text{s}$ / temperature** | — | $31\times$ calculator speedup allows complete 4-T MD sampling in $<70\ \text{seconds}$ |
 
-- **Panel (a) — Phonon Softening**: The defect-core velocity autocorrelation function (VACF) captures thermal mode softening from the zero-temperature optical peak ($27.8\ \text{meV}$) directly toward the experimental coupling resonance ($\hbar\omega_e = 19.7\ \text{meV}$).
-- **Panel (b) — Bandwidth Enhancement**: While standard harmonic displaced oscillator theory severely underestimates the $77\ \text{K}$ bandwidth ($0.08\ \text{eV}$ vs. $0.46\ \text{eV}$), HyDePh finite-temperature Langevin dynamics expands the theoretical lineshape by **$3.4\times$ to $0.27\ \text{eV}$**, resolving the primary limitation of harmonic models in soft crystal hosts.
-
 ---
 
 ## 📁 Repository Structure
 
 ```
 hydeph/
-├── __init__.py           # Package API and exports
-├── config.py             # ToolkitConfig dataclass and validation
-├── defect_builder.py     # Supercell embedding & defect coordinate locator
-├── frame_sampler.py      # 4-Phase representative frame sampler (FC, rattle, MD+FPS)
-├── qe_runner.py          # Quantum ESPRESSO pw.x runner with streaming & cache
-├── delta_trainer.py      # Foundation subtraction & GPU GPUMD Delta-NEP trainer
-├── calculator.py         # 31x optimized HybridDefectCalculator (V_base + Delta_V)
-├── lineshape.py          # Harmonic generating function & anharmonic MD engine
-├── pipeline.py           # Turnkey pipeline orchestrator
-└── run_licl_fcenter.py   # Complete runnable benchmark driver for LiCl F-center
+├── __init__.py                  # Package API and exports (v0.3.0)
+├── config.py                    # ToolkitConfig dataclass and validation
+├── defect_builder.py            # Supercell embedding & defect coordinate locator
+├── frame_sampler.py             # 4-Phase representative frame sampler (FC, rattle, MD+FPS)
+├── qe_runner.py                 # Quantum ESPRESSO pw.x runner with streaming & cache
+├── delta_trainer.py             # Foundation subtraction & GPU GPUMD Delta-NEP trainer
+├── calculator.py                # 31x optimized HybridDefectCalculator (V_base + Delta_V)
+├── lineshape.py                 # Optical-projected quantum generating function & MD engine
+├── pipeline.py                  # Turnkey pipeline orchestrator
+└── run_licl_fcenter.py          # Complete runnable benchmark driver for LiCl F-center
 docs/
-└── THEORY_WALKTHROUGH.md # Theoretical physics walkthrough & article citations
+└── THEORY_WALKTHROUGH.md        # Comprehensive theoretical physics walkthrough & citations
 scripts/
-└── make_github_diagram.py # Generates the 2-panel publication benchmark diagram
+├── make_github_diagram.py       # Generates LiCl F-center publication benchmark diagram
+└── make_stiff_vs_soft_diagram.py # Generates stiff vs. soft comparison benchmark diagram
 assets/
-└── licl_anharmonic_benchmark.png # High-contrast benchmark figure
+├── hydeph_stiff_vs_soft_benchmark.png # Stiff vs. soft host benchmark comparison banner
+├── licl_anharmonic_benchmark.png      # LiCl F-center 2-panel publication diagram
+├── diamond_nv_10K.png                 # Diamond NV- lineshape & VDOS at 10 K
+├── diamond_nv_multiT.png              # Diamond NV- lineshapes across temperatures
+├── sic_4h_kk_10K.png                  # 4H-SiC kk-divacancy lineshape & VDOS at 10 K
+├── sic_4h_kk_multiT.png               # 4H-SiC kk-divacancy lineshapes across temperatures
+├── licl_10K.png                       # LiCl F-center lineshape & VDOS at 10 K
+├── licl_multiT.png                    # LiCl F-center lineshapes across temperatures
+├── lif_10K.png                        # LiF F-center lineshape & VDOS at 10 K
+└── lif_multiT.png                     # LiF F-center lineshapes across temperatures
 ```
 
 ---
@@ -304,3 +318,4 @@ assets/
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
+
