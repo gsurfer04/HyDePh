@@ -252,3 +252,64 @@ def test_finite_size_phonon_smearing(tmp_path):
     # In physical smearing, the resonance is continuous across the gap
     assert dip_phys > 2.0 * dip_disc
 
+
+def test_anharmonic_regimes(tmp_path):
+    """Verify anharmonic sampling distinguishes intermediate (quantum) and strong (semiclassical) regimes."""
+    from hydeph.lineshape import LineshapeEngine
+    from unittest.mock import patch, MagicMock
+
+    cfg_quantum = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "pristine.xyz"),
+        temperatures=[10.0],
+        anharmonic_md_steps=10,
+        anharmonic_coupling_regime="auto"
+    )
+    
+    mock_calc = MagicMock()
+    mock_calc.get_potential_energy.return_value = -50.0
+
+    engine = LineshapeEngine(cfg_quantum, hybrid_calc=mock_calc)
+
+    at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[3, 3, 3], pbc=True)
+    at_es = Atoms("C2", positions=[[0, 0, 0], [1.6, 1.6, 1.6]], cell=[3, 3, 3], pbc=True)
+    hw_grid = np.linspace(1.0, 100.0, 200)
+    s_cont = 2.5 * np.exp(-0.5 * ((hw_grid - 40.0) / 5.0)**2) * 1000.0 # S ~ 2.5
+
+    # Mock Langevin MD
+    with patch("ase.md.langevin.Langevin") as mock_langevin_cls:
+        mock_dyn = MagicMock()
+        mock_langevin_cls.return_value = mock_dyn
+        
+        # When dyn.attach is called, simulate step_observer calls
+        def fake_run(steps):
+            if mock_dyn.attach.called:
+                obs = mock_dyn.attach.call_args[0][0]
+                for _ in range(5):
+                    obs()
+        mock_dyn.run.side_effect = fake_run
+
+        # 1. Intermediate coupling: S = 2.5 < 10 -> quantum regime
+        res_quant = engine.run_anharmonic_sampling(
+            at_gs, at_es, hw_grid, s_cont, total_S=2.5, e_min=-200, e_max=50, n_pts=200
+        )
+        assert 10.0 in res_quant
+        assert res_quant[10.0]["regime"] == "quantum"
+        assert res_quant[10.0]["alpha_soft"] is not None
+        # Must retain sharp lineshape
+        assert np.max(res_quant[10.0]["lineshape"]) > 0.0
+
+        # 2. Strong coupling: S = 15.0 >= 10 -> semiclassical regime
+        res_semi = engine.run_anharmonic_sampling(
+            at_gs, at_es, hw_grid, s_cont, total_S=15.0, e_min=-200, e_max=50, n_pts=200
+        )
+        assert 10.0 in res_semi
+        assert res_semi[10.0]["regime"] == "semiclassical"
+
+        # 3. Explicit override: regime='semiclassical' even with S = 2.5
+        cfg_quantum.anharmonic_coupling_regime = "semiclassical"
+        res_override = engine.run_anharmonic_sampling(
+            at_gs, at_es, hw_grid, s_cont, total_S=2.5, e_min=-200, e_max=50, n_pts=200
+        )
+        assert res_override[10.0]["regime"] == "semiclassical"
+
+

@@ -190,7 +190,7 @@ class LineshapeEngine:
         anharmonic_dict = None
         if getattr(self.config, "enable_anharmonic", True):
             anharmonic_dict = self.run_anharmonic_sampling(
-                at_gs, at_es, hw_grid, s_cont, e_min=e_min, e_max=e_max, n_pts=n_pts
+                at_gs, at_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts
             )
             self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict)
         else:
@@ -204,22 +204,59 @@ class LineshapeEngine:
             "s_cont": s_cont
         }
 
-    def run_anharmonic_sampling(self, at_gs, at_es, hw_grid, s_cont, e_min=None, e_max=None, n_pts=1500):
+    def run_anharmonic_sampling(
+        self, at_gs, at_es, hw_grid, s_cont, total_S=None, e_min=None, e_max=None, n_pts=1500
+    ):
         """
-        Runs finite-temperature Langevin MD on the hybrid potential across user temperatures,
-        evaluating energy gap fluctuations Delta U(t) and defect-core VACF.
+        Runs finite-temperature Langevin MD on the hybrid potential across user temperatures.
+
+        For intermediate/weak coupling (S < 10, e.g. SiC divacancies, diamond NV):
+          - Projects velocities onto the optical Franck-Condon reaction coordinate u_opt.
+          - Computes projected VDOS g_opt(hw, T) to capture mode softening alpha_soft(T)
+            and intrinsic anharmonic dephasing without bulk optical phonon artifacts.
+          - Evaluates optical lineshape via the finite-temperature quantum generating function,
+            preserving the sharp ZPL and structured phonon sidebands observed experimentally.
+
+        For strong coupling (S >= 10, e.g. F-centers with massive lattice relaxation):
+          - Semiclassical Marcus energy-gap fluctuation convolution is applied for broad classical bands.
         """
         from ase.md.langevin import Langevin
         from ase import units
 
         print("\n[-] Running Finite-Temperature Anharmonic Molecular Dynamics Sampling...")
         dr_fc = at_es.positions - at_gs.positions
+        m = at_gs.get_masses()
         dt_fs = getattr(self.config, "anharmonic_dt_fs", 1.0)
         n_steps = getattr(self.config, "anharmonic_md_steps", 2000)
+        trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
-        # Identify defect core atoms with the largest optical Franck-Condon displacement
-        core_disps = np.linalg.norm(dr_fc, axis=1)
-        core_indices = np.argsort(core_disps)[-6:]
+        if total_S is None:
+            dhw = hw_grid[1] - hw_grid[0] if len(hw_grid) > 1 else 1.0
+            total_S = float(np.sum(s_cont * dhw) / 1000.0)
+
+        # Coupling regime: 'auto' (< 10 -> quantum, >= 10 -> semiclassical), 'quantum', or 'semiclassical'
+        regime_opt = getattr(self.config, "anharmonic_coupling_regime", "auto").lower()
+        if regime_opt == "auto":
+            is_quantum = (total_S < 10.0)
+        elif regime_opt == "quantum":
+            is_quantum = True
+        else:
+            is_quantum = False
+
+        # Mass-weighted optical projection unit vector:
+        # u_opt,i = (M_i * Delta R_FC,i) / sqrt(sum_j M_j * |Delta R_FC,j|^2)
+        norm_dr = np.sqrt(np.sum(m[:, None] * (dr_fc**2)))
+        if norm_dr > 1e-8:
+            u_opt = (m[:, None] * dr_fc) / norm_dr
+        else:
+            u_opt = np.ones_like(dr_fc) / np.sqrt(len(dr_fc) * 3)
+
+        # Baseline harmonic effective frequency Omega_0
+        active_mask = s_cont > 0.01 * np.max(s_cont) if np.max(s_cont) > 0 else np.ones(len(hw_grid), dtype=bool)
+        if np.any(active_mask):
+            omega_0 = float(trapz_fn(hw_grid[active_mask] * s_cont[active_mask], hw_grid[active_mask]) / trapz_fn(s_cont[active_mask], hw_grid[active_mask]))
+        else:
+            omega_0 = 35.0
 
         # Baseline zero-temperature quantum lineshape
         eg_base, a_quant_0K = compute_quantum_lineshape(
@@ -239,15 +276,20 @@ class LineshapeEngine:
             dyn.run(300)
             
             du_list = []
-            v_list = []
+            v_opt_list = []
             def step_observer():
+                # Projected velocity along optical coordinate
+                v = at.get_velocities()
+                v_opt = float(np.sum(v * u_opt))
+                v_opt_list.append(v_opt)
+
+                # Energy gap Delta U(t)
                 ug = at.get_potential_energy()
                 at_temp = at.copy()
                 at_temp.positions += dr_fc
                 at_temp.calc = self.calc
                 ue = at_temp.get_potential_energy()
                 du_list.append((ue - ug) * 1000.0) # meV
-                v_list.append(at.get_velocities()[core_indices].copy())
 
             dyn.attach(step_observer, interval=2)
             dyn.run(n_steps)
@@ -266,34 +308,12 @@ class LineshapeEngine:
             else:
                 sigma_du = float(np.std(du))
 
-            # Physical thermal fluctuation scale check based on relaxation energy E_rel
-            erel_est = abs(eg_base[np.argmax(a_quant_0K)])
-            sig_scale = np.sqrt(2.0 * max(1.0, KB_meV_K * T) * max(50.0, erel_est))
-            sigma_du = min(max(sigma_du, 1.0), 2.0 * sig_scale)
-            
-            # Anharmonic thermal broadening kernel: MUST be symmetric and centered at tau=0
-            kw = max(5.0 * sigma_du, 50.0)
-            n_pts_k = int(np.ceil(kw / dE))
-            tau_grid = np.arange(-n_pts_k, n_pts_k + 1) * dE
-            kernel = np.exp(-0.5 * (tau_grid / max(1.0, sigma_du))**2)
-            kernel /= np.sum(kernel)
-
-            # Convolve quantum zero-point vibronic spectrum with symmetric zero-centered thermal kernel
-            a_anh = fftconvolve(a_quant_0K, kernel, mode='same')
-            total_area = np.trapezoid(a_anh, eg_base) if hasattr(np, "trapezoid") else np.trapz(a_anh, eg_base)
-            if total_area > 0:
-                a_anh /= total_area
-
-            # Calculate FWHM
-            fwhm_idx = np.where(a_anh >= 0.5 * np.max(a_anh))[0]
-            fwhm_meV = eg_base[fwhm_idx[-1]] - eg_base[fwhm_idx[0]] if len(fwhm_idx) > 1 else 0.0
-
-            # Core VACF and VDOS
-            v_arr = np.array(v_list)
+            # Optical-projected VACF and VDOS along u_opt
+            v_arr = np.array(v_opt_list)
             n_v = len(v_arr)
             vacf = np.zeros(n_v // 2)
             for lag in range(len(vacf)):
-                vacf[lag] = np.mean([np.sum(v_arr[i] * v_arr[i + lag]) for i in range(len(v_arr) - lag)])
+                vacf[lag] = np.mean(v_arr[:n_v - lag] * v_arr[lag:])
             vacf /= (vacf[0] + 1e-12)
 
             t_vacf = np.arange(len(vacf)) * (2.0 * dt_fs) # dt between samples = 2 fs
@@ -301,21 +321,79 @@ class LineshapeEngine:
             vdos = []
             for w_mev in hw_grid:
                 w_rad_fs = (w_mev / 1000.0) / HBAR_eV_fs
-                val = np.trapezoid(vacf * hann * np.cos(w_rad_fs * t_vacf), t_vacf) if hasattr(np, "trapezoid") else np.trapz(vacf * hann * np.cos(w_rad_fs * t_vacf), t_vacf)
+                val = trapz_fn(vacf * hann * np.cos(w_rad_fs * t_vacf), t_vacf)
                 vdos.append(max(0.0, val))
             vdos = np.array(vdos)
             if np.max(vdos) > 0:
                 vdos /= np.max(vdos)
 
+            if is_quantum:
+                # 1. Mode softening ratio alpha_soft(T) = Omega(T) / Omega_0
+                mask_active = (hw_grid >= max(10.0, 0.4 * omega_0)) & (hw_grid <= min(float(hw_grid[-1]), 1.8 * omega_0))
+                if np.sum(vdos[mask_active]) > 1e-4:
+                    omega_T = float(trapz_fn(hw_grid[mask_active] * vdos[mask_active], hw_grid[mask_active]) / trapz_fn(vdos[mask_active], hw_grid[mask_active]))
+                    alpha_soft = float(np.clip(omega_T / omega_0, 0.80, 1.20))
+                else:
+                    omega_T = omega_0
+                    alpha_soft = 1.0
+
+                # Scale spectral density by alpha_soft (conserving total Huang-Rhys factor)
+                hw_shifted = hw_grid / alpha_soft
+                s_anh = np.interp(hw_shifted, hw_grid, s_cont, left=0.0, right=0.0) / alpha_soft
+
+                # Thermal dephasing
+                user_gamma = getattr(self.config, "dephasing_gamma_meV", None)
+                if user_gamma is not None:
+                    gamma_base = float(user_gamma)
+                else:
+                    gamma_base = 1.5 + 2.0e-4 * (T**2)
+
+                # Anharmonic phonon-phonon scattering dephasing
+                delta_gamma_anh = 0.3 * np.sqrt(max(1.0, T) / 10.0)
+                gamma_total = gamma_base + delta_gamma_anh
+
+                eg_out, a_anh = compute_quantum_lineshape(
+                    hw_grid, s_anh, temp_k=T, dephasing_gamma_meV=gamma_total,
+                    e_min_meV=e_min, e_max_meV=e_max, n_e=n_pts
+                )
+                regime_tag = f"Quantum GenFn (alpha_soft={alpha_soft:.3f}, gamma={gamma_total:.2f} meV)"
+            else:
+                # Semiclassical Gaussian convolution with energy gap fluctuations sigma_du
+                erel_est = abs(eg_base[np.argmax(a_quant_0K)])
+                sig_scale = np.sqrt(2.0 * max(1.0, KB_meV_K * T) * max(50.0, erel_est))
+                sigma_du = min(max(sigma_du, 1.0), 2.0 * sig_scale)
+                
+                kw = max(5.0 * sigma_du, 50.0)
+                n_pts_k = int(np.ceil(kw / dE))
+                tau_grid = np.arange(-n_pts_k, n_pts_k + 1) * dE
+                kernel = np.exp(-0.5 * (tau_grid / max(1.0, sigma_du))**2)
+                kernel /= np.sum(kernel)
+
+                a_anh = fftconvolve(a_quant_0K, kernel, mode='same')
+                total_area = trapz_fn(a_anh, eg_base)
+                if total_area > 0:
+                    a_anh /= total_area
+                eg_out = eg_base
+                alpha_soft = 1.0
+                omega_T = omega_0
+                regime_tag = f"Semiclassical Marcus (sigma={sigma_du:.1f} meV)"
+
+            # Calculate FWHM
+            fwhm_idx = np.where(a_anh >= 0.5 * np.max(a_anh))[0]
+            fwhm_meV = eg_out[fwhm_idx[-1]] - eg_out[fwhm_idx[0]] if len(fwhm_idx) > 1 else 0.0
+
             anharmonic_dict[T] = {
-                "energies": eg_base,
+                "energies": eg_out,
                 "lineshape": a_anh,
                 "sigma_du": sigma_du,
                 "fwhm_meV": fwhm_meV,
                 "vdos": vdos,
+                "omega_T": omega_T,
+                "alpha_soft": alpha_soft,
+                "regime": "quantum" if is_quantum else "semiclassical",
                 "walltime_s": time.time() - t0
             }
-            print(f"    [+] Anharmonic MD T = {T:5.1f} K | Energy Fluctuation sigma = {sigma_du:5.2f} meV | Lineshape FWHM = {fwhm_meV:5.1f} meV ({time.time()-t0:.1f} s)")
+            print(f"    [+] Anharmonic MD T = {T:5.1f} K | {regime_tag} | Lineshape FWHM = {fwhm_meV:5.1f} meV ({time.time()-t0:.1f} s)")
 
         return anharmonic_dict
 

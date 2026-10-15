@@ -97,6 +97,7 @@ class ToolkitConfig:
     enable_anharmonic: bool = True
     anharmonic_md_steps: int = 2500 # MD steps per temperature for thermal sampling
     anharmonic_dt_fs: float = 1.0   # Timestep in fs
+    anharmonic_coupling_regime: str = "auto" # "auto" (<10 quantum generating function, >=10 semiclassical), "quantum", or "semiclassical"
     
     # Output workspace and figure naming
     workspace_dir: str = "./hydeph_run"
@@ -171,6 +172,12 @@ class ToolkitConfig:
             raise ValueError(
                 f"Invalid dft_resume_mode: '{self.dft_resume_mode}'. "
                 "Must be 'target_total' or 'max_new'."
+            )
+
+        if self.anharmonic_coupling_regime.lower() not in ("auto", "quantum", "semiclassical"):
+            raise ValueError(
+                f"Invalid anharmonic_coupling_regime: '{self.anharmonic_coupling_regime}'. "
+                "Must be 'auto', 'quantum', or 'semiclassical'."
             )
 
         os.makedirs(self.workspace_dir, exist_ok=True)
