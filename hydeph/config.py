@@ -122,6 +122,14 @@ class ToolkitConfig:
     finite_size_acoustic_cutoff: bool = True # Enforces physical acoustic scaling S(hw) -> 0 as hw -> 0
     lineshape_n_points: int = 1500
 
+    # 1D Configuration Coordinate & Stokes Shift parameters
+    plot_configuration_coordinate: bool = True # Automatically evaluate and plot 1D CC curve and Stokes shifts
+    zpl_energy_eV: Optional[float] = None      # Zero-Phonon Line energy (eV), e.g. 1.945 for diamond NV-
+    cc_figure_name: str = "configuration_coordinate.png"
+    cc_lambda_min: float = -0.30              # Minimum lambda along linear optical path
+    cc_lambda_max: float = 1.30               # Maximum lambda along linear optical path
+    cc_n_points: int = 81                     # Number of points along CC path
+
     def validate(self):
         """Validate input existence and parameters."""
         if not os.path.isfile(self.pristine_cell_path):

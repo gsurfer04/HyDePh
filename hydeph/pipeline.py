@@ -108,6 +108,9 @@ def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: 
     print(f"      WORKFLOW COMPLETE (Total Walltime: {total_time:.1f} s / {total_time/60.0:.2f} min)")
     print("=" * 78)
 
+    cc_analysis = lineshapes.get("cc_analysis") if isinstance(lineshapes, dict) else None
+    cc_figure = cc_analysis.get("figure_path") if cc_analysis else None
+
     summary = {
         "workspace_dir": config.workspace_dir,
         "delta_potential": delta_pot_path,
@@ -115,6 +118,8 @@ def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: 
         "dq_fc": dq_fc,
         "temperatures": config.temperatures,
         "total_walltime_s": total_time,
-        "lineshapes": lineshapes
+        "lineshapes": lineshapes,
+        "stokes_analysis": cc_analysis,
+        "cc_figure": cc_figure,
     }
     return summary

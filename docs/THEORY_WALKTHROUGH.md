@@ -67,6 +67,13 @@ flowchart TD
         SoftGen --> FinalPL["High-Definition Lineshapes"]
         MarcusConv --> FinalPL
     end
+
+    subgraph S6["Stage 9: 1D Configuration Coordinate & Stokes Shift"]
+        Calc --> CCScan["Linear Optical Path R(lambda) & Q = lambda Delta Q"]
+        CCScan --> PES["Potential Surfaces E_GS(Q) & E_ES(Q)"]
+        PES --> Stokes["Stokes Shift Delta E_Stokes, E_abs, E_em, hbar Omega, S_1D"]
+        Stokes --> CCDiag["2-Panel CC Diagram & Optical Spectra"]
+    end
 ```
 
 ---
@@ -489,6 +496,101 @@ For an optical mode at $20\ \text{meV}$, this corresponds to an unmeasurable shi
 
 ---
 
+### Stage 9: 1D Configuration Coordinate Diagrams & Stokes Shift Analysis (v0.3.1)
+
+#### 1. Theory & Mathematical Formulation
+While full dynamical lineshape calculations evaluate electron-phonon coupling across all $3N$ vibrational normal modes or thermal trajectories, the **one-dimensional Configuration Coordinate (CC) model** remains the foundational framework in defect optical spectroscopy [5, 6, 8, 32]. It projects the high-dimensional nuclear configuration space onto a single collective optical reaction coordinate connecting the relaxed ground state $\mathbf{R}_{\mathrm{GS}}$ and the relaxed excited state $\mathbf{R}_{\mathrm{ES}}$:
+
+$$
+\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda (\mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}}), \quad \lambda \in [\lambda_{\min}, \lambda_{\max}]
+$$
+
+The physical, mass-weighted configuration coordinate $Q$ is:
+
+$$
+Q = \lambda \Delta Q
+$$
+
+where $\Delta Q$ is the total mass-weighted structural displacement:
+
+$$
+\Delta Q = \sqrt{\sum_{i=1}^N M_i |\mathbf{R}_{\mathrm{ES}, i} - \mathbf{R}_{\mathrm{GS}, i}|^2} \quad (\text{amu}^{1/2}\text{Å})
+$$
+
+##### Potential Energy Surfaces $E_{\mathrm{GS}}(Q)$ and $E_{\mathrm{ES}}(Q)$
+Along the coordinate path $\mathbf{R}(\lambda)$, HyDePh evaluates the potential energy of the supercell using the trained hybrid defect potential $V_{\mathrm{hybrid}}(\mathbf{R})$:
+
+$$
+E_{\mathrm{GS}}(\lambda) = V_{\mathrm{hybrid}}(\mathbf{R}(\lambda)) - V_{\mathrm{hybrid}}(\mathbf{R}_{\mathrm{GS}})
+$$
+
+By definition, $E_{\mathrm{GS}}(0) = 0$. At $\lambda = 1$ ($Q = \Delta Q$, the excited-state nuclear geometry), the ground-state potential energy defines the **ground-state Franck-Condon relaxation energy** (or luminescence relaxation energy):
+
+$$
+\Delta E_{\mathrm{rel,GS}} = V_{\mathrm{hybrid}}(\mathbf{R}_{\mathrm{ES}}) - V_{\mathrm{hybrid}}(\mathbf{R}_{\mathrm{GS}}) = E_{\mathrm{GS}}(\lambda = 1)
+$$
+
+In the canonical equal-curvature Franck-Condon model [5, 6, 24], the excited-state potential energy surface has its minimum at $Q = \Delta Q$ at the Zero-Phonon Line (ZPL) energy $E_{\mathrm{ZPL}}$:
+
+$$
+E_{\mathrm{ES}}(Q) = E_{\mathrm{ZPL}} + \frac{1}{2} K_{\mathrm{ES}} (Q - \Delta Q)^2 = E_{\mathrm{ZPL}} + \Delta E_{\mathrm{rel,ES}} (1 - \lambda)^2
+$$
+
+where the excited-state relaxation energy satisfies $\Delta E_{\mathrm{rel,ES}} = \Delta E_{\mathrm{rel,GS}}$.
+
+##### Vertical Optical Transitions & Stokes Shift
+Under the Franck-Condon principle, electronic transitions occur vertically on time scales ($\sim 10^{-15}\ \text{s}$) much faster than nuclear motion ($\sim 10^{-13}\ \text{s}$):
+1. **Vertical Optical Absorption ($E_{\mathrm{abs}}$)**:
+   Occurs from the ground-state minimum at $Q = 0$ ($\lambda = 0$):
+
+   $$
+   E_{\mathrm{abs}} = E_{\mathrm{ES}}(Q=0) - E_{\mathrm{GS}}(Q=0) = E_{\mathrm{ZPL}} + \Delta E_{\mathrm{rel,ES}}
+   $$
+
+2. **Vertical Luminescence Emission ($E_{\mathrm{em}}$)**:
+   Following non-radiative vibrational relaxation in the excited state to $Q = \Delta Q$ ($\lambda = 1$), emission occurs vertically down to the ground-state surface:
+
+   $$
+   E_{\mathrm{em}} = E_{\mathrm{ES}}(Q=\Delta Q) - E_{\mathrm{GS}}(Q=\Delta Q) = E_{\mathrm{ZPL}} - \Delta E_{\mathrm{rel,GS}}
+   $$
+
+3. **Total Stokes Shift ($\Delta E_{\mathrm{Stokes}}$)**:
+   The energy difference between the vertical absorption peak and luminescence emission peak:
+
+   $$
+   \Delta E_{\mathrm{Stokes}} = E_{\mathrm{abs}} - E_{\mathrm{em}} = \Delta E_{\mathrm{rel,ES}} + \Delta E_{\mathrm{rel,GS}} = 2 \Delta E_{\mathrm{rel,GS}}
+   $$
+
+##### Effective Phonon Frequency & 1D Huang-Rhys Factor
+From the harmonic curvature $K = \frac{2 \Delta E_{\mathrm{rel}}}{(\Delta Q)^2}$ in units of $\text{eV}/(\text{amu}\cdot\text{Å}^2)$, the effective vibrational frequency $\Omega$ is:
+
+$$
+\Omega = \sqrt{K} = \frac{\sqrt{2 \Delta E_{\mathrm{rel}}}}{\Delta Q}
+$$
+
+Using fundamental physical constants ($1\ \text{eV}/(\text{amu}\cdot\text{Å}^2) = 9.648533 \times 10^{27}\ \text{s}^{-2}$ and $\hbar = 6.58211957 \times 10^{-16}\ \text{eV}\cdot\text{s}$), the effective phonon energy $\hbar\Omega$ is derived exactly as:
+
+$$
+\hbar\Omega\ (\text{meV}) = 91.4348\ \frac{\sqrt{\Delta E_{\mathrm{rel,GS}}\ (\text{eV})}}{\Delta Q\ (\text{amu}^{1/2}\text{Å})}
+$$
+
+The corresponding one-dimensional Huang-Rhys factor $S_{\mathrm{1D}}$ represents the mean number of effective phonons emitted during the optical transition:
+
+$$
+S_{\mathrm{1D}} = \frac{\Delta E_{\mathrm{rel,GS}}}{\hbar\Omega}
+$$
+
+<p align="center">
+  <img src="../assets/diamond_nv_cc_diagram.png" width="96%" alt="HyDePh 1D Configuration Coordinate Diagram and Stokes Shift for Diamond NV-">
+</p>
+
+#### 2. Physical Justification & Literature References
+- **Alkauskas et al., *New J. Phys.* 16, 073026 (2014)** [5]: Formulated the rigorous link between 1D configuration coordinate diagrams, mass-weighted coordinates $\Delta Q$, and full 3D multi-mode lineshapes for defect centers.
+- **Jin et al., *Phys. Rev. Materials* 5, 084603 (2021)** [6]: Demonstrated that the 1D CC Stokes shift and relaxation energies provide direct experimental benchmarks for validating hybrid functional and $\Delta$SCF potential energy surfaces.
+- **A. Gali, *Nanophotonics* 12, 589 (2023)** [32]: Reviewed configuration coordinate models and Stokes shifts for solid-state quantum emitters, emphasizing the necessity of accurate ground- and excited-state curvatures for predicting single-photon emission purity and Debye-Waller factors.
+
+---
+
 ## 4. Stiff vs. Soft Crystals: Why Quantum Theory is Needed for Stiff Hosts and Anharmonic MD for Soft Hosts
 
 The dual-regime architecture in HyDePh is founded on fundamental condensed-matter physics: **the physical mechanism governing optical lineshape broadening changes qualitatively between stiff and soft crystalline hosts**.
@@ -538,6 +640,7 @@ The dual-regime architecture in HyDePh is founded on fundamental condensed-matte
 | **6. Phonon Normal Modes** | [`lineshape.py`](../hydeph/lineshape.py) | $S_k = \frac{\omega_k}{2\hbar} (\Delta Q_k)^2$<br>$S(\hbar\omega) = \sum_k S_k \delta(\hbar\omega - \hbar\omega_k)$ | Diagonalization of dynamical matrix; evaluates mode-resolved electron-phonon coupling | Huang & Rhys [24]<br>Alkauskas et al. [7]<br>Alkauskas et al. [5] |
 | **7. Generating Function** | [`lineshape.py`](../hydeph/lineshape.py) | $G(t) = \exp[g(t) - g(0)]$<br>$A(E) = \frac{1}{2\pi\hbar}\int dt e^{i\Delta E t/\hbar} G(t)$ | Multi-temperature quantum emission lineshape & Debye-Waller factor | Lax [25]<br>Kubo & Toyozawa [26]<br>Alkauskas et al. [5] |
 | **8. Anharmonic Sampling** | [`lineshape.py`](../hydeph/lineshape.py) | $\mathbf{u}_{\mathrm{opt}} = \frac{M_i \Delta \mathbf{R}_{\mathrm{FC}, i}}{\|\sqrt{M} \Delta \mathbf{R}_{\mathrm{FC}}\|}$<br>$g_{\mathrm{opt}}(\hbar\omega) \to \alpha_{\mathrm{soft}}(T) = \frac{\Omega(T)}{\Omega_0}$<br>$S_{\mathrm{anh}} = \alpha_{\mathrm{soft}}^{-1} S(\hbar\omega / \alpha_{\mathrm{soft}})$ ($S < 10$)<br>$A_{\mathrm{anh}} = A_{\mathrm{quant}} * P_{\mathrm{anh}}(\Delta U)$ ($S \ge 10$) | Optical reaction coordinate projection; eliminates host bulk phonon artifacts; thermal mode softening & dephasing; dual quantum ($S < 10$) & Marcus ($S \ge 10$) regimes | Mukamel [10]<br>Zacharias et al. [11, 12]<br>Takiyama [13]<br>Tuckerman [29]<br>Zwanzig [28] |
+| **9. 1D CC & Stokes Shift** | [`cc_diagram.py`](../hydeph/cc_diagram.py) | $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda \Delta \mathbf{R}$<br>$\Delta E_{\mathrm{Stokes}} = E_{\mathrm{abs}} - E_{\mathrm{em}} = 2 \Delta E_{\mathrm{rel}}$<br>$\hbar\Omega = 91.4348 \frac{\sqrt{\Delta E_{\mathrm{rel}}}}{\Delta Q}$ | 1D Configuration coordinate diagram; Franck-Condon relaxation energies; absorption & luminescence Stokes shifts; effective mode frequency & $S_{\mathrm{1D}}$ | Alkauskas et al. [5]<br>Jin et al. [6]<br>Gali [32] |
 
 ---
 
@@ -574,4 +677,6 @@ The dual-regime architecture in HyDePh is founded on fundamental condensed-matte
 29. **M. E. Tuckerman**, *Statistical Mechanics: Theory and Molecular Simulation*, Oxford University Press, Oxford (2010). [ISBN: 978-0198525264]
 30. **A. O. Caldeira and A. J. Leggett**, *"Path integral approach to degree of freedom in a dissipative quantum system"*, *Ann. Phys.* **149**, 374–456 (1983). [DOI: 10.1016/0003-4916(83)90202-6](https://doi.org/10.1016/0003-4916(83)90202-6)
 31. **H. Mori**, *"Transport, collective motion, and Brownian motion"*, *Prog. Theor. Phys.* **33**, 423–455 (1965). [DOI: 10.1143/PTP.33.423](https://doi.org/10.1143/PTP.33.423)
+32. **A. Gali**, *"Ab initio theory of point defects as single photon emitters in wide band gap semiconductors"*, *Nanophotonics* **12**, 589–609 (2023). [DOI: 10.1515/nanoph-2022-0599](https://doi.org/10.1515/nanoph-2022-0599)
+
 

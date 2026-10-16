@@ -196,12 +196,21 @@ class LineshapeEngine:
         else:
             self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None)
 
+        # Optional 1D Configuration Coordinate & Stokes Shift Analysis
+        cc_dict = None
+        if getattr(self.config, "plot_configuration_coordinate", True):
+            try:
+                cc_dict = self.plot_configuration_coordinate(at_gs, at_es)
+            except Exception as e:
+                print(f"[!] Warning: Configuration coordinate calculation encountered an issue: {e}")
+
         return {
             "harmonic": lineshape_dict,
             "anharmonic": anharmonic_dict,
             "total_S": total_S,
             "hw_grid": hw_grid,
-            "s_cont": s_cont
+            "s_cont": s_cont,
+            "cc_analysis": cc_dict,
         }
 
     def run_anharmonic_sampling(
@@ -704,3 +713,43 @@ class LineshapeEngine:
     def plot_lineshapes(self, lineshape_dict, hw_grid, s_cont, total_S):
         """Backward-compatible alias for plot_all with harmonic results."""
         self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None)
+
+    def calculate_configuration_coordinate(
+        self, at_gs, at_es, zpl_energy_eV=None, lambda_min=None, lambda_max=None, n_points=None
+    ):
+        """
+        Calculates 1D potential energy curves along the configuration coordinate.
+        
+        Returns
+        -------
+        dict
+            Dictionary of coordinates, energies, relaxation parameters, and Stokes shift metrics.
+        """
+        from .cc_diagram import ConfigurationCoordinateEngine
+        engine = ConfigurationCoordinateEngine(self.config, self.calc)
+        return engine.calculate_cc_curve(
+            at_gs, at_es,
+            lambda_min=lambda_min,
+            lambda_max=lambda_max,
+            n_points=n_points,
+            zpl_energy_eV=zpl_energy_eV
+        )
+
+    def plot_configuration_coordinate(
+        self, at_gs, at_es, output_path=None, zpl_energy_eV=None, system_name=None
+    ):
+        """
+        Calculates 1D CC potential energy curves and renders publication-grade 2-panel figure.
+        
+        Returns
+        -------
+        dict
+            Dictionary containing CC parameters and 'figure_path' key.
+        """
+        from .cc_diagram import ConfigurationCoordinateEngine
+        engine = ConfigurationCoordinateEngine(self.config, self.calc)
+        cc_data = engine.calculate_cc_curve(at_gs, at_es, zpl_energy_eV=zpl_energy_eV)
+        fig_path = engine.plot_configuration_coordinate(cc_data, output_path=output_path, system_name=system_name)
+        cc_data["figure_path"] = fig_path
+        return cc_data
+

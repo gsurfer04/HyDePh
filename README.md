@@ -39,6 +39,7 @@ From a minimal set of user inputs, **HyDePh** executes:
 4. **GPU-Accelerated $\Delta$-NEP Training**: Fitting the compact delta potential in GPUMD in seconds.
 5. **High-Definition Multi-Regime Lineshapes**: Computing Huang-Rhys factors $S$, electron-phonon spectral densities $S(\hbar\omega)$, and multi-temperature optical emission spectra $A(E - E_{\mathrm{ZPL}}, T)$ using **mass-weighted optical projection ($\mathbf{u}_{\mathrm{opt}}$)** and **dual coupling regimes**: quantum generating functions for stiff crystals ($S < 10$) to resolve discrete zero-phonon lines and vibronic sidebands, and semiclassical Marcus convolution for strongly-coupled soft crystals ($S \ge 10$).
 6. **Native Cross-Platform Support & Smart Resumption (v0.3.0)**: Seamless execution across **Linux** and **Windows**, with automatic Microsoft MPI / OpenMPI negotiation, native Windows Quantum ESPRESSO binaries from [QMatSuite](https://github.com/QMatSuite/quantum-espresso-windows-exe), and intelligent resumption of interrupted runs with candidate frame preservation and type-balanced DFT budget allocation.
+7. **1D Configuration Coordinate Diagrams & Stokes Shifts (v0.3.1)**: Automatic evaluation and publication-grade 2-panel plotting of system potential energy along the linear optical coordinate $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda (\mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}})$, deriving mass-weighted displacement $\Delta Q$, ground- and excited-state Franck-Condon relaxation energies $\Delta E_{\mathrm{rel}}$, vertical absorption $E_{\mathrm{abs}}$, luminescence emission $E_{\mathrm{em}}$, effective phonon frequency $\hbar\Omega$, Huang-Rhys factor $S$, and total Stokes shift $\Delta E_{\mathrm{Stokes}}$.
 
 ---
 
@@ -172,7 +173,20 @@ summary = run_pipeline(config)
 | `max_new_dft_frames` | `int` | `None` | Optional limit on the number of *new* DFT calculations to execute in the current invocation. |
 | `dft_resume_mode` | `str` | `"target_total"` | Resumption budget policy: `"target_total"` (satisfies total target frames) or `"max_new"` (runs up to `max_dft_frames` / `max_new_dft_frames` new calculations). |
 
+#### 1D Configuration Coordinate & Stokes Shift Parameter Reference (v0.3.1)
 
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `plot_configuration_coordinate` | `bool` | `True` | Automatically calculates the potential energy curves along the 1D CC path and generates the publication-grade 2-panel figure. |
+| `zpl_energy_eV` | `float` | `None` | Zero-Phonon Line energy in $\text{eV}$ (e.g. `1.945` for diamond $\mathrm{NV}^-$, `1.096` for 4H-SiC $kk$-VV$^0$). If omitted, uses default canonical reference ($1.945\ \text{eV}$). |
+| `cc_figure_name` | `str` | `"configuration_coordinate.png"` | Output filename for the generated 2-panel configuration coordinate and optical spectra diagram. |
+| `cc_lambda_min` | `float` | `-0.30` | Minimum dimensionless coordinate $\lambda$ along the linear optical relaxation path $\mathbf{R}(\lambda)$. |
+| `cc_lambda_max` | `float` | `1.30` | Maximum dimensionless coordinate $\lambda$ along the linear optical relaxation path $\mathbf{R}(\lambda)$. |
+| `cc_n_points` | `int` | `81` | Number of evaluation points along the linear configuration coordinate trajectory. |
+
+<p align="center">
+  <img src="assets/diamond_nv_cc_diagram.png" width="96%" alt="Diamond NV- 1D Configuration Coordinate Diagram and Derived Stokes Shift">
+</p>
 
 ---
 
@@ -285,7 +299,7 @@ flowchart TD
 
 ```
 hydeph/
-├── __init__.py                  # Package API and exports (v0.3.0)
+├── __init__.py                  # Package API and exports (v0.3.1)
 ├── config.py                    # ToolkitConfig dataclass and validation
 ├── defect_builder.py            # Supercell embedding & defect coordinate locator
 ├── frame_sampler.py             # 4-Phase representative frame sampler (FC, rattle, MD+FPS)
@@ -293,6 +307,7 @@ hydeph/
 ├── delta_trainer.py             # Foundation subtraction & GPU GPUMD Delta-NEP trainer
 ├── calculator.py                # 31x optimized HybridDefectCalculator (V_base + Delta_V)
 ├── lineshape.py                 # Optical-projected quantum generating function & MD engine
+├── cc_diagram.py                # 1D Configuration coordinate curves & Stokes shift engine
 ├── pipeline.py                  # Turnkey pipeline orchestrator
 └── run_licl_fcenter.py          # Complete runnable benchmark driver for LiCl F-center
 docs/
@@ -302,6 +317,7 @@ scripts/
 └── make_stiff_vs_soft_diagram.py # Generates stiff vs. soft comparison benchmark diagram
 assets/
 ├── hydeph_stiff_vs_soft_benchmark.png # Stiff vs. soft host benchmark comparison banner
+├── diamond_nv_cc_diagram.png          # Diamond NV- 1D CC diagram and Stokes shift spectra
 ├── licl_anharmonic_benchmark.png      # LiCl F-center 2-panel publication diagram
 ├── diamond_nv_10K.png                 # Diamond NV- lineshape & VDOS at 10 K
 ├── diamond_nv_multiT.png              # Diamond NV- lineshapes across temperatures

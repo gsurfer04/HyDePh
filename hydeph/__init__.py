@@ -19,7 +19,7 @@ Outputs:
   - Multi-temperature harmonic & anharmonic emission lineshapes A(E - E_ZPL, T)
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .config import ToolkitConfig
 from .defect_builder import DefectBuilder
@@ -28,6 +28,7 @@ from .qe_runner import QERunner
 from .delta_trainer import DeltaTrainer
 from .calculator import HybridDefectCalculator
 from .lineshape import LineshapeEngine
+from .cc_diagram import ConfigurationCoordinateEngine, plot_configuration_coordinate
 from .pipeline import run_pipeline
 
 __all__ = [
@@ -38,5 +39,7 @@ __all__ = [
     "DeltaTrainer",
     "HybridDefectCalculator",
     "LineshapeEngine",
+    "ConfigurationCoordinateEngine",
+    "plot_configuration_coordinate",
     "run_pipeline",
 ]

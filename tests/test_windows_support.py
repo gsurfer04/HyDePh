@@ -1,5 +1,5 @@
 """
-Tests for HyDePh Windows and Cross-Platform MPI / Quantum ESPRESSO support (v0.3.0).
+Tests for HyDePh Windows and Cross-Platform MPI / Quantum ESPRESSO support (v0.3.1).
 """
 
 import os
@@ -24,8 +24,8 @@ from hydeph.delta_trainer import resolve_nep_executable, write_delta_nep_in
 
 
 def test_version_bump():
-    """Verify version 0.3.0."""
-    assert __version__ == "0.3.0"
+    """Verify version 0.3.1."""
+    assert __version__ == "0.3.1"
 
 
 def test_is_windows():

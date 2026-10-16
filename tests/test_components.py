@@ -2,6 +2,7 @@
 Unit tests for HyDePh defect builder, lineshape engine, and hybrid calculator.
 """
 
+import os
 import numpy as np
 import pytest
 from ase import Atoms
@@ -311,5 +312,85 @@ def test_anharmonic_regimes(tmp_path):
             at_gs, at_es, hw_grid, s_cont, total_S=2.5, e_min=-200, e_max=50, n_pts=200
         )
         assert res_override[10.0]["regime"] == "semiclassical"
+
+
+def test_configuration_coordinate_engine(tmp_path):
+    """Verify ConfigurationCoordinateEngine and Stokes shift calculations."""
+    from hydeph.cc_diagram import ConfigurationCoordinateEngine, plot_configuration_coordinate
+
+    # Create synthetic atoms and harmonic spring calculator
+    at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[4, 4, 4], pbc=True)
+    at_es = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.7]], cell=[4, 4, 4], pbc=True)
+
+    # Displacement dr = 0.2 A for atom 2 (carbon mass = 12.011 amu)
+    # Delta Q = sqrt(12.011 * 0.2^2) = sqrt(12.011 * 0.04) = 0.693138 amu^(1/2) A
+    expected_dq = np.sqrt(12.011 * (0.2**2))
+
+    # Mock calculator where E(R) = 0.5 * k * sum(M_i * (R_i - R_GS,i)^2)
+    # with k = 1.0 eV / (amu * A^2)
+    k_const = 1.0
+    mock_calc = MagicMock()
+    def get_energy():
+        pos = mock_calc.atoms.positions
+        dr = pos - at_gs.positions
+        m = at_gs.get_masses()
+        dq2 = np.sum(np.repeat(m, 3) * dr.flatten()**2)
+        return 0.5 * k_const * dq2
+
+    # ASE calls get_potential_energy(atoms)
+    def calc_pe(atoms=None):
+        if atoms is not None:
+            mock_calc.atoms = atoms
+        return get_energy()
+
+    mock_calc.get_potential_energy = MagicMock(side_effect=calc_pe)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "pristine.xyz"),
+        workspace_dir=str(tmp_path),
+        zpl_energy_eV=2.0,
+        cc_lambda_min=-0.2,
+        cc_lambda_max=1.2,
+        cc_n_points=15,
+    )
+
+    engine = ConfigurationCoordinateEngine(cfg, mock_calc)
+    results = engine.calculate_cc_curve(at_gs, at_es, zpl_energy_eV=2.0)
+
+    # 1. Delta Q check
+    assert pytest.approx(results["dq_total"], rel=1e-3) == expected_dq
+
+    # 2. Ground state energy at lambda=0 is 0
+    idx_0 = np.argmin(np.abs(results["lambda_grid"] - 0.0))
+    assert pytest.approx(results["e_gs"][idx_0], abs=1e-5) == 0.0
+
+    # 3. Relaxation energies and Stokes shifts
+    # E_rel = 0.5 * k * dq^2
+    expected_erel = 0.5 * k_const * (expected_dq**2)
+    assert pytest.approx(results["delta_e_rel_gs_eV"], rel=1e-3) == expected_erel
+    assert pytest.approx(results["delta_e_rel_es_eV"], rel=1e-3) == expected_erel
+
+    # Stokes shift = 2 * E_rel
+    assert pytest.approx(results["stokes_shift_eV"], rel=1e-3) == 2.0 * expected_erel
+    assert pytest.approx(results["stokes_shift_meV"], rel=1e-3) == 2000.0 * expected_erel
+
+    # E_abs = ZPL + E_rel, E_em = ZPL - E_rel
+    assert pytest.approx(results["e_abs_eV"], rel=1e-3) == 2.0 + expected_erel
+    assert pytest.approx(results["e_em_eV"], rel=1e-3) == 2.0 - expected_erel
+
+    # 4. Effective phonon frequency: hbar * Omega = 91.43476 * sqrt(E_rel) / dq
+    # Since E_rel = 0.5 * k * dq^2, sqrt(E_rel)/dq = sqrt(0.5 * k)
+    expected_hw = 91.43476 * np.sqrt(0.5 * k_const)
+    assert pytest.approx(results["hbar_omega_meV"], rel=1e-3) == expected_hw
+
+    # 5. Render figure
+    fig_path = engine.plot_configuration_coordinate(results)
+    assert os.path.isfile(fig_path)
+    assert os.path.getsize(fig_path) > 1000
+
+    # 6. Test functional interface
+    func_res = plot_configuration_coordinate(cfg, mock_calc, at_gs, at_es, zpl_energy_eV=2.0)
+    assert "figure_path" in func_res
+    assert os.path.isfile(func_res["figure_path"])
 
 
