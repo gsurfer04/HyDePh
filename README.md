@@ -119,16 +119,22 @@ summary = run_pipeline(config)
 | `tot_magnetization` | `int` | `None` | Unpaired electrons $2S$; synchronized with `spin_multiplicity`. |
 | `excited_cell_path` | `str` | `None` | Path to explicit excited-state cell or supercell; falls back to coordination-shell breathing when omitted. |
 | `excited_state_displacement` | `float` | `None` | Radial breathing displacement (Å) for procedural excited states ($0.08\ \text{\AA}$ for covalent hosts, $0.15\ \text{\AA}$ for ionic hosts). |
+| `substitutional_element` | `str` | `None` | Replacement species symbol when `defect_type="substitutional"` (or specify `"Host->Sub"` in `defect_site_element`). |
 
 ### Sampling & Resumption
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `random_seed` | `int` | `42` | RNG seed for rattling displacements and MD velocities. |
-| `force_resample` | `bool` | `False` | Reuses existing `candidate_frames.xyz` when `False`; regenerates when `True`. |
+| `force_resample` | `bool` | `False` | Reuses existing `relaxed_gs.xyz`, `relaxed_es.xyz`, and `candidate_frames.xyz` when `False`; regenerates when `True`. |
+| `force_retrain` | `bool` | `False` | Reuses `nep_delta.txt` when training dataset and hyperparameters match the SHA256 manifest; forces GPUMD retraining when `True`. |
 | `max_dft_frames` | `int` | `None` | Target total converged DFT frames. On resume, runs $\max(0, \text{max\_dft\_frames} - N_{\mathrm{done}})$ frames prioritized by underrepresented sample types. |
 | `max_new_dft_frames` | `int` | `None` | Maximum new DFT calculations to execute in the current run. |
 | `dft_resume_mode` | `str` | `"target_total"` | `"target_total"` (reach `max_dft_frames` total) or `"max_new"` (run up to `max_new_dft_frames` new frames). |
+| `retry_failed_dft` | `bool` | `True` | Tags failed or non-converged QE frames to retry with conservative mixing (`mixing_mode='local-TF'`, `mixing_beta=0.2`) after remaining frames finish. |
+| `replace_failed_frames` | `bool` | `False` | When `True`, replaces a rattle or MD frame that fails a second time with a new frame of the same type to fulfill the quota; when `False`, ignores failed frames and continues with the rest. |
+| `n_workers_qe` | `int` | `1` | Number of independent `pw.x` frame calculations to run concurrently. |
+| `qe_timeout_s` | `float` | `None` | Optional wall-clock timeout (seconds) per `pw.x` run before terminating and queuing for retry. |
 
 ### Spectroscopy, Graphing & 1D Configuration Coordinate
 

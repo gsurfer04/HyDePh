@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 from typing import Optional, Dict, Any
 from ase import Atoms
 
+from .defect_builder import mic_displacement
+
 
 # hbar * Omega (meV) = 91.43476 * sqrt(Delta E_rel (eV)) / Delta Q (amu^(1/2) A)
 CC_HBAR_OMEGA_PREFACTOR = 91.43476
@@ -35,30 +37,27 @@ class ConfigurationCoordinateEngine:
         n_pts = n_points if n_points is not None else getattr(self.config, "cc_n_points", 81)
 
         m = at_gs.get_masses()
-        dr = at_es.positions - at_gs.positions
-        dq_total = float(np.sqrt(np.sum(np.repeat(m, 3) * dr.flatten()**2)))
+        pos_gs = at_gs.positions.copy()
+        dr = mic_displacement(at_es.positions, pos_gs, at_gs.cell)
+        dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
 
         lambdas = np.linspace(l_min, l_max, n_pts)
         q_grid = lambdas * dq_total
 
-        at_ref = at_gs.copy()
-        at_ref.calc = self.calc
-        v_ref = float(at_ref.get_potential_energy())
+        at_eval = at_gs.copy()
+        at_eval.calc = self.calc
+        v_ref = float(at_eval.get_potential_energy())
 
         e_gs_list = []
         for lam in lambdas:
-            at_lam = at_gs.copy()
-            at_lam.positions = at_gs.positions + lam * dr
-            at_lam.calc = self.calc
-            e_val = float(at_lam.get_potential_energy()) - v_ref
+            at_eval.set_positions(pos_gs + lam * dr)
+            e_val = float(at_eval.get_potential_energy()) - v_ref
             e_gs_list.append(e_val)
 
-        e_gs = np.array(e_gs_list)
+        e_gs = np.array(e_gs_list, dtype=float)
 
-        at_1 = at_gs.copy()
-        at_1.positions = at_es.positions
-        at_1.calc = self.calc
-        e_rel_gs_eV = float(at_1.get_potential_energy()) - v_ref
+        at_eval.set_positions(pos_gs + dr)
+        e_rel_gs_eV = float(at_eval.get_potential_energy()) - v_ref
         e_rel_gs_meV = e_rel_gs_eV * 1000.0
 
         user_zpl = zpl_energy_eV if zpl_energy_eV is not None else getattr(self.config, "zpl_energy_eV", None)

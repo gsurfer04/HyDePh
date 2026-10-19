@@ -15,6 +15,7 @@ class ToolkitConfig:
     excited_state_displacement: Optional[float] = None  # Angstrom
     defect_type: str = "vacancy"  # "vacancy", "substitutional", or "file"
     defect_site_element: Optional[str] = None
+    substitutional_element: Optional[str] = None
     defect_site_index: Optional[int] = None
     supercell_repeat: Tuple[int, int, int] = (2, 2, 2)
 
@@ -33,6 +34,8 @@ class ToolkitConfig:
     mpi_command: Optional[str] = None
     mpi_args: Optional[List[str]] = None
     nep_exe: Optional[str] = None
+    n_workers_qe: int = 1
+    qe_timeout_s: Optional[float] = None
 
     charge: Optional[float] = None  # Net charge in e
     tot_charge: float = 0.0         # QE alias for charge
@@ -60,9 +63,12 @@ class ToolkitConfig:
     md_temp_exploration: float = 500.0
     random_seed: int = 42
     force_resample: bool = False
+    force_retrain: bool = False
     max_dft_frames: Optional[int] = None
     max_new_dft_frames: Optional[int] = None
     dft_resume_mode: str = "target_total"  # "target_total" or "max_new"
+    retry_failed_dft: bool = True
+    replace_failed_frames: bool = False
 
     delta_nep_generation: int = 1
     nep_neurons: int = 30
@@ -159,6 +165,12 @@ class ToolkitConfig:
                 f"Invalid anharmonic_coupling_regime: '{self.anharmonic_coupling_regime}'. "
                 "Must be 'auto', 'quantum', or 'semiclassical'."
             )
+
+        if int(self.n_workers_qe) < 1:
+            raise ValueError(f"Invalid n_workers_qe: {self.n_workers_qe}. Must be >= 1.")
+
+        if self.qe_timeout_s is not None and float(self.qe_timeout_s) <= 0.0:
+            raise ValueError(f"Invalid qe_timeout_s: {self.qe_timeout_s}. Must be > 0.")
 
         os.makedirs(self.workspace_dir, exist_ok=True)
         return True

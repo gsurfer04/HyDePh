@@ -11,9 +11,9 @@ from calorine.calculators import CPUNEP
 class HybridDefectCalculator(Calculator):
     implemented_properties = ['energy', 'forces']
 
-    def __init__(self, foundation_pot_path, delta_pot_path):
+    def __init__(self, foundation_pot_path, delta_pot_path, calc_base=None):
         super().__init__()
-        self.calc_base = CPUNEP(foundation_pot_path)
+        self.calc_base = calc_base if calc_base is not None else CPUNEP(foundation_pot_path)
         self.calc_delta = CPUNEP(delta_pot_path)
 
     def calculate(self, atoms=None, properties=['energy', 'forces'], system_changes=all_changes):

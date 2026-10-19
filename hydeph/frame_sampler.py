@@ -1,43 +1,87 @@
 """Four-phase candidate frame sampling: Franck-Condon path, core rattling, and foundation MD with FPS."""
 
 import os
-import time
 import numpy as np
 import ase.io
 from ase import Atoms
 from calorine.calculators import CPUNEP
 
+from .defect_builder import mic_displacement, mic_distances, get_defect_center
+
 
 def farthest_point_sampling(descriptor_matrix, n_select):
     """Selects `n_select` rows from `descriptor_matrix` (N_frames, N_features) via Farthest Point Sampling."""
+    descriptor_matrix = np.asarray(descriptor_matrix, dtype=float)
     n_frames = descriptor_matrix.shape[0]
     if n_select >= n_frames:
         return list(range(n_frames))
 
-    norms = np.linalg.norm(descriptor_matrix, axis=1)
-    selected = [np.argmax(norms)]
-    min_dists = np.linalg.norm(descriptor_matrix - descriptor_matrix[selected[0]], axis=1)
+    sq_norms = np.einsum("ij,ij->i", descriptor_matrix, descriptor_matrix)
+    selected = [int(np.argmax(sq_norms))]
+    diff0 = descriptor_matrix - descriptor_matrix[selected[0]]
+    min_sq_dists = np.einsum("ij,ij->i", diff0, diff0)
 
     for _ in range(1, n_select):
-        next_idx = np.argmax(min_dists)
+        next_idx = int(np.argmax(min_sq_dists))
         selected.append(next_idx)
-        new_dists = np.linalg.norm(descriptor_matrix - descriptor_matrix[next_idx], axis=1)
-        min_dists = np.minimum(min_dists, new_dists)
+        diff = descriptor_matrix - descriptor_matrix[next_idx]
+        min_sq_dists = np.minimum(min_sq_dists, np.einsum("ij,ij->i", diff, diff))
 
     return selected
 
 
 class FrameSampler:
-    def __init__(self, config):
+    def __init__(self, config, calc_foundation=None):
         self.config = config
-        if getattr(config, "foundation_potential_path", None) and os.path.isfile(config.foundation_potential_path):
-            self.calc_foundation = CPUNEP(config.foundation_potential_path)
+        if calc_foundation is not None:
+            self.calc_foundation = calc_foundation
+        elif getattr(config, "foundation_potential_path", None):
+            try:
+                self.calc_foundation = CPUNEP(config.foundation_potential_path)
+            except Exception:
+                self.calc_foundation = None
         else:
             self.calc_foundation = None
 
+    def _compute_core_descriptors(self, frames, at_ref, r_cutoff=6.0):
+        """Computes defect-core feature vectors for FPS using NEP descriptors or PBC-safe local geometry."""
+        center = get_defect_center(at_ref)
+        ref_dists = mic_distances(at_ref.positions, center, at_ref.cell)
+        core_mask = ref_dists < r_cutoff
+        if not np.any(core_mask):
+            core_mask = np.ones(len(at_ref), dtype=bool)
+
+        pot_path = getattr(self.config, "foundation_potential_path", None)
+        if pot_path and os.path.isfile(pot_path) and os.path.getsize(pot_path) > 256:
+            try:
+                from calorine.nep import get_descriptors
+                desc_list = []
+                for fr in frames:
+                    d_atom = get_descriptors(fr, potential_filename=pot_path)
+                    d_core = d_atom[core_mask]
+                    desc_list.append(np.concatenate([np.mean(d_core, axis=0), np.std(d_core, axis=0)]))
+                return np.asarray(desc_list, dtype=float)
+            except Exception:
+                pass
+
+        features = []
+        n_keep = min(18, len(at_ref))
+        for fr in frames:
+            disp_vecs = mic_displacement(fr.positions, center, fr.cell)
+            dists = np.linalg.norm(disp_vecs, axis=1)
+            order = np.argsort(dists)[:n_keep]
+            sorted_d = dists[order]
+            dr_ref = mic_displacement(fr.positions[core_mask], at_ref.positions[core_mask], fr.cell)
+            rms_disp = np.array([
+                float(np.sqrt(np.mean(dr_ref ** 2))),
+                float(np.max( np.linalg.norm(dr_ref, axis=1) )),
+            ])
+            features.append(np.concatenate([sorted_d, rms_disp]))
+        return np.asarray(features, dtype=float)
+
     def sample_franck_condon_path(self, at_gs, at_es, n_points=7):
-        """Phase 1: Structures along the linear optical coordinate."""
-        dr = at_es.positions - at_gs.positions
+        """Phase 1: Structures along the minimum-image linear optical coordinate."""
+        dr = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
         base_lams = [0.0, 1.0, 0.5, -0.2, 1.2]
         extra_lams = list(np.linspace(-0.1, 1.1, max(0, n_points - len(base_lams))))
         lambdas = base_lams + extra_lams
@@ -57,8 +101,8 @@ class FrameSampler:
 
     def sample_defect_core_rattling(self, at_gs, n_frames=12, r_cutoff=6.0):
         """Phase 2: Defect-core localized Gaussian rattle configurations."""
-        center = at_gs.get_cell().sum(axis=0) / 2.0
-        dists = np.linalg.norm(at_gs.positions - center, axis=1)
+        center = get_defect_center(at_gs)
+        dists = mic_distances(at_gs.positions, center, at_gs.cell)
         core_mask = dists < r_cutoff
 
         seed = getattr(self.config, "random_seed", 42)
@@ -106,13 +150,7 @@ class FrameSampler:
 
         print(f"[+] Phase 3: Propagated {len(trajectory)} MD trajectory frames at {temp_k} K using nep89")
 
-        center = at_gs.get_cell().sum(axis=0) / 2.0
-        features = []
-        for frame in trajectory:
-            dists = np.linalg.norm(frame.positions - center, axis=1)
-            features.append(np.sort(dists)[:18])
-        feature_matrix = np.array(features)
-
+        feature_matrix = self._compute_core_descriptors(trajectory, at_gs)
         selected_indices = farthest_point_sampling(feature_matrix, n_select)
         selected_frames = []
         for i, idx in enumerate(selected_indices):
@@ -170,3 +208,51 @@ class FrameSampler:
         ase.io.write(out_path, all_candidates, format="extxyz")
         print(f"[+] Assembled candidate dataset: {len(all_candidates)} total representative frames -> {out_path}")
         return all_candidates
+
+    def generate_replacement_frame(self, sample_type, at_gs, type_index, candidate_index=None, r_cutoff=6.0):
+        """Generates a replacement `core_rattle` or `foundation_md_fps` frame when a candidate fails twice."""
+        base_seed = getattr(self.config, "random_seed", 42)
+        at = at_gs.copy()
+        at.arrays.pop("forces", None)
+        at.info.pop("energy", None)
+
+        if sample_type == "core_rattle":
+            rng = np.random.RandomState(base_seed + 1000 + int(type_index))
+            center = get_defect_center(at)
+            dists = mic_distances(at.positions, center, at.cell)
+            core_mask = dists < r_cutoff
+            sigma = 0.08 if type_index % 2 == 0 else 0.12
+            displacements = rng.normal(0.0, sigma, at.positions.shape)
+            displacements[~core_mask] *= 0.15
+            at.positions += displacements
+            label = f"rattle_{type_index:02d}"
+            at.info["sample_type"] = "core_rattle"
+            at.info["rattle_sigma"] = float(sigma)
+        elif sample_type == "foundation_md_fps":
+            rng = np.random.RandomState(base_seed + 2000 + int(type_index))
+            if self.calc_foundation is not None:
+                from ase.md.langevin import Langevin
+                from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+                from ase import units
+
+                at.calc = self.calc_foundation
+                temp_k = getattr(self.config, "md_temp_exploration", 500.0)
+                MaxwellBoltzmannDistribution(at, temperature_K=temp_k, rng=rng)
+                dyn = Langevin(at, 1.0 * units.fs, temperature_K=temp_k, friction=0.01 / units.fs, logfile=None)
+                dyn.run(100)
+                at = at.copy()
+            else:
+                displacements = rng.normal(0.0, 0.10, at.positions.shape)
+                at.positions += displacements
+            label = f"md_fps_{type_index:02d}"
+            at.info["sample_type"] = "foundation_md_fps"
+        else:
+            raise ValueError(f"Replacement generation unsupported for sample_type='{sample_type}'.")
+
+        at.info["frame_id"] = label
+        at.info["label"] = label
+        if candidate_index is not None:
+            at.info["candidate_index"] = int(candidate_index)
+            at.info["frame_name"] = f"frame_{int(candidate_index):03d}_{label}"
+        return at
+

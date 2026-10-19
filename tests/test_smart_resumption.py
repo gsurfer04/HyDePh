@@ -276,3 +276,196 @@ def test_resume_cleans_incomplete_scratch(tmp_path):
     with patch("subprocess.Popen", side_effect=mock_popen_side_effect):
         labeled = runner.label_single_frame(atoms, str(calc_dir))
         assert "energy" in labeled.info
+
+
+def _write_converged_qe_stdout(stdout_f, energy_ry=-46.0):
+    if stdout_f:
+        stdout_f.write(
+            f"""
+!    total energy              =     {energy_ry:.4f} Ry
+
+     Forces acting on atoms (cartesian axes, Ry/au):
+
+     atom    1 type  1   force =     0.0010    0.0000    0.0000
+     atom    2 type  2   force =    -0.0010    0.0000    0.0000
+     total force = 0.002
+
+     JOB DONE.
+""".encode("utf-8")
+        )
+        stdout_f.flush()
+
+
+def _write_failed_qe_stdout(stdout_f):
+    if stdout_f:
+        stdout_f.write(
+            b"""
+     iteration # 100     ecut=    40.00 Ry     beta= 0.40
+     convergence NOT achieved after 100 iterations: stopping
+     JOB DONE.
+"""
+        )
+        stdout_f.flush()
+
+
+def test_qe_retry_after_rest_succeeds(tmp_path):
+    """Failed frame is tagged, deferred until remaining frames finish, and succeeds on retry."""
+    ws = tmp_path / "ws_retry_ok"
+    ws.mkdir(parents=True)
+
+    candidates = []
+    for idx, (fid, stype) in enumerate([
+        ("fc_00", "franck_condon"),
+        ("rattle_00", "core_rattle"),
+        ("md_fps_00", "foundation_md_fps"),
+    ]):
+        at = Atoms("LiCl", positions=[[0, 0, 0], [2.0 + 0.1 * idx, 2, 2]], cell=[4, 4, 4], pbc=True)
+        at.info["frame_id"] = fid
+        at.info["label"] = fid
+        at.info["sample_type"] = stype
+        at.info["candidate_index"] = idx
+        candidates.append(at)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path),
+        pseudo_dir=str(tmp_path),
+        pseudopotentials={"Li": "Li.upf", "Cl": "Cl.upf"},
+        workspace_dir=str(ws),
+        retry_failed_dft=True,
+        replace_failed_frames=False,
+    )
+    runner = QERunner(cfg, n_procs=1, pw_exe="pw.exe")
+
+    call_order = []
+    rattle_attempts = {"count": 0}
+
+    def mock_popen(*args, **kwargs):
+        cwd = os.path.basename(kwargs.get("cwd", ""))
+        call_order.append(cwd)
+        stdout_f = kwargs.get("stdout")
+        if "rattle_00" in cwd:
+            rattle_attempts["count"] += 1
+            if rattle_attempts["count"] == 1:
+                _write_failed_qe_stdout(stdout_f)
+            else:
+                _write_converged_qe_stdout(stdout_f, -46.5)
+        else:
+            _write_converged_qe_stdout(stdout_f, -46.0)
+        mock_p = MagicMock()
+        mock_p.poll.return_value = 0
+        mock_p.wait.return_value = 0
+        mock_p.returncode = 0
+        return mock_p
+
+    with patch("subprocess.Popen", side_effect=mock_popen):
+        labeled = runner.label_all_frames(candidates)
+
+    assert len(labeled) == 3
+    assert len(runner.last_failed_entries) == 0
+    assert call_order == [
+        "frame_000_fc_00",
+        "frame_001_rattle_00",
+        "frame_002_md_fps_00",
+        "frame_001_rattle_00",
+    ]
+
+
+def test_qe_second_failure_ignored_when_replace_disabled(tmp_path):
+    """When a frame fails twice and replace_failed_frames=False, it is ignored and remaining frames are returned."""
+    ws = tmp_path / "ws_ignore"
+    ws.mkdir(parents=True)
+
+    candidates = []
+    for idx, (fid, stype) in enumerate([
+        ("fc_00", "franck_condon"),
+        ("rattle_00", "core_rattle"),
+        ("md_fps_00", "foundation_md_fps"),
+    ]):
+        at = Atoms("LiCl", positions=[[0, 0, 0], [2.0 + 0.1 * idx, 2, 2]], cell=[4, 4, 4], pbc=True)
+        at.info["frame_id"] = fid
+        at.info["label"] = fid
+        at.info["sample_type"] = stype
+        at.info["candidate_index"] = idx
+        candidates.append(at)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path),
+        pseudo_dir=str(tmp_path),
+        pseudopotentials={"Li": "Li.upf", "Cl": "Cl.upf"},
+        workspace_dir=str(ws),
+        retry_failed_dft=True,
+        replace_failed_frames=False,
+    )
+    runner = QERunner(cfg, n_procs=1, pw_exe="pw.exe")
+
+    def mock_popen(*args, **kwargs):
+        cwd = os.path.basename(kwargs.get("cwd", ""))
+        stdout_f = kwargs.get("stdout")
+        if "rattle_00" in cwd:
+            _write_failed_qe_stdout(stdout_f)
+        else:
+            _write_converged_qe_stdout(stdout_f, -46.0)
+        mock_p = MagicMock()
+        mock_p.poll.return_value = 0
+        mock_p.wait.return_value = 0
+        mock_p.returncode = 0
+        return mock_p
+
+    with patch("subprocess.Popen", side_effect=mock_popen):
+        labeled = runner.label_all_frames(candidates)
+
+    assert [fr.info["frame_id"] for fr in labeled] == ["fc_00", "md_fps_00"]
+    assert len(runner.last_failed_entries) == 1
+    assert runner.last_failed_entries[0]["frame_id"] == "rattle_00"
+
+
+def test_qe_second_failure_replaced_when_enabled(tmp_path):
+    """When a rattle or MD frame fails twice and replace_failed_frames=True, a replacement frame fulfills the quota."""
+    ws = tmp_path / "ws_replace"
+    ws.mkdir(parents=True)
+
+    candidates = []
+    for idx, (fid, stype) in enumerate([
+        ("fc_00", "franck_condon"),
+        ("rattle_00", "core_rattle"),
+        ("md_fps_00", "foundation_md_fps"),
+    ]):
+        at = Atoms("LiCl", positions=[[0, 0, 0], [2.0 + 0.1 * idx, 2, 2]], cell=[4, 4, 4], pbc=True)
+        at.info["frame_id"] = fid
+        at.info["label"] = fid
+        at.info["sample_type"] = stype
+        at.info["candidate_index"] = idx
+        candidates.append(at)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path),
+        pseudo_dir=str(tmp_path),
+        pseudopotentials={"Li": "Li.upf", "Cl": "Cl.upf"},
+        workspace_dir=str(ws),
+        retry_failed_dft=True,
+        replace_failed_frames=True,
+    )
+    runner = QERunner(cfg, n_procs=1, pw_exe="pw.exe")
+
+    def mock_popen(*args, **kwargs):
+        cwd = os.path.basename(kwargs.get("cwd", ""))
+        stdout_f = kwargs.get("stdout")
+        if "rattle_00" in cwd or "md_fps_00" in cwd:
+            _write_failed_qe_stdout(stdout_f)
+        else:
+            _write_converged_qe_stdout(stdout_f, -46.0)
+        mock_p = MagicMock()
+        mock_p.poll.return_value = 0
+        mock_p.wait.return_value = 0
+        mock_p.returncode = 0
+        return mock_p
+
+    with patch("subprocess.Popen", side_effect=mock_popen):
+        labeled = runner.label_all_frames(candidates)
+
+    assert len(labeled) == 3
+    ids = [fr.info["frame_id"] for fr in labeled]
+    types = [fr.info["sample_type"] for fr in labeled]
+    assert ids == ["fc_00", "rattle_01", "md_fps_01"]
+    assert types == ["franck_condon", "core_rattle", "foundation_md_fps"]
+

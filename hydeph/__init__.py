@@ -4,7 +4,7 @@ Trains Delta-NEP potentials on top of foundation models to compute
 multi-temperature optical spectra for point defects in solids.
 """
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 from .config import ToolkitConfig
 from .defect_builder import DefectBuilder

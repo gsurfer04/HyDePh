@@ -14,7 +14,7 @@ from .calculator import HybridDefectCalculator
 from .lineshape import LineshapeEngine
 
 
-def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: int = 2):
+def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: int = 2, n_workers_qe: int = None):
     """Runs the Delta-NEP defect workflow and returns a summary dictionary."""
     t_start = time.time()
     print("=" * 78)
@@ -30,12 +30,13 @@ def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: 
 
     print("\n[STEP 1/6] Defect Construction & Geometry Optimization...")
     builder = DefectBuilder(config)
+    shared_foundation = builder.calc_foundation
     pristine_sc, defect_sc = builder.build_supercell_and_defect()
     at_gs = builder.relax_ground_state(defect_sc)
     at_es, dq_fc = builder.generate_excited_state_geometry(at_gs)
 
     print("\n[STEP 2/6] Representative Frame Generation Protocol...")
-    sampler = FrameSampler(config)
+    sampler = FrameSampler(config, calc_foundation=shared_foundation)
     candidate_frames = sampler.assemble_candidate_dataset(at_gs, at_es)
 
     print("\n[STEP 3/6] High-Fidelity DFT Labeling (Quantum ESPRESSO)...")
@@ -45,17 +46,27 @@ def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: 
         pw_exe=getattr(config, "pw_exe", None),
         mpi_command=getattr(config, "mpi_command", None),
         mpi_args=getattr(config, "mpi_args", None),
+        n_workers=n_workers_qe,
+        timeout_s=getattr(config, "qe_timeout_s", None),
     )
     dft_limit = max_dft_frames if max_dft_frames is not None else getattr(config, "max_dft_frames", None)
-    labeled_frames = qe.label_all_frames(candidate_frames, max_frames=dft_limit)
+    labeled_frames = qe.label_all_frames(
+        candidate_frames,
+        max_frames=dft_limit,
+        sampler=sampler,
+        at_gs=at_gs,
+        n_workers=n_workers_qe,
+    )
 
     print("\n[STEP 4/6] Delta Baseline Extraction & GPU GPUMD Training...")
-    trainer = DeltaTrainer(config)
+    trainer = DeltaTrainer(config, calc_foundation=shared_foundation)
     delta_frames = trainer.compute_delta_dataset(labeled_frames)
     delta_pot_path = trainer.train_delta_nep(delta_frames)
 
     print("\n[STEP 5/6] Assembling Hybrid Defect Potential (V_base + Delta_V)...")
-    hybrid_calc = HybridDefectCalculator(config.foundation_potential_path, delta_pot_path)
+    hybrid_calc = HybridDefectCalculator(
+        config.foundation_potential_path, delta_pot_path, calc_base=shared_foundation
+    )
 
     at_test = at_gs.copy()
     at_test.calc = hybrid_calc
@@ -74,11 +85,14 @@ def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: 
 
     cc_analysis = lineshapes.get("cc_analysis") if isinstance(lineshapes, dict) else None
     cc_figure = cc_analysis.get("figure_path") if cc_analysis else None
+    failed_dft = [e["frame_id"] for e in getattr(qe, "last_failed_entries", [])]
 
     summary = {
         "workspace_dir": config.workspace_dir,
         "delta_potential": delta_pot_path,
         "n_dft_frames": len(labeled_frames),
+        "n_failed_dft_frames": len(failed_dft),
+        "failed_dft_frames": failed_dft,
         "dq_fc": dq_fc,
         "temperatures": config.temperatures,
         "total_walltime_s": total_time,

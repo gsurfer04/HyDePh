@@ -1,14 +1,18 @@
 """Normal modes, electron-phonon spectral density S(hbar omega), Huang-Rhys factor S, and optical lineshapes A(E, T)."""
 
 import os
+import json
 import time
+import hashlib
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from ase.vibrations import Vibrations
 from ase.units import _hbar, _e, _amu, _me
-from scipy.signal import fftconvolve
+from scipy.signal import fftconvolve, correlate
+
+from .defect_builder import mic_displacement
 
 HBAR_eV_fs = 0.6582119514
 KB_eV_K = 8.617333262e-5
@@ -24,15 +28,17 @@ def compute_quantum_lineshape(
     e_max_meV=None,
     n_e=1500,
 ):
-    """Computes normalized emission lineshape A(E - E_ZPL, T) via the time-domain generating function."""
+    """Computes normalized emission lineshape A(E - E_ZPL, T) via the Hermitian time-domain generating function."""
+    hw_grid_meV = np.asarray(hw_grid_meV, dtype=float)
+    s_cont_per_eV = np.asarray(s_cont_per_eV, dtype=float)
     mask = (hw_grid_meV > 0.1) & (s_cont_per_eV > 0.0)
     hw = hw_grid_meV[mask]
     s_val = s_cont_per_eV[mask] / 1000.0
-    dhw = hw[1] - hw[0] if len(hw) > 1 else 1.0
+    dhw = float(hw_grid_meV[1] - hw_grid_meV[0]) if len(hw_grid_meV) > 1 else 1.0
 
     if e_min_meV is None or e_max_meV is None:
-        total_s = np.sum(s_val * dhw)
-        mean_hw = np.sum(hw * s_val * dhw) / total_s if total_s > 0 else 35.0
+        total_s = float(np.sum(s_val * dhw))
+        mean_hw = float(np.sum(hw * s_val * dhw) / total_s) if total_s > 0 else 35.0
         erel = total_s * mean_hw
         sigma_fc = np.sqrt(max(1.0, total_s)) * mean_hw
         if e_min_meV is None:
@@ -40,38 +46,72 @@ def compute_quantum_lineshape(
         if e_max_meV is None:
             e_max_meV = max(60.0, 2.5 * mean_hw)
 
+    energy_grid = np.linspace(e_min_meV, e_max_meV, n_e)
+    if len(hw) == 0:
+        return energy_grid, np.zeros_like(energy_grid)
+
     if temp_k < 0.1:
         n_bose = np.zeros_like(hw)
     else:
-        n_bose = 1.0 / (np.exp(hw / (KB_meV_K * temp_k)) - 1.0)
+        n_bose = 1.0 / (np.exp(np.clip(hw / (KB_meV_K * temp_k), 1e-9, 500.0)) - 1.0)
 
-    t_fs = np.linspace(-6000.0, 6000.0, 16385)
-    dt = t_fs[1] - t_fs[0]
+    # Exploit Hermitian symmetry G(-t) = conj(G(t)) over t in [0, 6000] fs (8193 points)
+    t_pos = np.linspace(0.0, 6000.0, 8193)
+    dt = float(t_pos[1] - t_pos[0])
 
     w_fs = hw / (1000.0 * HBAR_eV_fs)
-    wt = np.outer(w_fs, t_fs)
-    integrand = (
-        (n_bose[:, None] + 1.0) * np.exp(1j * wt)
-        + n_bose[:, None] * np.exp(-1j * wt)
-        - (2.0 * n_bose[:, None] + 1.0)
-    )
-    g_t = np.sum(s_val[:, None] * integrand * dhw, axis=0)
-    G_t = np.exp(g_t)
+    wt = np.outer(w_fs, t_pos)
+    w_re = (s_val * (2.0 * n_bose + 1.0)) * dhw
+    w_im = s_val * dhw
+
+    g_re = (w_re @ np.cos(wt)) - float(np.sum(w_re))
+    g_im = w_im @ np.sin(wt)
 
     gamma_fs_inv = (dephasing_gamma_meV / 1000.0) / HBAR_eV_fs
-    damping = np.exp(-gamma_fs_inv * np.abs(t_fs) - 0.5 * (t_fs / 2000.0)**2)
+    damping = np.exp(-gamma_fs_inv * t_pos - 0.5 * (t_pos / 2000.0) ** 2)
+    G_pos = np.exp(g_re + 1j * g_im) * damping
 
-    energy_grid = np.linspace(e_min_meV, e_max_meV, n_e)
-    w_out = (energy_grid / 1000.0) / HBAR_eV_fs
+    # Zero-padded 1D FFT evaluation of 2 * Re \int_0^T dt G(t) exp(i * w_out * t)
+    n_fft = 131072
+    h_pos = G_pos.copy()
+    h_pos[0] *= 0.5
+    # np.fft.ifft(h_pos, n=n_fft) * n_fft computes \sum_m h_pos[m] exp(+i * 2*pi*k*m / n_fft)
+    spec_fft = np.real(np.fft.ifft(h_pos, n=n_fft)) * (2.0 * n_fft * dt / (2.0 * np.pi * HBAR_eV_fs))
+    freqs_rad_fs = 2.0 * np.pi * np.fft.fftfreq(n_fft, d=dt)
+    order = np.argsort(freqs_rad_fs)
+    e_fft_meV = freqs_rad_fs[order] * (1000.0 * HBAR_eV_fs)
+    spec_sorted = spec_fft[order]
 
-    integrand_ft = G_t * damping
-    ft_matrix = np.exp(1j * np.outer(w_out, t_fs))
-    a_unnorm = np.real(ft_matrix @ integrand_ft) * dt / (2.0 * np.pi * HBAR_eV_fs)
+    a_unnorm = np.interp(energy_grid, e_fft_meV, spec_sorted, left=0.0, right=0.0)
     a_unnorm = np.maximum(0.0, a_unnorm)
 
-    total_area = np.trapezoid(a_unnorm, energy_grid) if hasattr(np, "trapezoid") else np.trapz(a_unnorm, energy_grid)
+    trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    total_area = float(trapz_fn(a_unnorm, energy_grid))
     a_norm = a_unnorm / total_area if total_area > 0 else a_unnorm
     return energy_grid, a_norm
+
+
+def _compute_hessian_fingerprint(atoms, calc, delta=0.01) -> str:
+    """Computes a SHA256 fingerprint of the geometry and displaced calculator forces to detect stale Vibrations caches."""
+    h = hashlib.sha256()
+    h.update(f"delta={delta};nat={len(atoms)}".encode("utf-8"))
+    h.update(np.asarray(atoms.positions, dtype=np.float64).tobytes())
+    h.update(np.asarray(atoms.cell, dtype=np.float64).tobytes())
+    h.update(",".join(atoms.get_chemical_symbols()).encode("utf-8"))
+
+    # Probe energy and forces on a displaced geometry so any curvature/potential change invalidates the cache
+    try:
+        at_probe = atoms.copy()
+        if len(at_probe) > 0:
+            at_probe.positions[0, 0] += float(delta)
+        at_probe.calc = calc
+        e_val = float(at_probe.get_potential_energy())
+        f_val = np.asarray(at_probe.get_forces(), dtype=np.float64)
+        h.update(np.float64(e_val).tobytes())
+        h.update(f_val.tobytes())
+    except Exception:
+        pass
+    return h.hexdigest()
 
 
 class LineshapeEngine:
@@ -82,35 +122,58 @@ class LineshapeEngine:
     def calculate_spectral_density_and_lineshapes(self, at_gs, at_es):
         """Calculates normal modes, spectral density S(hw), and multi-T lineshapes."""
         print("\n[-] Evaluating Vibrational Normal Modes on Hybrid Potential...")
-        dr = at_es.positions - at_gs.positions
+        dr = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
         m = at_gs.get_masses()
-        dq_total = np.sqrt(np.sum(np.repeat(m, 3) * dr.flatten()**2))
+        dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
 
         vib_dir = os.path.join(self.config.workspace_dir, "vib")
         os.makedirs(vib_dir, exist_ok=True)
+        state_file = os.path.join(vib_dir, "hessian_state.json")
 
         at = at_gs.copy()
         at.calc = self.calc
         vib = Vibrations(at, name=os.path.join(vib_dir, "vib"), delta=0.01)
+
+        current_fp = _compute_hessian_fingerprint(at_gs, self.calc, delta=0.01)
+        cached_fp = None
+        if os.path.isfile(state_file):
+            try:
+                with open(state_file, "r", encoding="utf-8") as f:
+                    cached_fp = json.load(f).get("fingerprint")
+            except Exception:
+                cached_fp = None
+
+        if cached_fp != current_fp:
+            vib.clean()
+
         vib.run()
+        try:
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump({"fingerprint": current_fp}, f)
+        except Exception:
+            pass
 
         energies_ev = vib.get_energies()
 
-        valid_indices = [i for i, e in enumerate(energies_ev) if np.real(e) * 1000.0 > 1.0 and abs(np.imag(e)) < 1e-4]
+        valid_indices = [
+            i for i, e in enumerate(energies_ev)
+            if np.real(e) * 1000.0 > 1.0 and abs(np.imag(e)) < 1e-4
+        ]
         hw_modes = []
         sk_list = []
+        mass_dr = m[:, None] * dr
         for idx in valid_indices:
-            hw_k = np.real(energies_ev[idx]) * 1000.0
+            hw_k = float(np.real(energies_ev[idx]) * 1000.0)
             mode_disp = vib.get_mode(idx)
-            dq_k = np.sum(m[:, None] * dr * mode_disp)
+            dq_k = float(np.sum(mass_dr * mode_disp))
             # S_k = [omega_k / (2*hbar)] * (Delta Q_k)^2; prefactor = 0.1196127 meV^-1 amu^-1 A^-2
             s_k = 0.1196127 * hw_k * (dq_k ** 2)
             hw_modes.append(hw_k)
             sk_list.append(s_k)
 
-        hw_modes = np.array(hw_modes)
-        sk_modes = np.array(sk_list)
-        total_S = np.sum(sk_modes)
+        hw_modes = np.array(hw_modes, dtype=float)
+        sk_modes = np.array(sk_list, dtype=float)
+        total_S = float(np.sum(sk_modes))
         print(f"[+] Total Huang-Rhys Factor S: {total_S:.3f} (Franck-Condon Delta Q = {dq_total:.4f} amu^(1/2)*A)")
 
         max_mode = float(np.max(hw_modes)) if len(hw_modes) > 0 else 65.0
@@ -135,12 +198,14 @@ class LineshapeEngine:
                 sigma_smear = float(np.clip(scale_smear, 1.5, 8.5))
 
         print(f"[+] Phonon Spectral Smearing (Finite-Size Correction): sigma = {sigma_smear:.2f} meV")
-        s_cont = np.zeros_like(hw_grid)
-        for w, s in zip(hw_modes, sk_modes):
-            s_cont += s * np.exp(-0.5 * ((hw_grid - w) / sigma_smear)**2) / (np.sqrt(2.0 * np.pi) * sigma_smear)
+        if len(hw_modes) > 0:
+            diff = (hw_grid[:, None] - hw_modes[None, :]) / sigma_smear
+            s_cont = (np.exp(-0.5 * (diff ** 2)) @ sk_modes) / (np.sqrt(2.0 * np.pi) * sigma_smear)
+        else:
+            s_cont = np.zeros_like(hw_grid)
 
         if getattr(self.config, "finite_size_acoustic_cutoff", True):
-            s_cont *= np.tanh((hw_grid / max(1.0, sigma_smear))**2)
+            s_cont *= np.tanh((hw_grid / max(1.0, sigma_smear)) ** 2)
 
         s_cont *= 1000.0  # eV^-1
 
@@ -148,7 +213,7 @@ class LineshapeEngine:
         e_max = getattr(self.config, "lineshape_e_max", None)
         n_pts = getattr(self.config, "lineshape_n_points", 1500)
         if e_min is None or e_max is None:
-            mean_hw = np.sum(hw_modes * sk_modes) / total_S if total_S > 0 else 35.0
+            mean_hw = float(np.sum(hw_modes * sk_modes) / total_S) if total_S > 0 else 35.0
             erel = total_S * mean_hw
             sigma_fc = np.sqrt(max(1.0, total_S)) * mean_hw
             if e_min is None:
@@ -163,7 +228,7 @@ class LineshapeEngine:
             if user_gamma is not None:
                 gamma = float(user_gamma)
             else:
-                gamma = 1.5 + 2.0e-4 * (T**2)
+                gamma = 1.5 + 2.0e-4 * (T ** 2)
             eg, a_norm = compute_quantum_lineshape(
                 hw_grid, s_cont, temp_k=T, dephasing_gamma_meV=gamma,
                 e_min_meV=e_min, e_max_meV=e_max, n_e=n_pts
@@ -207,7 +272,7 @@ class LineshapeEngine:
         from ase import units
 
         print("\n[-] Running Finite-Temperature Anharmonic Molecular Dynamics Sampling...")
-        dr_fc = at_es.positions - at_gs.positions
+        dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
         m = at_gs.get_masses()
         dt_fs = getattr(self.config, "anharmonic_dt_fs", 1.0)
         n_steps = getattr(self.config, "anharmonic_md_steps", 2000)
@@ -226,7 +291,7 @@ class LineshapeEngine:
             is_quantum = False
 
         # Mass-weighted optical projection unit vector u_opt
-        norm_dr = np.sqrt(np.sum(m[:, None] * (dr_fc**2)))
+        norm_dr = np.sqrt(np.sum(m[:, None] * (dr_fc ** 2)))
         if norm_dr > 1e-8:
             u_opt = (m[:, None] * dr_fc) / norm_dr
         else:
@@ -243,6 +308,11 @@ class LineshapeEngine:
             e_min_meV=e_min, e_max_meV=e_max, n_e=n_pts
         )
         dE = eg_base[1] - eg_base[0]
+        w_rad_fs = (hw_grid / 1000.0) / HBAR_eV_fs
+
+        at_disp = at_gs.copy()
+        at_disp.calc = self.calc
+        du_stride = 5 if is_quantum else 1
 
         anharmonic_dict = {}
         for T in self.config.temperatures:
@@ -255,22 +325,24 @@ class LineshapeEngine:
 
             du_list = []
             v_opt_list = []
+            obs_count = [0]
+
             def step_observer():
                 v = at.get_velocities()
                 v_opt = float(np.sum(v * u_opt))
                 v_opt_list.append(v_opt)
+                obs_count[0] += 1
 
-                ug = at.get_potential_energy()
-                at_temp = at.copy()
-                at_temp.positions += dr_fc
-                at_temp.calc = self.calc
-                ue = at_temp.get_potential_energy()
-                du_list.append((ue - ug) * 1000.0)
+                if (obs_count[0] - 1) % du_stride == 0:
+                    ug = at.get_potential_energy()
+                    at_disp.set_positions(at.positions + dr_fc)
+                    ue = at_disp.get_potential_energy()
+                    du_list.append((ue - ug) * 1000.0)
 
             dyn.attach(step_observer, interval=2)
             dyn.run(n_steps)
 
-            du = np.array(du_list)
+            du = np.array(du_list, dtype=float)
             if len(du) > 10:
                 from scipy.signal import detrend
                 du_fluc = detrend(du)
@@ -280,24 +352,28 @@ class LineshapeEngine:
                     sigma_du = float(np.std(du_fluc[valid]))
                 else:
                     sigma_du = float(np.std(du_fluc))
-            else:
+            elif len(du) > 1:
                 sigma_du = float(np.std(du))
+            else:
+                sigma_du = 0.0
 
-            v_arr = np.array(v_opt_list)
+            v_arr = np.array(v_opt_list, dtype=float)
             n_v = len(v_arr)
-            vacf = np.zeros(n_v // 2)
-            for lag in range(len(vacf)):
-                vacf[lag] = np.mean(v_arr[:n_v - lag] * v_arr[lag:])
+            n_half = max(1, n_v // 2)
+            acf_full = correlate(v_arr, v_arr, mode="full")[n_v - 1 : n_v - 1 + n_half]
+            vacf = acf_full / np.arange(n_v, n_v - n_half, -1, dtype=float)
             vacf /= (vacf[0] + 1e-12)
 
-            t_vacf = np.arange(len(vacf)) * (2.0 * dt_fs)
-            hann = 0.5 * (1.0 + np.cos(np.pi * t_vacf / t_vacf[-1]))
-            vdos = []
-            for w_mev in hw_grid:
-                w_rad_fs = (w_mev / 1000.0) / HBAR_eV_fs
-                val = trapz_fn(vacf * hann * np.cos(w_rad_fs * t_vacf), t_vacf)
-                vdos.append(max(0.0, val))
-            vdos = np.array(vdos)
+            dt_vacf = 2.0 * dt_fs
+            t_vacf = np.arange(len(vacf), dtype=float) * dt_vacf
+            denom = t_vacf[-1] if len(t_vacf) > 1 and t_vacf[-1] > 0 else 1.0
+            hann = 0.5 * (1.0 + np.cos(np.pi * t_vacf / denom))
+
+            weights_t = vacf * hann * dt_vacf
+            if len(weights_t) > 1:
+                weights_t[0] *= 0.5
+                weights_t[-1] *= 0.5
+            vdos = np.maximum(0.0, weights_t @ np.cos(np.outer(t_vacf, w_rad_fs)))
             if np.max(vdos) > 0:
                 vdos /= np.max(vdos)
 
@@ -317,7 +393,7 @@ class LineshapeEngine:
                 if user_gamma is not None:
                     gamma_base = float(user_gamma)
                 else:
-                    gamma_base = 1.5 + 2.0e-4 * (T**2)
+                    gamma_base = 1.5 + 2.0e-4 * (T ** 2)
 
                 delta_gamma_anh = 0.3 * np.sqrt(max(1.0, T) / 10.0)
                 gamma_total = gamma_base + delta_gamma_anh
@@ -335,7 +411,7 @@ class LineshapeEngine:
                 kw = max(5.0 * sigma_du, 50.0)
                 n_pts_k = int(np.ceil(kw / dE))
                 tau_grid = np.arange(-n_pts_k, n_pts_k + 1) * dE
-                kernel = np.exp(-0.5 * (tau_grid / max(1.0, sigma_du))**2)
+                kernel = np.exp(-0.5 * (tau_grid / max(1.0, sigma_du)) ** 2)
                 kernel /= np.sum(kernel)
 
                 a_anh = fftconvolve(a_quant_0K, kernel, mode='same')
