@@ -1,16 +1,4 @@
-"""
-hydeph.config
-=============
-Defines the input specification and configuration validator for the automated
-color center Delta-NEP toolkit.
-
-The 5 core user inputs:
-  1. pristine_cell: Path to pristine unit cell (or ASE Atoms)
-  2. defect_cell: Path to defect cell (or defect creation specification)
-  3. foundation_potential: Path to general-purpose NEP (e.g. nep89_20250409.txt)
-  4. pseudopotentials: Dict of {Element: path_to_UPF}
-  5. temperatures: List of temperatures in Kelvin (e.g. [10.0, 77.0, 150.0, 300.0])
-"""
+"""Configuration and input validation for HyDePh."""
 
 import os
 from dataclasses import dataclass, field
@@ -21,117 +9,101 @@ from ase import Atoms
 
 @dataclass
 class ToolkitConfig:
-    # 1. Pristine unit cell
     pristine_cell_path: str
-    
-    # 2. Defect cell or specification
     defect_cell_path: Optional[str] = None
-    excited_cell_path: Optional[str] = None  # Optional explicit excited-state cell or supercell
-    excited_state_displacement: Optional[float] = None  # Optional displacement magnitude (A) for procedural ES
+    excited_cell_path: Optional[str] = None
+    excited_state_displacement: Optional[float] = None  # Angstrom
     defect_type: str = "vacancy"  # "vacancy", "substitutional", or "file"
     defect_site_element: Optional[str] = None
     defect_site_index: Optional[int] = None
     supercell_repeat: Tuple[int, int, int] = (2, 2, 2)
-    
-    # 3. Foundation potential
+
     foundation_potential_path: str = field(
         default_factory=lambda: os.environ.get("NEP_FOUNDATION_PATH", "nep89_20250409.txt")
     )
-    
-    # 4. Pseudopotentials
+
     pseudopotentials: Dict[str, str] = field(default_factory=dict)
     pseudo_dir: str = field(
         default_factory=lambda: os.environ.get("ESPRESSO_PSEUDO", "./pseudo")
     )
-    
-    # 5. Temperatures of interest
+
     temperatures: List[float] = field(default_factory=lambda: [10.0, 77.0, 150.0, 300.0])
-    
-    # Binary executable & MPI configuration (supports Windows QMatSuite / MS-MPI and Linux)
+
     pw_exe: Optional[str] = None
     mpi_command: Optional[str] = None
     mpi_args: Optional[List[str]] = None
     nep_exe: Optional[str] = None
 
-    # Electronic structure & defect state parameters
-    charge: Optional[float] = None  # Net system charge in e (e.g. -1 for NV- in diamond, 0 for neutral)
-    tot_charge: float = 0.0         # Net system charge in e (Quantum ESPRESSO parameter alias for charge)
-    spin_polarized: bool = True     # Spin-unrestricted calculation (nspin=2 in QE)
-    spin_multiplicity: int = 2      # 2S+1: 1 for singlet (S=0), 2 for doublet (S=1/2), 3 for triplet (S=1, e.g. NV-)
-    tot_magnetization: Optional[int] = None # Unpaired electrons (2S = spin_multiplicity - 1, e.g. 2 for NV-)
-    ecutwfc: float = 40.0           # Plane wave cutoff (Ry)
-    ecutrho: float = 320.0          # Charge density cutoff (Ry)
-    kpoints: Tuple[int, int, int] = (1, 1, 1) # Gamma point for defect supercells
+    charge: Optional[float] = None  # Net charge in e
+    tot_charge: float = 0.0         # QE alias for charge
+    spin_polarized: bool = True     # nspin=2 in QE
+    spin_multiplicity: int = 2      # 2S+1
+    tot_magnetization: Optional[int] = None  # 2S = spin_multiplicity - 1
+    ecutwfc: float = 40.0           # Ry
+    ecutrho: float = 320.0          # Ry
+    kpoints: Tuple[int, int, int] = (1, 1, 1)
 
     def __post_init__(self):
-        # Synchronize charge and tot_charge
         if self.charge is not None:
             self.tot_charge = float(self.charge)
         else:
             self.charge = float(self.tot_charge)
 
-        # Synchronize spin_multiplicity and tot_magnetization
         if self.tot_magnetization is not None:
             self.spin_multiplicity = int(self.tot_magnetization) + 1
         else:
             self.tot_magnetization = max(0, int(self.spin_multiplicity) - 1)
-    
-    # Frame generation parameters
-    n_fc_frames: int = 7            # Franck-Condon path frames
-    n_phonon_frames: int = 12       # Frozen phonon / thermal rattle frames
-    n_md_frames: int = 20           # Diverse frames selected via FPS from nep89 MD
-    md_temp_exploration: float = 500.0 # Elevated temperature for exploratory MD
-    random_seed: int = 42           # RNG seed for deterministic frame sampling across runs
-    force_resample: bool = False    # If True, regenerates candidate_frames.xyz even if already present
-    max_dft_frames: Optional[int] = None # Target limit on number of converged DFT frames
-    max_new_dft_frames: Optional[int] = None # Optional limit on new DFT calculations to execute per run
-    dft_resume_mode: str = "target_total" # "target_total" or "max_new"
-    
-    # Delta-NEP training parameters
+
+    n_fc_frames: int = 7
+    n_phonon_frames: int = 12
+    n_md_frames: int = 20
+    md_temp_exploration: float = 500.0
+    random_seed: int = 42
+    force_resample: bool = False
+    max_dft_frames: Optional[int] = None
+    max_new_dft_frames: Optional[int] = None
+    dft_resume_mode: str = "target_total"  # "target_total" or "max_new"
+
     delta_nep_generation: int = 1
-    nep_neurons: int = 30           # Compact ANN architecture for delta correction
+    nep_neurons: int = 30
     nep_batch: int = 2000
-    nep_steps: int = 30000          # Fast convergence on delta forces
-    
-    # Anharmonic MD & Free Energy Sampling parameters
+    nep_steps: int = 30000
+
     enable_anharmonic: bool = True
-    anharmonic_md_steps: int = 2500 # MD steps per temperature for thermal sampling
-    anharmonic_dt_fs: float = 1.0   # Timestep in fs
-    anharmonic_coupling_regime: str = "auto" # "auto" (<10 quantum generating function, >=10 semiclassical), "quantum", or "semiclassical"
-    
-    # Output workspace and figure naming
+    anharmonic_md_steps: int = 2500
+    anharmonic_dt_fs: float = 1.0
+    anharmonic_coupling_regime: str = "auto"  # "auto" (S < 10 quantum, S >= 10 semiclassical), "quantum", or "semiclassical"
+
     workspace_dir: str = "./hydeph_run"
     lineshape_figure_name: str = "lineshapes.png"
     anharmonic_figure_name: str = "anharmonic_lineshapes.png"
-    
-    # Graphing and temperature display options
+
     temperature_plot_mode: str = "both"  # "combined", "individual", or "both"
-    show_harmonic_in_anharmonic: bool = True  # graph harmonic curve as dashed line in anharmonic plots
+    show_harmonic_in_anharmonic: bool = True
     individual_figure_prefix: str = "lineshape"
-    smart_axis_scaling: bool = True          # Automatically frame axes tightly around active spectral features
-    phonon_hw_min: Optional[float] = None    # meV, lower cutoff for phonon frequency axis (None for auto)
-    phonon_hw_max: Optional[float] = None    # meV, upper cutoff for phonon frequency axis (None for adaptive)
-    lineshape_e_min: Optional[float] = None  # meV, relative to ZPL (None for smart adaptive range)
-    lineshape_e_max: Optional[float] = None  # meV, relative to ZPL (None for smart adaptive range)
-    lineshape_y_min: Optional[float] = None  # Lower limit for lineshape intensity axis (None for auto)
-    lineshape_y_max: Optional[float] = None  # Upper limit for lineshape intensity axis (None for auto)
+    smart_axis_scaling: bool = True
+    phonon_hw_min: Optional[float] = None    # meV
+    phonon_hw_max: Optional[float] = None    # meV
+    lineshape_e_min: Optional[float] = None  # meV relative to ZPL
+    lineshape_e_max: Optional[float] = None  # meV relative to ZPL
+    lineshape_y_min: Optional[float] = None
+    lineshape_y_max: Optional[float] = None
     lineshape_y_scale: str = "linear"        # "linear" or "log"
-    individual_shared_x: bool = False        # If True, individual plots share global x-axis; if False, each frames its temperature
-    phonon_smearing_meV: Optional[float] = None # meV, Gaussian smearing for discrete supercell modes (None for material-adaptive)
-    dephasing_gamma_meV: Optional[float] = None # meV, ZPL dephasing width (None for temperature-dependent default)
-    finite_size_acoustic_cutoff: bool = True # Enforces physical acoustic scaling S(hw) -> 0 as hw -> 0
+    individual_shared_x: bool = False
+    phonon_smearing_meV: Optional[float] = None
+    dephasing_gamma_meV: Optional[float] = None
+    finite_size_acoustic_cutoff: bool = True
     lineshape_n_points: int = 1500
 
-    # 1D Configuration Coordinate & Stokes Shift parameters
-    plot_configuration_coordinate: bool = True # Automatically evaluate and plot 1D CC curve and Stokes shifts
-    zpl_energy_eV: Optional[float] = None      # Zero-Phonon Line energy (eV), e.g. 1.945 for diamond NV-
+    plot_configuration_coordinate: bool = True
+    zpl_energy_eV: Optional[float] = None
     cc_figure_name: str = "configuration_coordinate.png"
-    cc_lambda_min: float = -0.30              # Minimum lambda along linear optical path
-    cc_lambda_max: float = 1.30               # Maximum lambda along linear optical path
-    cc_n_points: int = 81                     # Number of points along CC path
+    cc_lambda_min: float = -0.30
+    cc_lambda_max: float = 1.30
+    cc_n_points: int = 81
 
     def validate(self):
-        """Validate input existence and parameters."""
+        """Validate input files and configuration options."""
         if not os.path.isfile(self.pristine_cell_path):
             raise FileNotFoundError(f"Pristine cell file not found: {self.pristine_cell_path}")
         

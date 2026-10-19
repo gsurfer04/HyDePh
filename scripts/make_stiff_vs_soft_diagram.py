@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""
-scripts/make_stiff_vs_soft_diagram.py
-=====================================
-Generates a publication-grade, high-contrast 2-panel diagram demonstrating:
-  Panel (a): Why Quantum Theory is needed for stiff crystals (Diamond NV- at 10 K).
-             Classical MD gap fluctuations wash out the discrete ZPL and sidebands.
-  Panel (b): Why Anharmonic MD is needed for soft crystals (LiCl F-center at 77 K).
-             Harmonic-only theory severely underestimates bandwidth (78 meV vs 460 meV exp)
-             and misses mode softening (27.8 -> 19.8 meV).
-"""
+"""Generates the 2-panel benchmark diagram comparing stiff (Diamond NV-) and soft (LiCl F-center) crystal hosts."""
 
 import os
 import matplotlib
@@ -16,7 +7,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Configure scientific styling
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['font.size'] = 11.5
 plt.rcParams['axes.linewidth'] = 1.3

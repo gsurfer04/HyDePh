@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-scripts/make_github_diagram.py
-==============================
-Generates a publication-grade, high-contrast 2-panel benchmark diagram for HyDePh GitHub repository:
-  Panel (a): Electron-phonon spectral density S(hw) and defect-core VDOS softening vs. Takiyama (1978).
-  Panel (b): LiCl F-center photoluminescence emission band at 77 K: Harmonic vs. Anharmonic MD vs. Experiment.
-"""
+"""Generates the 2-panel LiCl F-center benchmark diagram comparing harmonic, anharmonic MD, and Takiyama (1978) spectra."""
 
 import os
 import matplotlib
@@ -13,7 +7,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Configure clean scientific styling
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['font.size'] = 11.5
 plt.rcParams['axes.linewidth'] = 1.3

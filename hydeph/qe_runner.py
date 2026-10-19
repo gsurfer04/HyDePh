@@ -1,9 +1,4 @@
-"""
-hydeph.qe_runner
-================
-Automates Quantum ESPRESSO pw.x single-point calculations to label candidate
-frames with total DFT energies and atomic forces using user-provided pseudopotentials.
-"""
+"""Quantum ESPRESSO `pw.x` runner with caching and type-balanced resumption."""
 
 import os
 import sys
@@ -18,21 +13,21 @@ from ase.units import Ry, Bohr
 
 
 def is_windows():
-    """Returns True if running on Windows platform."""
+    """Returns True if running on Windows."""
     return sys.platform.startswith("win")
 
 
 def write_qe_input(atoms, pw_in_path, config, calculation="scf"):
-    """Writes a clean Quantum ESPRESSO pw.x input card."""
+    """Writes a Quantum ESPRESSO `pw.x` input card."""
     cell = atoms.get_cell()
     pos = atoms.positions
     symbols = atoms.get_chemical_symbols()
-    
+
     unique_symbols = sorted(list(set(symbols)))
     from ase.data import atomic_masses, atomic_numbers
     mass_dict = {"Li": 6.941, "Cl": 35.453, "C": 12.011, "Si": 28.085, "N": 14.007, "F": 18.9984}
 
-    # Normalize pseudo_dir path to forward slashes for Fortran namelist parser
+    # Fortran namelist parser requires forward slashes
     clean_pseudo_dir = config.pseudo_dir.replace("\\", "/") if getattr(config, "pseudo_dir", None) else "./pseudo"
 
     header = f"""&CONTROL
@@ -84,24 +79,23 @@ ATOMIC_SPECIES
 
 
 def parse_qe_output(pw_out_path):
-    """Parses total energy (eV) and forces (eV/A) from QE pw.x output."""
+    """Parses total energy (eV) and forces (eV/A) from `pw.x` output."""
     if not os.path.isfile(pw_out_path):
         return None, None
-    
+
     energy_ev = None
     forces_list = []
-    
+
     with open(pw_out_path, "r") as f:
         lines = f.readlines()
-        
+
     for i, line in enumerate(lines):
         if "!    total energy" in line:
-            # '!    total energy              =     -47.99240624 Ry'
             parts = line.split("=")
             if len(parts) > 1:
                 e_ry = float(parts[1].replace("Ry", "").strip())
-                energy_ev = e_ry * Ry  # 1 Ry = 13.6056980659 eV
-                
+                energy_ev = e_ry * Ry
+
         if "Forces acting on atoms (cartesian axes, Ry/au):" in line:
             forces_list = []
             for j in range(i + 1, len(lines)):
@@ -116,18 +110,13 @@ def parse_qe_output(pw_out_path):
                     fy = float(m.group(2)) * (Ry / Bohr)
                     fz = float(m.group(3)) * (Ry / Bohr)
                     forces_list.append([fx, fy, fz])
-                    
+
     forces_ev_a = np.array(forces_list) if forces_list else None
     return energy_ev, forces_ev_a
 
 
 def resolve_pw_executable(pw_exe=None):
-    """
-    Resolves the Quantum ESPRESSO pw executable path across Windows and Linux.
-    
-    Supports native Windows builds (e.g. from QMatSuite/quantum-espresso-windows-exe:
-    https://github.com/QMatSuite/quantum-espresso-windows-exe).
-    """
+    """Resolves the Quantum ESPRESSO `pw` executable path across Linux and Windows."""
     if pw_exe:
         if os.path.isfile(pw_exe):
             return os.path.abspath(pw_exe)
@@ -136,7 +125,6 @@ def resolve_pw_executable(pw_exe=None):
             return found
         return pw_exe
 
-    # Check environment variables
     for env_var in ["PW_EXE", "QE_PW_EXE"]:
         env_exe = os.environ.get(env_var)
         if env_exe:
@@ -177,15 +165,7 @@ def resolve_pw_executable(pw_exe=None):
 
 
 def resolve_mpi_runner(mpi_command=None, n_procs=2):
-    """
-    Resolves the MPI launcher executable and process-count flag.
-    
-    Key differences between Linux and Windows:
-    - Linux typically uses 'mpirun' or 'mpiexec' with '-np <N>' or '-n <N>'.
-    - Windows (Microsoft MPI as used by QMatSuite) uses 'mpiexec.exe' with '-n <N>'.
-      'mpirun' is NOT available in MS-MPI.
-    - For n_procs <= 1, MPI launcher is bypassed for direct serial execution.
-    """
+    """Resolves the MPI launcher and process-count flag, returning `(None, None)` for `n_procs <= 1`."""
     if n_procs <= 1:
         return None, None
 
@@ -197,7 +177,6 @@ def resolve_mpi_runner(mpi_command=None, n_procs=2):
     for env_var in ["HYDEPH_MPI_CMD", "MPI_CMD"]:
         env_mpi = os.environ.get(env_var)
         if env_mpi:
-            cmd_lower = os.path.basename(env_mpi).lower()
             flag = "-n" if is_windows() else "-np"
             return env_mpi, flag
 
@@ -238,12 +217,7 @@ def resolve_mpi_runner(mpi_command=None, n_procs=2):
 
 
 def build_qe_command(pw_exe, pw_in="pw.in", n_procs=2, mpi_command=None, mpi_args=None):
-    """
-    Builds the command argument list for running Quantum ESPRESSO.
-    
-    Handles Windows Microsoft MPI (mpiexec -n <N>) vs Linux OpenMPI/MPICH (mpirun -np <N>),
-    as well as serial execution when n_procs <= 1.
-    """
+    """Builds the command argument list for running Quantum ESPRESSO."""
     cmd_args = []
     if n_procs > 1:
         mpi_runner, n_flag = resolve_mpi_runner(mpi_command, n_procs=n_procs)
@@ -259,7 +233,7 @@ def build_qe_command(pw_exe, pw_in="pw.in", n_procs=2, mpi_command=None, mpi_arg
 
 
 def check_pw_in_matches_atoms(pw_in, atoms, tol=1e-3):
-    """Verifies that atomic positions in existing pw.in match atoms to prevent stale cache hits."""
+    """Verifies that atomic positions in existing `pw.in` match `atoms` within `tol`."""
     if not os.path.isfile(pw_in):
         return True
     try:
@@ -287,10 +261,7 @@ def check_pw_in_matches_atoms(pw_in, atoms, tol=1e-3):
 
 
 def find_frame_calc_dir(dft_dir, cand_idx, frame_id, atoms):
-    """
-    Finds the calculation directory for a frame, checking canonical and legacy names.
-    Returns (calc_dir, is_converged).
-    """
+    """Finds the calculation directory for a frame and returns `(calc_dir, is_converged)`."""
     canonical_dir = os.path.join(dft_dir, f"frame_{cand_idx:03d}_{frame_id}")
     candidates = [
         canonical_dir,
@@ -316,20 +287,19 @@ class QERunner:
     def __init__(self, config, n_procs=2, pw_exe=None, mpi_command=None, mpi_args=None):
         self.config = config
         self.n_procs = n_procs
-        
+
         chosen_pw = pw_exe or getattr(config, "pw_exe", None)
         self.pw_exe = resolve_pw_executable(chosen_pw)
-        
+
         self.mpi_command = mpi_command or getattr(config, "mpi_command", None)
         self.mpi_args = mpi_args or getattr(config, "mpi_args", None)
 
     def label_single_frame(self, atoms, calc_dir):
-        """Runs single-point QE calculation for one frame with live output streaming, geometry verification, and caching."""
+        """Runs or reuses a cached single-point QE calculation for `atoms` in `calc_dir`."""
         os.makedirs(calc_dir, exist_ok=True)
         pw_in = os.path.join(calc_dir, "pw.in")
         pw_out = os.path.join(calc_dir, "pw.out")
-        
-        # Check cache with geometry verification
+
         if os.path.isfile(pw_out):
             try:
                 with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
@@ -348,7 +318,6 @@ class QERunner:
                 else:
                     print(f"      [Cache mismatch] Atomic positions in {pw_in} differ from frame. Recomputing...", flush=True)
             else:
-                # Incomplete previous calculation: clean scratch tmp directory before restart
                 tmp_dir = os.path.join(calc_dir, "tmp")
                 if os.path.isdir(tmp_dir):
                     try:
@@ -363,8 +332,6 @@ class QERunner:
                 print(f"      [Resuming] Incomplete calculation in {calc_dir}. Cleaned scratch tmp/ and restarting...", flush=True)
 
         write_qe_input(atoms, pw_in, self.config)
-        
-        # Ensure tmp scratch dir exists for QE outdir
         os.makedirs(os.path.join(calc_dir, "tmp"), exist_ok=True)
 
         cmd_args = build_qe_command(
@@ -375,7 +342,7 @@ class QERunner:
             mpi_args=self.mpi_args,
         )
 
-        # On Windows, ensure directory containing pw.exe is on PATH so runtime DLLs (MKL, MS-MPI) are resolved
+        # Prepend pw_exe directory to PATH so colocated MKL/MS-MPI DLLs resolve on Windows
         env = os.environ.copy()
         if os.path.isabs(self.pw_exe):
             pw_dir = os.path.dirname(self.pw_exe)
@@ -390,7 +357,7 @@ class QERunner:
                 cwd=calc_dir,
                 env=env,
             )
-            
+
             last_iter = 0
             while proc.poll() is None:
                 time.sleep(2.0)
@@ -414,7 +381,7 @@ class QERunner:
                         pass
 
             proc.wait()
-        
+
         e_ev, f_ev_a = parse_qe_output(pw_out)
         if e_ev is None or f_ev_a is None or len(f_ev_a) != len(atoms):
             tail_msg = ""
@@ -435,25 +402,21 @@ class QERunner:
                     f"\n  4. Execution command was: {' '.join(str(c) for c in cmd_args)}"
                 )
             raise RuntimeError(f"QE calculation failed in {calc_dir}.\n{tail_msg}{win_msg}")
-            
+
         at_labeled = atoms.copy()
         at_labeled.info["energy"] = e_ev
         at_labeled.arrays["forces"] = f_ev_a
         return at_labeled
 
     def label_all_frames(self, frames, max_frames=None, max_new_frames=None):
-        """
-        Labels candidate frames with first-principles DFT, with smart resumption of interrupted runs,
-        persistent frame labels, and intelligent budget allocation across sampling types.
-        """
+        """Labels candidate frames with DFT, reusing converged frames and balancing sample types."""
         dft_dir = os.path.join(self.config.workspace_dir, "dft_calculations")
         os.makedirs(dft_dir, exist_ok=True)
         out_xyz = os.path.join(self.config.workspace_dir, "labeled_dft_frames.xyz")
-        
-        # 1. Inspect status of all candidate frames
+
         completed_entries = []
         pending_entries = []
-        
+
         for idx, fr in enumerate(frames):
             cand_idx = fr.info.get("candidate_index", idx)
             frame_id = fr.info.get("frame_id") or fr.info.get("label") or f"frame_{cand_idx:02d}"
@@ -471,10 +434,9 @@ class QERunner:
             else:
                 pending_entries.append(entry)
 
-        # Status summary
         print(f"\n[-] High-Fidelity DFT Labeling (Quantum ESPRESSO, np={self.n_procs})...")
         print(f"    Total candidate pool: {len(frames)} frames")
-        
+
         type_completed = {}
         for e in completed_entries:
             st = e["sample_type"]
@@ -494,7 +456,6 @@ class QERunner:
         else:
             print(f"    [i] All {len(frames)} candidate frames are already converged!")
 
-        # 2. Determine frames to calculate based on budget and resume policy
         resume_mode = getattr(self.config, "dft_resume_mode", "target_total")
         dft_target = max_frames if max_frames is not None else getattr(self.config, "max_dft_frames", None)
         new_limit = max_new_frames if max_new_frames is not None else getattr(self.config, "max_new_dft_frames", None)
@@ -504,7 +465,6 @@ class QERunner:
             to_calculate = []
         elif resume_mode == "max_new" or (dft_target is None and new_limit is not None):
             budget = new_limit if new_limit is not None else len(pending_entries)
-            # Prioritize underrepresented sample types
             sorted_pending = sorted(
                 pending_entries,
                 key=lambda e: (type_completed.get(e["sample_type"], 0), e["index"])
@@ -520,8 +480,6 @@ class QERunner:
                 needed = dft_target - n_done
                 if new_limit is not None:
                     needed = min(needed, new_limit)
-                # Prioritize underrepresented sample types among pending frames
-                # so that e.g. Rattle and MD frames are chosen rather than duplicating/over-sampling FC frames
                 sorted_pending = sorted(
                     pending_entries,
                     key=lambda e: (type_completed.get(e["sample_type"], 0), e["index"])
@@ -532,13 +490,11 @@ class QERunner:
         else:
             to_calculate = pending_entries
 
-        # 3. Collect completed frames from cache
         labeled_dict = {}
         for entry in completed_entries:
             at = self.label_single_frame(entry["atoms"], entry["calc_dir"])
             labeled_dict[entry["index"]] = at
 
-        # 4. Execute pending calculations
         if to_calculate:
             print(f"\n[-] Executing {len(to_calculate)} DFT calculation(s)...")
             for step_num, entry in enumerate(to_calculate, 1):
@@ -547,25 +503,22 @@ class QERunner:
                 cdir = entry["calc_dir"]
                 label = entry["frame_id"]
                 stype = entry["sample_type"]
-                
+
                 t0 = time.time()
                 print(f"\n    ---> [{step_num}/{len(to_calculate)}] Calculating {label} ({stype}) in {os.path.basename(cdir)}...")
                 labeled_fr = self.label_single_frame(fr, cdir)
                 labeled_dict[idx] = labeled_fr
                 dt = time.time() - t0
                 print(f"    [+] {label} labeled | E = {labeled_fr.info['energy']:.4f} eV | Max F = {np.abs(labeled_fr.arrays['forces']).max():.4f} eV/A ({dt:.1f} s)")
-                
-                # Update completed counts
+
                 type_completed[stype] = type_completed.get(stype, 0) + 1
-                
-                # Incremental write to labeled_dft_frames.xyz so progress is never lost on interruption
+
                 current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
                 ase.io.write(out_xyz, current_frames, format="extxyz")
 
-        # 5. Assemble final dataset sorted by candidate index
         final_labeled = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
         ase.io.write(out_xyz, final_labeled, format="extxyz")
-        
+
         final_types = {}
         for fr in final_labeled:
             st = fr.info.get("sample_type", "unknown")

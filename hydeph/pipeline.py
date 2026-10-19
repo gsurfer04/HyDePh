@@ -1,16 +1,4 @@
-"""
-hydeph.pipeline
-===============
-Top-level turnkey workflow orchestrating the automated color-center Delta-NEP
-training and multi-temperature lineshape generation.
-
-Core Inputs:
-  1. pristine_cell_path
-  2. defect_cell_path (or automatic defect generation specification)
-  3. foundation_potential_path (e.g., nep89_20250409.txt)
-  4. pseudopotentials (dict of element -> UPF path)
-  5. temperatures (list of temperatures in K)
-"""
+"""End-to-end Delta-NEP training and optical lineshape pipeline."""
 
 import os
 import time
@@ -27,23 +15,7 @@ from .lineshape import LineshapeEngine
 
 
 def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: int = 2):
-    """
-    Executes the end-to-end automated Delta-NEP color center workflow.
-    
-    Parameters
-    ----------
-    config : ToolkitConfig
-        Validated configuration specifying the 5 inputs and workflow parameters.
-    max_dft_frames : int, optional
-        Maximum number of representative frames to label with DFT (useful for rapid demo).
-    n_procs_qe : int, default=2
-        Number of MPI processes for Quantum ESPRESSO pw.x.
-        
-    Returns
-    -------
-    dict
-        Comprehensive summary of workflow execution, metrics, and generated artifacts.
-    """
+    """Runs the Delta-NEP defect workflow and returns a summary dictionary."""
     t_start = time.time()
     print("=" * 78)
     print("      AUTOMATED COLOR-CENTER DELTA-NEP WORKFLOW PIPELINE")
@@ -54,22 +26,18 @@ def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: 
     print(f"Pseudopotentials: {config.pseudopotentials}")
     print("=" * 78)
 
-    # Step 0: Validate configuration
     config.validate()
 
-    # Step 1: Defect Construction & Foundation Potential Geometry Optimizations
     print("\n[STEP 1/6] Defect Construction & Geometry Optimization...")
     builder = DefectBuilder(config)
     pristine_sc, defect_sc = builder.build_supercell_and_defect()
     at_gs = builder.relax_ground_state(defect_sc)
     at_es, dq_fc = builder.generate_excited_state_geometry(at_gs)
 
-    # Step 2: 4-Phase Representative Frame Sampling
     print("\n[STEP 2/6] Representative Frame Generation Protocol...")
     sampler = FrameSampler(config)
     candidate_frames = sampler.assemble_candidate_dataset(at_gs, at_es)
 
-    # Step 3: First-Principles Quantum ESPRESSO Labeling
     print("\n[STEP 3/6] High-Fidelity DFT Labeling (Quantum ESPRESSO)...")
     qe = QERunner(
         config,
@@ -81,24 +49,20 @@ def run_pipeline(config: ToolkitConfig, max_dft_frames: int = None, n_procs_qe: 
     dft_limit = max_dft_frames if max_dft_frames is not None else getattr(config, "max_dft_frames", None)
     labeled_frames = qe.label_all_frames(candidate_frames, max_frames=dft_limit)
 
-    # Step 4: Foundation Baseline Extraction & Delta-NEP Training
     print("\n[STEP 4/6] Delta Baseline Extraction & GPU GPUMD Training...")
     trainer = DeltaTrainer(config)
     delta_frames = trainer.compute_delta_dataset(labeled_frames)
     delta_pot_path = trainer.train_delta_nep(delta_frames)
 
-    # Step 5: Hybrid Potential Assembly
     print("\n[STEP 5/6] Assembling Hybrid Defect Potential (V_base + Delta_V)...")
     hybrid_calc = HybridDefectCalculator(config.foundation_potential_path, delta_pot_path)
-    
-    # Test hybrid evaluation on ground state
+
     at_test = at_gs.copy()
     at_test.calc = hybrid_calc
     e_hybrid = at_test.get_potential_energy()
     f_hybrid = at_test.get_forces()
     print(f"[+] Hybrid Potential verified on relaxed GS: E = {e_hybrid:.4f} eV, Max F = {np.abs(f_hybrid).max():.4f} eV/A")
 
-    # Step 6: Multi-Temperature Optical Lineshapes
     print("\n[STEP 6/6] Normal Modes & Multi-Temperature Optical Lineshapes...")
     engine = LineshapeEngine(config, hybrid_calc)
     lineshapes = engine.calculate_spectral_density_and_lineshapes(at_gs, at_es)

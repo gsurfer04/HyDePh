@@ -1,11 +1,4 @@
-"""
-hydeph.lineshape
-================
-Computes normal modes, electron-phonon spectral density S(hbar omega),
-total Huang-Rhys factor S, and optical lineshapes A(E, T) across user temperatures.
-Includes both harmonic generating-function lineshapes and finite-temperature
-anharmonic molecular dynamics free energy sampling.
-"""
+"""Normal modes, electron-phonon spectral density S(hbar omega), Huang-Rhys factor S, and optical lineshapes A(E, T)."""
 
 import os
 import time
@@ -31,13 +24,12 @@ def compute_quantum_lineshape(
     e_max_meV=None,
     n_e=1500,
 ):
-    """Computes normalized emission lineshape A(E - E_ZPL, T) via generating function."""
+    """Computes normalized emission lineshape A(E - E_ZPL, T) via the time-domain generating function."""
     mask = (hw_grid_meV > 0.1) & (s_cont_per_eV > 0.0)
     hw = hw_grid_meV[mask]
     s_val = s_cont_per_eV[mask] / 1000.0
     dhw = hw[1] - hw[0] if len(hw) > 1 else 1.0
 
-    # Adaptively determine energy range if not explicitly provided
     if e_min_meV is None or e_max_meV is None:
         total_s = np.sum(s_val * dhw)
         mean_hw = np.sum(hw * s_val * dhw) / total_s if total_s > 0 else 35.0
@@ -93,19 +85,17 @@ class LineshapeEngine:
         dr = at_es.positions - at_gs.positions
         m = at_gs.get_masses()
         dq_total = np.sqrt(np.sum(np.repeat(m, 3) * dr.flatten()**2))
-        
-        # Finite-difference Hessian around ground state
+
         vib_dir = os.path.join(self.config.workspace_dir, "vib")
         os.makedirs(vib_dir, exist_ok=True)
-        
+
         at = at_gs.copy()
         at.calc = self.calc
         vib = Vibrations(at, name=os.path.join(vib_dir, "vib"), delta=0.01)
         vib.run()
-        
+
         energies_ev = vib.get_energies()
-        
-        # Filter real positive vibrational modes and project mass-weighted displacements
+
         valid_indices = [i for i, e in enumerate(energies_ev) if np.real(e) * 1000.0 > 1.0 and abs(np.imag(e)) < 1e-4]
         hw_modes = []
         sk_list = []
@@ -113,24 +103,22 @@ class LineshapeEngine:
             hw_k = np.real(energies_ev[idx]) * 1000.0
             mode_disp = vib.get_mode(idx)
             dq_k = np.sum(m[:, None] * dr * mode_disp)
-            # Exact formula: S_k = [omega_k / (2*hbar)] * (Delta Q_k)^2
-            # With hw_k in meV, factor = 0.1196127 meV^-1 * amu^-1 * A^-2
+            # S_k = [omega_k / (2*hbar)] * (Delta Q_k)^2; prefactor = 0.1196127 meV^-1 amu^-1 A^-2
             s_k = 0.1196127 * hw_k * (dq_k ** 2)
             hw_modes.append(hw_k)
             sk_list.append(s_k)
-            
+
         hw_modes = np.array(hw_modes)
         sk_modes = np.array(sk_list)
         total_S = np.sum(sk_modes)
         print(f"[+] Total Huang-Rhys Factor S: {total_S:.3f} (Franck-Condon Delta Q = {dq_total:.4f} amu^(1/2)*A)")
-        
-        # Build continuous spectral density S(hbar omega)
+
         max_mode = float(np.max(hw_modes)) if len(hw_modes) > 0 else 65.0
         user_hw_max = getattr(self.config, "phonon_hw_max", None)
         hw_max = user_hw_max if user_hw_max is not None else max(70.0, max_mode * 1.05)
         n_hw_pts = max(600, int(np.ceil(hw_max * 10)))
         hw_grid = np.linspace(0.5, hw_max, n_hw_pts)
-        # Finite-size smearing width to bridge discrete supercell mode spacing
+
         user_smear = getattr(self.config, "phonon_smearing_meV", None)
         if user_smear is not None:
             sigma_smear = float(user_smear)
@@ -151,13 +139,11 @@ class LineshapeEngine:
         for w, s in zip(hw_modes, sk_modes):
             s_cont += s * np.exp(-0.5 * ((hw_grid - w) / sigma_smear)**2) / (np.sqrt(2.0 * np.pi) * sigma_smear)
 
-        # Enforce physical acoustic scaling: S(hw) -> 0 as hw -> 0 to avoid boundary artifacts
         if getattr(self.config, "finite_size_acoustic_cutoff", True):
             s_cont *= np.tanh((hw_grid / max(1.0, sigma_smear))**2)
 
-        s_cont *= 1000.0 # to eV^-1
-        
-        # Determine energy window for lineshapes
+        s_cont *= 1000.0  # eV^-1
+
         e_min = getattr(self.config, "lineshape_e_min", None)
         e_max = getattr(self.config, "lineshape_e_max", None)
         n_pts = getattr(self.config, "lineshape_n_points", 1500)
@@ -170,7 +156,6 @@ class LineshapeEngine:
             if e_max is None:
                 e_max = max(60.0, 2.5 * mean_hw)
 
-        # Compute harmonic lineshapes across user temperatures
         print(f"\n[-] Computing Harmonic Optical Lineshapes across temperatures: {self.config.temperatures} K (Range: [{e_min:.1f}, {e_max:.1f}] meV)...")
         lineshape_dict = {}
         for T in self.config.temperatures:
@@ -185,8 +170,7 @@ class LineshapeEngine:
             )
             lineshape_dict[T] = (eg, a_norm)
             print(f"    [+] Harmonic T = {T:5.1f} K | Peak A(E) = {np.max(a_norm):.4f} | ZPL DWF = {np.exp(-total_S)*100.0:.2f}%")
-            
-        # Optional Anharmonic Sampling
+
         anharmonic_dict = None
         if getattr(self.config, "enable_anharmonic", True):
             anharmonic_dict = self.run_anharmonic_sampling(
@@ -196,7 +180,6 @@ class LineshapeEngine:
         else:
             self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None)
 
-        # Optional 1D Configuration Coordinate & Stokes Shift Analysis
         cc_dict = None
         if getattr(self.config, "plot_configuration_coordinate", True):
             try:
@@ -217,17 +200,8 @@ class LineshapeEngine:
         self, at_gs, at_es, hw_grid, s_cont, total_S=None, e_min=None, e_max=None, n_pts=1500
     ):
         """
-        Runs finite-temperature Langevin MD on the hybrid potential across user temperatures.
-
-        For intermediate/weak coupling (S < 10, e.g. SiC divacancies, diamond NV):
-          - Projects velocities onto the optical Franck-Condon reaction coordinate u_opt.
-          - Computes projected VDOS g_opt(hw, T) to capture mode softening alpha_soft(T)
-            and intrinsic anharmonic dephasing without bulk optical phonon artifacts.
-          - Evaluates optical lineshape via the finite-temperature quantum generating function,
-            preserving the sharp ZPL and structured phonon sidebands observed experimentally.
-
-        For strong coupling (S >= 10, e.g. F-centers with massive lattice relaxation):
-          - Semiclassical Marcus energy-gap fluctuation convolution is applied for broad classical bands.
+        Runs Langevin MD across configured temperatures to evaluate anharmonic VDOS and lineshapes.
+        Uses softened quantum generating functions for S < 10 and Marcus gap convolution for S >= 10.
         """
         from ase.md.langevin import Langevin
         from ase import units
@@ -243,7 +217,6 @@ class LineshapeEngine:
             dhw = hw_grid[1] - hw_grid[0] if len(hw_grid) > 1 else 1.0
             total_S = float(np.sum(s_cont * dhw) / 1000.0)
 
-        # Coupling regime: 'auto' (< 10 -> quantum, >= 10 -> semiclassical), 'quantum', or 'semiclassical'
         regime_opt = getattr(self.config, "anharmonic_coupling_regime", "auto").lower()
         if regime_opt == "auto":
             is_quantum = (total_S < 10.0)
@@ -252,22 +225,19 @@ class LineshapeEngine:
         else:
             is_quantum = False
 
-        # Mass-weighted optical projection unit vector:
-        # u_opt,i = (M_i * Delta R_FC,i) / sqrt(sum_j M_j * |Delta R_FC,j|^2)
+        # Mass-weighted optical projection unit vector u_opt
         norm_dr = np.sqrt(np.sum(m[:, None] * (dr_fc**2)))
         if norm_dr > 1e-8:
             u_opt = (m[:, None] * dr_fc) / norm_dr
         else:
             u_opt = np.ones_like(dr_fc) / np.sqrt(len(dr_fc) * 3)
 
-        # Baseline harmonic effective frequency Omega_0
         active_mask = s_cont > 0.01 * np.max(s_cont) if np.max(s_cont) > 0 else np.ones(len(hw_grid), dtype=bool)
         if np.any(active_mask):
             omega_0 = float(trapz_fn(hw_grid[active_mask] * s_cont[active_mask], hw_grid[active_mask]) / trapz_fn(s_cont[active_mask], hw_grid[active_mask]))
         else:
             omega_0 = 35.0
 
-        # Baseline zero-temperature quantum lineshape
         eg_base, a_quant_0K = compute_quantum_lineshape(
             hw_grid, s_cont, temp_k=0.01, dephasing_gamma_meV=1.0,
             e_min_meV=e_min, e_max_meV=e_max, n_e=n_pts
@@ -280,31 +250,27 @@ class LineshapeEngine:
             at = at_gs.copy()
             at.calc = self.calc
             dyn = Langevin(at, dt_fs * units.fs, temperature_K=T, friction=0.01 / units.fs, logfile=None)
-            
-            # Equilibrate
+
             dyn.run(300)
-            
+
             du_list = []
             v_opt_list = []
             def step_observer():
-                # Projected velocity along optical coordinate
                 v = at.get_velocities()
                 v_opt = float(np.sum(v * u_opt))
                 v_opt_list.append(v_opt)
 
-                # Energy gap Delta U(t)
                 ug = at.get_potential_energy()
                 at_temp = at.copy()
                 at_temp.positions += dr_fc
                 at_temp.calc = self.calc
                 ue = at_temp.get_potential_energy()
-                du_list.append((ue - ug) * 1000.0) # meV
+                du_list.append((ue - ug) * 1000.0)
 
             dyn.attach(step_observer, interval=2)
             dyn.run(n_steps)
 
             du = np.array(du_list)
-            # Remove any low-frequency trajectory drift to isolate high-frequency thermal fluctuations
             if len(du) > 10:
                 from scipy.signal import detrend
                 du_fluc = detrend(du)
@@ -317,7 +283,6 @@ class LineshapeEngine:
             else:
                 sigma_du = float(np.std(du))
 
-            # Optical-projected VACF and VDOS along u_opt
             v_arr = np.array(v_opt_list)
             n_v = len(v_arr)
             vacf = np.zeros(n_v // 2)
@@ -325,7 +290,7 @@ class LineshapeEngine:
                 vacf[lag] = np.mean(v_arr[:n_v - lag] * v_arr[lag:])
             vacf /= (vacf[0] + 1e-12)
 
-            t_vacf = np.arange(len(vacf)) * (2.0 * dt_fs) # dt between samples = 2 fs
+            t_vacf = np.arange(len(vacf)) * (2.0 * dt_fs)
             hann = 0.5 * (1.0 + np.cos(np.pi * t_vacf / t_vacf[-1]))
             vdos = []
             for w_mev in hw_grid:
@@ -337,7 +302,6 @@ class LineshapeEngine:
                 vdos /= np.max(vdos)
 
             if is_quantum:
-                # 1. Mode softening ratio alpha_soft(T) = Omega(T) / Omega_0
                 mask_active = (hw_grid >= max(10.0, 0.4 * omega_0)) & (hw_grid <= min(float(hw_grid[-1]), 1.8 * omega_0))
                 if np.sum(vdos[mask_active]) > 1e-4:
                     omega_T = float(trapz_fn(hw_grid[mask_active] * vdos[mask_active], hw_grid[mask_active]) / trapz_fn(vdos[mask_active], hw_grid[mask_active]))
@@ -346,18 +310,15 @@ class LineshapeEngine:
                     omega_T = omega_0
                     alpha_soft = 1.0
 
-                # Scale spectral density by alpha_soft (conserving total Huang-Rhys factor)
                 hw_shifted = hw_grid / alpha_soft
                 s_anh = np.interp(hw_shifted, hw_grid, s_cont, left=0.0, right=0.0) / alpha_soft
 
-                # Thermal dephasing
                 user_gamma = getattr(self.config, "dephasing_gamma_meV", None)
                 if user_gamma is not None:
                     gamma_base = float(user_gamma)
                 else:
                     gamma_base = 1.5 + 2.0e-4 * (T**2)
 
-                # Anharmonic phonon-phonon scattering dephasing
                 delta_gamma_anh = 0.3 * np.sqrt(max(1.0, T) / 10.0)
                 gamma_total = gamma_base + delta_gamma_anh
 
@@ -367,11 +328,10 @@ class LineshapeEngine:
                 )
                 regime_tag = f"Quantum GenFn (alpha_soft={alpha_soft:.3f}, gamma={gamma_total:.2f} meV)"
             else:
-                # Semiclassical Gaussian convolution with energy gap fluctuations sigma_du
                 erel_est = abs(eg_base[np.argmax(a_quant_0K)])
                 sig_scale = np.sqrt(2.0 * max(1.0, KB_meV_K * T) * max(50.0, erel_est))
                 sigma_du = min(max(sigma_du, 1.0), 2.0 * sig_scale)
-                
+
                 kw = max(5.0 * sigma_du, 50.0)
                 n_pts_k = int(np.ceil(kw / dE))
                 tau_grid = np.arange(-n_pts_k, n_pts_k + 1) * dE
@@ -387,7 +347,6 @@ class LineshapeEngine:
                 omega_T = omega_0
                 regime_tag = f"Semiclassical Marcus (sigma={sigma_du:.1f} meV)"
 
-            # Calculate FWHM
             fwhm_idx = np.where(a_anh >= 0.5 * np.max(a_anh))[0]
             fwhm_meV = eg_out[fwhm_idx[-1]] - eg_out[fwhm_idx[0]] if len(fwhm_idx) > 1 else 0.0
 
@@ -531,29 +490,27 @@ class LineshapeEngine:
         return (e_min_final, e_max_final), (y_min_final, y_max_final)
 
     def plot_all(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None):
-        """Unified plotting dispatcher honoring temperature_plot_mode ('combined', 'individual', 'both')."""
+        """Dispatches combined and/or individual temperature plots according to `temperature_plot_mode`."""
         plot_mode = getattr(self.config, "temperature_plot_mode", "both").lower()
-        
+
         if plot_mode in ("combined", "both"):
             self.plot_combined(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict)
-            
+
         if plot_mode in ("individual", "both"):
             self.plot_individual(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict)
 
     def plot_combined(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None):
-        """Plots combined multi-temperature figure (phonon densities and lineshapes) with smart scaling."""
+        """Plots a combined multi-temperature figure of phonon densities and lineshapes."""
         fig, axs = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
         show_harmonic = getattr(self.config, "show_harmonic_in_anharmonic", True)
 
         color_cycle = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728', '#9467bd', '#8c564b', '#e377c2']
         temp_colors = {T: color_cycle[i % len(color_cycle)] for i, T in enumerate(self.config.temperatures)}
 
-        # Panel (a): Phonon Density & Electron-Phonon Coupling
         ax = axs[0]
         s_norm = s_cont / np.max(s_cont) if np.max(s_cont) > 0 else s_cont
 
         if anharmonic_dict:
-            # Anharmonic: curve is filled
             for T in self.config.temperatures:
                 if T in anharmonic_dict:
                     col = temp_colors.get(T, '#1f77b4')
@@ -561,16 +518,13 @@ class LineshapeEngine:
                     t_str = f"{int(T)} K" if float(T).is_integer() else f"{T} K"
                     ax.fill_between(hw_grid, 0, vdos, color=col, alpha=0.22, label=f'Anharmonic VDOS ({t_str})')
                     ax.plot(hw_grid, vdos, color=col, lw=2.0)
-            
-            # Harmonic data optionally graphed as dashed line
+
             if show_harmonic:
                 ax.plot(hw_grid, s_norm, color='black', lw=2.2, linestyle='--', label=r'Harmonic $S(\hbar\omega)$ ($0\ \mathrm{K}$)')
         else:
-            # Harmonic only: filled curve
             ax.plot(hw_grid, s_norm, color='#1f77b4', lw=2.2, label=r'Harmonic $S(\hbar\omega)$ ($0\ \mathrm{K}$)')
             ax.fill_between(hw_grid, 0, s_norm, color='#1f77b4', alpha=0.25)
 
-        # Smart scaling for Panel (a)
         hw_xlim, hw_ylim = self.get_smart_phonon_limits(hw_grid, s_norm, anharmonic_dict=anharmonic_dict)
         ax.set_xlim(hw_xlim)
         ax.set_ylim(hw_ylim)
@@ -581,12 +535,11 @@ class LineshapeEngine:
         ax.grid(True, linestyle=':', alpha=0.5)
         ax.legend(frameon=True, loc='upper right', framealpha=0.9, fontsize=9.2)
 
-        # Panel (b): Optical Emission Lineshapes
         ax2 = axs[1]
         for T, (eg, an_harm) in lineshape_dict.items():
             col = temp_colors.get(T, '#1f77b4')
             t_str = f"{int(T)} K" if float(T).is_integer() else f"{T} K"
-            
+
             if anharmonic_dict and T in anharmonic_dict:
                 an_anh = anharmonic_dict[T]["lineshape"]
                 ax2.plot(eg, an_anh, color=col, lw=2.2, linestyle='-', label=f'Anh. {t_str}')
@@ -595,7 +548,6 @@ class LineshapeEngine:
             else:
                 ax2.plot(eg, an_harm, color=col, lw=2.0, linestyle='-', label=f'{t_str}')
 
-        # Smart scaling for Panel (b)
         e_xlim, e_ylim = self.get_smart_lineshape_limits(lineshape_dict, anharmonic_dict=anharmonic_dict)
         ax2.set_xlim(e_xlim)
         if getattr(self.config, "lineshape_y_scale", "linear").lower() == "log":
@@ -619,7 +571,7 @@ class LineshapeEngine:
         print(f"[+] Combined lineshape figure saved: {out_fig} (X-limits: {e_xlim[0]:.1f} to {e_xlim[1]:.1f} meV)")
 
     def plot_individual(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None):
-        """Plots individual clean figures for each temperature with smart scaling."""
+        """Plots per-temperature figures of phonon densities and lineshapes."""
         show_harmonic = getattr(self.config, "show_harmonic_in_anharmonic", True)
         prefix = getattr(self.config, "individual_figure_prefix", "lineshape")
         s_norm = s_cont / np.max(s_cont) if np.max(s_cont) > 0 else s_cont
@@ -627,7 +579,6 @@ class LineshapeEngine:
         color_cycle = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728', '#9467bd', '#8c564b', '#e377c2']
         temp_colors = {T: color_cycle[i % len(color_cycle)] for i, T in enumerate(self.config.temperatures)}
 
-        # Global X-range so all temperature figures share the exact same energy scale
         global_e_xlim, _ = self.get_smart_lineshape_limits(lineshape_dict, anharmonic_dict=anharmonic_dict)
 
         for T in self.config.temperatures:
@@ -639,7 +590,6 @@ class LineshapeEngine:
 
             fig, axs = plt.subplots(1, 2, figsize=(14, 5.0), dpi=300)
 
-            # Panel (a): Phonon Density at T
             ax = axs[0]
             vdos_sub = {T: anharmonic_dict[T]} if (anharmonic_dict and T in anharmonic_dict) else None
             hw_xlim, hw_ylim = self.get_smart_phonon_limits(hw_grid, s_norm, anharmonic_dict=vdos_sub)
@@ -663,7 +613,6 @@ class LineshapeEngine:
             ax.grid(True, linestyle=':', alpha=0.5)
             ax.legend(frameon=True, loc='upper right', framealpha=0.9, fontsize=9.2)
 
-            # Panel (b): Optical Lineshape at T
             ax2 = axs[1]
             curves_T = [(eg, an_harm)]
             if anharmonic_dict and T in anharmonic_dict:
@@ -678,7 +627,6 @@ class LineshapeEngine:
                 ax2.plot(eg, an_harm, color=col, lw=2.2, linestyle='-', label=f'Harmonic Theory ({t_str})')
                 ax2.fill_between(eg, 0, an_harm, color=col, alpha=0.15)
 
-            # Smart limits for temperature T
             e_xlim_T, e_ylim_T = self.get_smart_lineshape_limits(
                 lineshape_dict, anharmonic_dict=anharmonic_dict, active_curve_subset=curves_T
             )
@@ -705,26 +653,18 @@ class LineshapeEngine:
             xlim_used = global_e_xlim if share_x else e_xlim_T
             print(f"[+] Individual lineshape figure saved: {out_file} (X-limits: {xlim_used[0]:.1f} to {xlim_used[1]:.1f} meV)")
 
-
     def plot_anharmonic_comparison(self, lineshape_dict, anharmonic_dict, hw_grid, s_cont, total_S):
-        """Backward-compatible alias for plot_all with anharmonic results."""
+        """Plots harmonic and anharmonic lineshape comparisons."""
         self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict)
 
     def plot_lineshapes(self, lineshape_dict, hw_grid, s_cont, total_S):
-        """Backward-compatible alias for plot_all with harmonic results."""
+        """Plots harmonic lineshapes."""
         self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None)
 
     def calculate_configuration_coordinate(
         self, at_gs, at_es, zpl_energy_eV=None, lambda_min=None, lambda_max=None, n_points=None
     ):
-        """
-        Calculates 1D potential energy curves along the configuration coordinate.
-        
-        Returns
-        -------
-        dict
-            Dictionary of coordinates, energies, relaxation parameters, and Stokes shift metrics.
-        """
+        """Calculates 1D potential energy curves and Stokes shift parameters along the configuration coordinate."""
         from .cc_diagram import ConfigurationCoordinateEngine
         engine = ConfigurationCoordinateEngine(self.config, self.calc)
         return engine.calculate_cc_curve(
@@ -738,14 +678,7 @@ class LineshapeEngine:
     def plot_configuration_coordinate(
         self, at_gs, at_es, output_path=None, zpl_energy_eV=None, system_name=None
     ):
-        """
-        Calculates 1D CC potential energy curves and renders publication-grade 2-panel figure.
-        
-        Returns
-        -------
-        dict
-            Dictionary containing CC parameters and 'figure_path' key.
-        """
+        """Calculates 1D configuration coordinate curves and renders the 2-panel diagram."""
         from .cc_diagram import ConfigurationCoordinateEngine
         engine = ConfigurationCoordinateEngine(self.config, self.calc)
         cc_data = engine.calculate_cc_curve(at_gs, at_es, zpl_energy_eV=zpl_energy_eV)
