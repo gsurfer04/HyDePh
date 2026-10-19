@@ -89,7 +89,7 @@ where $L$ is the supercell dimension and $\alpha_{\mathrm{el}}$ is the elastic d
 [`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around a central defect unit cell, locates the defect site, and relaxes the Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) geometries. These define the Franck-Condon displacement vector and total mass-weighted displacement [5]:
 
 $$
-\Delta \mathbf{R} = \mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}}, \qquad \Delta Q = \sqrt{\sum_{i=1}^N M_i |\Delta \mathbf{R}_i|^2}
+\Delta \mathbf{R} = \mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}}, \qquad \Delta Q = \sqrt{\sum_{i=1}^N M_i \vert \Delta \mathbf{R}_i \vert^2}
 $$
 
 where $M_i$ is the mass of atom $i$.
@@ -122,17 +122,23 @@ Because $V_{\mathrm{base}}$ already captures bulk acoustic phonons and short-ran
 [`FrameSampler`](../hydeph/frame_sampler.py) builds a compact training set across four physical regimes:
 
 1. **Franck-Condon Coordinate Scan**: Linear interpolation along the optical relaxation path [18]:
-   $$
-   \mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda \Delta \mathbf{R}, \quad \lambda \in [-0.2, 1.2]
-   $$
-2. **Defect-Core Rattling**: Gaussian displacements applied within $r_{\mathrm{core}} < 6.0\ \text{Å}$ of the defect site to sample local harmonic and anharmonic force constants ($k_2, k_3, k_4$) [19]:
-   $$
-   \mathbf{R}_i' = \mathbf{R}_i + \boldsymbol{\eta}_i, \quad \boldsymbol{\eta}_i \sim \mathcal{N}(0, \sigma_r^2), \quad \sigma_r \in [0.08, 0.14]\ \text{Å}
-   $$
+
+$$
+\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda \Delta \mathbf{R}, \quad \lambda \in [-0.2, 1.2]
+$$
+
+2. **Defect-Core Rattling**: Gaussian displacements applied within $r_{\mathrm{core}} < 6.0\ \text{\AA}$ of the defect site to sample local harmonic and anharmonic force constants ($k_2, k_3, k_4$) [19]:
+
+$$
+\mathbf{R}_i' = \mathbf{R}_i + \boldsymbol{\eta}_i, \quad \boldsymbol{\eta}_i \sim \mathcal{N}(0, \sigma_r^2), \quad \sigma_r \in [0.08, 0.14]\ \text{\AA}
+$$
+
 3. **Foundation MD + Farthest Point Sampling (FPS)**: An NVT trajectory ($T = 500\ \text{K}$) driven by `nep89`, subsampled via FPS in descriptor space $\mathbf{q}_i$ to maximize phase-space coverage [20]:
-   $$
-   d(i, j) = \|\mathbf{q}_i - \mathbf{q}_j\|_2
-   $$
+
+$$
+d(i, j) = \Vert \mathbf{q}_i - \mathbf{q}_j \Vert_2
+$$
+
 4. **Interleaved Priority Queue**: Balances frames across Phases 1–3 so tight DFT budgets cover all three manifolds.
 
 ---
@@ -166,7 +172,7 @@ $$
 Weights $\mathbf{w}$ are optimized via Separable Natural Evolution Strategies (SNES) [14] by minimizing:
 
 $$
-\mathcal{L}(\mathbf{w}) = \frac{\lambda_e}{N_{\mathrm{frames}}} \sum_{k} |\Delta E_{\mathrm{NEP}}^{(k)} - \Delta E_{\mathrm{DFT}}^{(k)}|^2 + \frac{\lambda_f}{3N_{\mathrm{atoms}}} \sum_{i} |\Delta \mathbf{F}_{\mathrm{NEP}}^{(i)} - \Delta \mathbf{F}_{\mathrm{DFT}}^{(i)}|^2 + \lambda_{\mathrm{reg}} \|\mathbf{w}\|_2^2
+\mathcal{L}(\mathbf{w}) = \frac{\lambda_e}{N_{\mathrm{frames}}} \sum_{k} \vert \Delta E_{\mathrm{NEP}}^{(k)} - \Delta E_{\mathrm{DFT}}^{(k)} \vert^2 + \frac{\lambda_f}{3N_{\mathrm{atoms}}} \sum_{i} \vert \Delta \mathbf{F}_{\mathrm{NEP}}^{(i)} - \Delta \mathbf{F}_{\mathrm{DFT}}^{(i)} \vert^2 + \lambda_{\mathrm{reg}} \Vert \mathbf{w} \Vert_2^2
 $$
 
 ---
@@ -198,13 +204,13 @@ $$
 Direct evaluation of multidimensional Franck-Condon overlaps in Fermi's Golden Rule is intractable:
 
 $$
-A(E, T) = \sum_{m, n} p_m(T) |\langle \chi_{g, n} | \chi_{e, m} \rangle|^2 \delta(E_{\mathrm{ZPL}} - m\hbar\omega_m + n\hbar\omega_n - E)
+A(E, T) = \sum_{m, n} p_m(T) \vert \langle \chi_{g, n} \vert \chi_{e, m} \rangle \vert^2 \delta(E_{\mathrm{ZPL}} - m\hbar\omega_m + n\hbar\omega_n - E)
 $$
 
 HyDePh instead Fourier-transforms the time-domain generating function $G(t) = \exp[g(t) - g(0)]$ [5, 25, 26]:
 
 $$
-A(E, T) = \frac{1}{2\pi\hbar} \int_{-\infty}^{\infty} dt \, \exp\left[ \frac{i(E - E_{\mathrm{ZPL}})t}{\hbar} \right] G(t) \exp\left[ -\frac{\gamma(T)|t|}{\hbar} \right]
+A(E, T) = \frac{1}{2\pi\hbar} \int_{-\infty}^{\infty} dt \, \exp\left[ \frac{i(E - E_{\mathrm{ZPL}})t}{\hbar} \right] G(t) \exp\left[ -\frac{\gamma(T)\vert t \vert}{\hbar} \right]
 $$
 
 where the phase function $g(t)$ integrates over the Bose-Einstein occupation $\bar{n}(\hbar\omega, T) = [\exp(\hbar\omega / k_B T) - 1]^{-1}$:
@@ -225,7 +231,7 @@ Harmonic theory assumes static $0\ \text{K}$ parabolic potentials, missing therm
 Unprojected velocity autocorrelation functions (VACF) are dominated by delocalized bulk phonons with $S_k \approx 0$ [27]. HyDePh isolates optically coupled vibrations by projecting atomic velocities onto the normalized mass-weighted Franck-Condon unit vector:
 
 $$
-\mathbf{u}_{\mathrm{opt}, i} = \frac{M_i \Delta \mathbf{R}_i}{\sqrt{\sum_j M_j |\Delta \mathbf{R}_j|^2}}, \qquad v_{\mathrm{opt}}(t) = \sum_{i=1}^N \mathbf{v}_i(t) \cdot \mathbf{u}_{\mathrm{opt}, i}
+\mathbf{u}_{\mathrm{opt}, i} = \frac{M_i \Delta \mathbf{R}_i}{\sqrt{\sum_j M_j \vert \Delta \mathbf{R}_j \vert^2}}, \qquad v_{\mathrm{opt}}(t) = \sum_{i=1}^N \mathbf{v}_i(t) \cdot \mathbf{u}_{\mathrm{opt}, i}
 $$
 
 Windowing the autocorrelation $C_{\mathrm{opt}}(t) = \langle v_{\mathrm{opt}}(t) v_{\mathrm{opt}}(0) \rangle / \langle |v_{\mathrm{opt}}(0)|^2 \rangle$ with a Hann filter $W_{\mathrm{Hann}}(t)$ gives the optically active vibrational density of states and thermal mode-softening ratio:
@@ -239,14 +245,17 @@ where $\Omega(T)$ and $\Omega_0$ are the finite-$T$ and $0\ \mathrm{K}$ effectiv
 #### (B) Dual Coupling Regimes ($S < 10$ vs. $S \ge 10$)
 1. **Quantum Regime ($S < 10$; e.g., Diamond $\mathrm{NV}^-$, 4H-SiC divacancy, LiCl F-center)**:
    Lineshapes are evaluated via the quantum generating function using the thermally softened spectral density and anharmonic collision damping:
-   $$
-   S_{\mathrm{anh}}(\hbar\omega, T) = \frac{1}{\alpha_{\mathrm{soft}}(T)} S\left( \frac{\hbar\omega}{\alpha_{\mathrm{soft}}(T)} \right), \qquad \gamma_{\mathrm{total}}(T) = \gamma_{\mathrm{base}}(T) + 0.3 \sqrt{\frac{T}{10}}\ \mathrm{meV}
-   $$
+
+$$
+S_{\mathrm{anh}}(\hbar\omega, T) = \frac{1}{\alpha_{\mathrm{soft}}(T)} S\left( \frac{\hbar\omega}{\alpha_{\mathrm{soft}}(T)} \right), \qquad \gamma_{\mathrm{total}}(T) = \gamma_{\mathrm{base}}(T) + 0.3 \sqrt{\frac{T}{10}}\ \mathrm{meV}
+$$
+
 2. **Semiclassical Marcus Regime ($S \ge 10$; e.g., LiF F-center, $S = 23.93$)**:
    When $\mathrm{DWF} = e^{-S} \approx 0$, HyDePh samples the vertical energy gap $\Delta U(t) = V_{\mathrm{ES}}(\mathbf{R}(t)) - V_{\mathrm{GS}}(\mathbf{R}(t))$ during MD and convolves the $0\ \text{K}$ spectrum with the thermal fluctuation distribution $P_{\mathrm{anh}}(\Delta U, T)$ of variance $\sigma_{\Delta U}^2(T)$ [10, 18]:
-   $$
-   A_{\mathrm{anh}}(E, T) = \int d(\Delta U) \, P_{\mathrm{anh}}(\Delta U, T) \, A_{\mathrm{quant}}(E - \Delta U, T=0)
-   $$
+
+$$
+A_{\mathrm{anh}}(E, T) = \int d(\Delta U) \, P_{\mathrm{anh}}(\Delta U, T) \, A_{\mathrm{quant}}(E - \Delta U, T=0)
+$$
 
 #### (C) Justification of the Langevin Thermostat
 The Langevin equation $M_i \ddot{\mathbf{R}}_i = -\nabla_i V(\mathbf{R}) - \gamma_{\mathrm{lang}} M_i \dot{\mathbf{R}}_i + \mathbf{\Xi}_i(t)$ is suited to defect spectroscopy for four reasons:
@@ -280,7 +289,7 @@ $$
 From the harmonic curvature $K = 2 \Delta E_{\mathrm{rel,GS}} / (\Delta Q)^2$, the effective phonon energy and 1D Huang-Rhys factor are:
 
 $$
-\hbar\Omega\ (\text{meV}) = 91.4348\ \frac{\sqrt{\Delta E_{\mathrm{rel,GS}}\ (\text{eV})}}{\Delta Q\ (\text{amu}^{1/2}\text{Å})}, \qquad S_{\mathrm{1D}} = \frac{\Delta E_{\mathrm{rel,GS}}}{\hbar\Omega}
+\hbar\Omega \text{ (meV)} = 91.4348 \frac{\sqrt{\Delta E_{\mathrm{rel,GS}} \text{ (eV)}}}{\Delta Q \text{ (amu}^{1/2}\text{\AA)}}, \qquad S_{\mathrm{1D}} = \frac{\Delta E_{\mathrm{rel,GS}}}{\hbar\Omega}
 $$
 
 <p align="center">
@@ -296,9 +305,9 @@ $$
 </p>
 
 - **Stiff covalent hosts (Diamond $\mathrm{NV}^-$, 4H-SiC $kk$-$\mathrm{VV}^0$)**: High Debye temperatures ($\Theta_D \approx 1200\text{--}2200\ \mathrm{K}$) mean $\hbar\omega \gg k_B T$ up to $300\ \mathrm{K}$. Classical MD equipartition ($\sigma_{\Delta U} \sim \sqrt{2 k_B T E_{\mathrm{rel}}}$) smears the spectrum into a Gaussian dome; the quantum generating function is required to resolve the sharp ZPL and discrete multi-phonon sidebands.
-- **Soft ionic hosts (LiCl and LiF F-centers)**: Low Debye temperatures ($\Theta_D \approx 420\text{--}730\ \mathrm{K}$) and large displacements ($\Delta Q = 1.63\text{--}2.39\ \mathrm{amu}^{1/2}\text{Å}$) drive cations into steep anharmonic walls. In LiCl at $77\ \mathrm{K}$, static harmonic theory predicts a $78\ \mathrm{meV}$ FWHM ($5.9\times$ narrower than the $460\ \mathrm{meV}$ experiment [13]), whereas anharmonic MD captures mode softening ($27.8 \to 19.8\ \mathrm{meV}$ vs. $19.7\ \mathrm{meV}$ exp.) and broadens the band $3.4\times$ to $265\ \mathrm{meV}$.
+- **Soft ionic hosts (LiCl and LiF F-centers)**: Low Debye temperatures ($\Theta_D \approx 420\text{--}730\ \mathrm{K}$) and large displacements ($\Delta Q = 1.63\text{--}2.39\ \mathrm{amu}^{1/2}\text{\AA}$) drive cations into steep anharmonic walls. In LiCl at $77\ \mathrm{K}$, static harmonic theory predicts a $78\ \mathrm{meV}$ FWHM ($5.9\times$ narrower than the $460\ \mathrm{meV}$ experiment [13]), whereas anharmonic MD captures mode softening ($27.8 \to 19.8\ \mathrm{meV}$ vs. $19.7\ \mathrm{meV}$ exp.) and broadens the band $3.4\times$ to $265\ \mathrm{meV}$.
 
-| System | Host ($\Theta_D$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | Regime | Key Result |
+| System | Host ($\Theta_D$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{\AA}$) | Regime | Key Result |
 |---|---|---|---|---|---|
 | **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3.166$ | $0.627$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 4.22\%$), resolved sidebands at $-65, -135, -205\ \mathrm{meV}$ |
 | **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $4.766$ | $0.812$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 0.85\%$), sidebands at $-38, -76\ \mathrm{meV}$; $\mathbf{u}_{\mathrm{opt}}$ removes $100\ \mathrm{meV}$ bulk artifact |

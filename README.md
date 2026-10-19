@@ -118,7 +118,7 @@ summary = run_pipeline(config)
 | `spin_multiplicity` | `int` | `2` | Spin multiplicity $2S+1$ ($1$: singlet, $2$: doublet, $3$: triplet). |
 | `tot_magnetization` | `int` | `None` | Unpaired electrons $2S$; synchronized with `spin_multiplicity`. |
 | `excited_cell_path` | `str` | `None` | Path to explicit excited-state cell or supercell; falls back to coordination-shell breathing when omitted. |
-| `excited_state_displacement` | `float` | `None` | Radial breathing displacement ($\text{Å}$) for procedural excited states ($0.08\ \text{Å}$ for covalent hosts, $0.15\ \text{Å}$ for ionic hosts). |
+| `excited_state_displacement` | `float` | `None` | Radial breathing displacement (Å) for procedural excited states ($0.08\ \text{\AA}$ for covalent hosts, $0.15\ \text{\AA}$ for ionic hosts). |
 
 ### Sampling & Resumption
 
@@ -212,7 +212,7 @@ flowchart TD
 | **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3.166$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 4.22\%$), resolved sidebands at $-65, -135, -205\ \mathrm{meV}$. |
 | **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $4.766$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 0.85\%$), quasi-local modes at $-38, -76\ \mathrm{meV}$; $\mathbf{u}_{\mathrm{opt}}$ filters $90\text{--}115\ \mathrm{meV}$ bulk modes. |
 | **LiCl F-Center** | Rocksalt ($420\ \mathrm{K}$) | $3.999$ | Quantum ($S < 10$) | Captures $3.4\times$ bandwidth expansion ($265\ \mathrm{meV}$) and mode softening ($27.8 \to 19.8\ \mathrm{meV}$ vs. $19.7\ \mathrm{meV}$ exp.). |
-| **LiF F-Center** | Fluorite ($730\ \mathrm{K}$) | $23.930$ | Marcus ($S \ge 10$) | Large relaxation ($\Delta Q = 2.39\ \mathrm{amu}^{1/2}\text{Å}$) suppresses ZPL; reproduces broad Gaussian band ($490\text{--}1101\ \mathrm{meV}$). |
+| **LiF F-Center** | Fluorite ($730\ \mathrm{K}$) | $23.930$ | Marcus ($S \ge 10$) | Large relaxation ($\Delta Q = 2.39\ \mathrm{amu}^{1/2}\text{\AA}$) suppresses ZPL; reproduces broad Gaussian band ($490\text{--}1101\ \mathrm{meV}$). |
 
 <p align="center">
   <img src="assets/licl_anharmonic_benchmark.png" width="96%" alt="LiCl F-center Anharmonic Benchmark">
