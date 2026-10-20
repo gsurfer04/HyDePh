@@ -37,19 +37,10 @@ def is_windows() -> bool:
     return sys.platform.startswith("win")
 
 
-def write_qe_input(
-    atoms: Atoms,
-    pw_in_path: str,
-    config: ToolkitConfig,
-    calculation: str = "scf",
-    retry: bool = False,
-    starting_pot: bool = False,
-    disk_io: Optional[str] = None,
-):
+def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calculation: str = "scf", retry: bool = False):
     """Writes a Quantum ESPRESSO `pw.x` input card.
     
-    Uses universal ASE atomic masses, sets `K_POINTS gamma` for (1, 1, 1),
-    and supports starting potential density reuse (`startingpot = 'file'`).
+    Uses universal ASE atomic masses and sets `K_POINTS gamma` for (1, 1, 1).
     """
     cell = atoms.get_cell()
     pos = atoms.positions
@@ -65,24 +56,16 @@ def write_qe_input(
     base_mixing_beta = config.mixing_beta
     mixing_beta = 0.2 if retry else base_mixing_beta
     retry_lines = "\n  mixing_mode = 'local-TF',\n  electron_maxstep = 150," if retry else ""
-    startingpot_line = (
-        "\n  startingpot = 'file',  ! Reuses ground-state charge density from calc.save/"
-        "\n  startingwfc = 'file',  ! Reuses ground-state wavefunctions from calc.save/"
-        if starting_pot
-        else ""
-    )
-    restart_comment = "  ! Preserves frame ATOMIC_POSITIONS (avoids overwriting from restart file)" if starting_pot else ""
-    disk_io_val = disk_io if disk_io is not None else ("low" if starting_pot else "none")
 
     header = f"""&CONTROL
   calculation = '{calculation}',
-  restart_mode = 'from_scratch',{restart_comment}
+  restart_mode = 'from_scratch',
   pseudo_dir = '{clean_pseudo_dir}',
   outdir = './tmp',
   prefix = 'calc',
   tprnfor = .true.,
   tstress = .false.,
-  disk_io = '{disk_io_val}'
+  disk_io = 'none'
 /
 &SYSTEM
   ibrav = 0,
@@ -101,7 +84,7 @@ def write_qe_input(
   conv_thr = {conv_thr},
   mixing_beta = {mixing_beta},
   mixing_ndim = {mixing_ndim},
-  diagonalization = '{diagonalization}',{retry_lines}{startingpot_line}
+  diagonalization = '{diagonalization}',{retry_lines}
 /
 ATOMIC_SPECIES
 """
@@ -384,13 +367,7 @@ class QERunner:
         self.last_failed_entries: List[Dict[str, Any]] = []
 
     def label_single_frame(
-        self,
-        atoms: Atoms,
-        calc_dir: str,
-        retry: bool = False,
-        timeout_s: Optional[float] = None,
-        ref_save_dir: Optional[str] = None,
-        disk_io: Optional[str] = None,
+        self, atoms: Atoms, calc_dir: str, retry: bool = False, timeout_s: Optional[float] = None
     ) -> Atoms:
         """Runs or reuses a cached single-point QE calculation for `atoms` in `calc_dir`."""
         os.makedirs(calc_dir, exist_ok=True)
@@ -429,30 +406,8 @@ class QERunner:
                         pass
                 logger.info(f"      [Resuming] Incomplete calculation in {calc_dir}. Cleaned scratch tmp/ and restarting...")
 
-        tmp_dir = os.path.join(calc_dir, "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        has_starting_pot = False
-        if ref_save_dir and os.path.isdir(ref_save_dir):
-            dest_save = os.path.join(tmp_dir, "calc.save")
-            try:
-                if os.path.isdir(dest_save):
-                    shutil.rmtree(dest_save, ignore_errors=True)
-                shutil.copytree(ref_save_dir, dest_save)
-                has_starting_pot = True
-                logger.info(f"      [Density Reuse] Transferred ground-state density from {os.path.basename(ref_save_dir)} -> {dest_save}")
-            except Exception as e:
-                logger.warning(f"      [Density Reuse] Could not copy reference density from {ref_save_dir}: {e}")
-                has_starting_pot = False
-
-        write_qe_input(
-            atoms,
-            pw_in,
-            self.config,
-            retry=retry,
-            starting_pot=has_starting_pot,
-            disk_io=disk_io,
-        )
+        write_qe_input(atoms, pw_in, self.config, retry=retry)
+        os.makedirs(os.path.join(calc_dir, "tmp"), exist_ok=True)
 
         cmd_args = build_qe_command(
             self.pw_exe,
@@ -708,28 +663,6 @@ class QERunner:
         failed_entries = []
         state_lock = threading.Lock()
 
-        ref_save_dir = None
-        if self.config.reuse_gs_density and to_calculate:
-            ref_atoms = at_gs if at_gs is not None else (frames[0] if frames else None)
-            if ref_atoms is not None:
-                ref_dir = os.path.join(dft_dir, "reference_gs")
-                cand_save = os.path.join(ref_dir, "tmp", "calc.save")
-                if os.path.isfile(os.path.join(ref_dir, "pw.out")) and not os.path.isdir(cand_save):
-                    try:
-                        os.remove(os.path.join(ref_dir, "pw.out"))
-                    except Exception:
-                        pass
-                logger.info(f"\n[-] [Density Reuse] Pre-converging reference GS density in {os.path.basename(ref_dir)}...")
-                try:
-                    self.label_single_frame(ref_atoms, ref_dir, retry=False, disk_io="low")
-                    if os.path.isdir(cand_save):
-                        ref_save_dir = cand_save
-                        logger.info(f"    [+] Reference GS density ready: {ref_save_dir}")
-                    else:
-                        logger.warning(f"    [!] Reference calculation completed, but {cand_save} was not generated; falling back to atomic densities.")
-                except Exception as exc:
-                    logger.warning(f"    [!] Failed to prepare reference GS density ({exc}); falling back to atomic densities.")
-
         def _run_primary_entry(step_num, entry):
             idx = entry["index"]
             fr = entry["atoms"]
@@ -740,7 +673,7 @@ class QERunner:
             t0 = time.time()
             logger.info(f"\n    ---> [{step_num}/{len(to_calculate)}] Calculating {label} ({stype}) in {os.path.basename(cdir)}...")
             try:
-                labeled_fr = self.label_single_frame(fr, cdir, retry=False, ref_save_dir=ref_save_dir)
+                labeled_fr = self.label_single_frame(fr, cdir, retry=False)
                 labeled_fr.info["qe_status"] = "converged"
                 dt = time.time() - t0
                 with state_lock:
@@ -793,7 +726,7 @@ class QERunner:
                 t0 = time.time()
                 logger.info(f"\n    ---> [Retry {retry_num}/{len(retry_queue)}] Re-running {label} ({stype}) in {os.path.basename(cdir)}...")
                 try:
-                    labeled_fr = self.label_single_frame(fr, cdir, retry=True, ref_save_dir=ref_save_dir)
+                    labeled_fr = self.label_single_frame(fr, cdir, retry=True)
                     labeled_fr.info["qe_status"] = "converged_on_retry"
                     entry["status"] = "converged_on_retry"
                     entry["attempts"] = 2
@@ -822,10 +755,10 @@ class QERunner:
                         logger.info(f"    [->] Taking replacement frame {r_label} ({stype}) in {os.path.basename(r_cdir)} to fulfill quota...")
                         try:
                             try:
-                                r_labeled = self.label_single_frame(r_fr, r_cdir, retry=False, ref_save_dir=ref_save_dir)
+                                r_labeled = self.label_single_frame(r_fr, r_cdir, retry=False)
                             except RuntimeError:
                                 logger.warning(f"    [!] Replacement {r_label} ({stype}) failed on attempt 1; retrying...")
-                                r_labeled = self.label_single_frame(r_fr, r_cdir, retry=True, ref_save_dir=ref_save_dir)
+                                r_labeled = self.label_single_frame(r_fr, r_cdir, retry=True)
                             r_labeled.info["qe_status"] = "converged"
                             labeled_dict[r_idx] = r_labeled
                             type_completed[stype] = type_completed.get(stype, 0) + 1

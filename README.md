@@ -155,7 +155,6 @@ summary = run_pipeline(config)
 | `dft_resume_mode` | `str` | `"target_total"` | `"target_total"` (reach `max_dft_frames` total) or `"max_new"` (run up to `max_new_dft_frames` new frames). |
 | `retry_failed_dft` | `bool` | `True` | Tags failed or non-converged QE frames to retry with conservative mixing (`mixing_mode='local-TF'`, `mixing_beta=0.2`) after remaining frames finish. |
 | `replace_failed_frames` | `bool` | `False` | When `True`, replaces a rattle or MD frame that fails a second time with a new frame of the same type to fulfill the quota; when `False`, ignores failed frames and continues with the rest. |
-| `reuse_gs_density` | `bool` | `False` | Pre-converges a reference ground-state SCF with `disk_io='low'`, copies `calc.save/` into each frame's scratch directory, and sets `startingpot='file'` in `&ELECTRONS`, reducing SCF iterations by ~30–50% per frame. |
 | `n_procs_qe` | `int` | `2` | Number of MPI processes per Quantum ESPRESSO worker. |
 | `n_workers_qe` | `int` | `1` | Number of independent `pw.x` frame calculations to run concurrently. |
 | `qe_timeout_s` | `float` | `None` | Optional wall-clock timeout (seconds) per `pw.x` run before terminating and queuing for retry. |

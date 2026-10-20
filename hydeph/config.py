@@ -205,7 +205,6 @@ class ToolkitConfig:
     dft_resume_mode: str = "target_total"  # "target_total" or "max_new"
     retry_failed_dft: bool = True
     replace_failed_frames: bool = False
-    reuse_gs_density: bool = False
 
     delta_nep_generation: int = 1
     nep_neurons: int = 30

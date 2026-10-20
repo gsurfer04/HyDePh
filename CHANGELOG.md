@@ -12,7 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Universal ASE Atomic Mass Table**: Replaced hand-written mass dictionary in `write_qe_input()` with `ase.data.atomic_masses` and `atomic_numbers`, covering all 118 elements correctly.
 - **Gamma-Point Real Wavefunctions**: `write_qe_input()` writes `K_POINTS gamma` when `kpoints == (1, 1, 1)`, enabling half-sphere FFTs and halving memory footprint in Quantum ESPRESSO.
 - **Single-Pass QE Output Parsing**: Merged two-pass scanning in `parse_qe_output()` into a single streaming pass that parses total energy and atomic forces simultaneously.
-- **Ground-State Charge Density Reuse**: Added `reuse_gs_density: bool = False` to `ToolkitConfig` and `QERunner`. Pre-converges a reference ground-state SCF with `disk_io = 'low'`, transfers `calc.save/` into each frame's scratch directory, and sets `startingpot = 'file'` in `&ELECTRONS`, reducing candidate SCF iterations by ~30–50% per frame with graceful fallback.
 - **Calculator Property Gating**: Added standard ASE property guards in `HybridDefectCalculator.calculate()`, eliminating force calculations when only potential energy is requested.
 - **Incremental FPS Distance Tracking**: Optimized `farthest_point_sampling()` to incrementally update a running minimum distance vector instead of recomputing full distance slices.
 - **MD Trajectory Streaming**: Streamed candidate MD frames directly to trajectory files in `sample_foundation_md_with_fps()`, reducing in-memory RAM accumulation.
