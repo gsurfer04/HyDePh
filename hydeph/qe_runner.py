@@ -1,39 +1,72 @@
-"""Quantum ESPRESSO `pw.x` runner with caching and type-balanced resumption."""
+"""Quantum ESPRESSO `pw.x` runner with single-pass parsing, caching, and type-balanced resumption."""
+
+from __future__ import annotations
 
 import os
 import sys
 import re
 import time
-import signal
 import shutil
 import threading
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, List, Tuple, Dict, Any
 import numpy as np
 import ase.io
 from ase import Atoms
 from ase.units import Ry, Bohr
+from ase.data import atomic_masses, atomic_numbers
+
+from .config import ToolkitConfig
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
+
+logger = logging.getLogger(__name__)
+
+RY_TO_EV = float(Ry)
+RY_BOHR_TO_EV_A = float(Ry / Bohr)
 
 
-def is_windows():
+def is_windows() -> bool:
     """Returns True if running on Windows."""
     return sys.platform.startswith("win")
 
 
-def write_qe_input(atoms, pw_in_path, config, calculation="scf", retry=False):
-    """Writes a Quantum ESPRESSO `pw.x` input card."""
+def write_qe_input(
+    atoms: Atoms,
+    pw_in_path: str,
+    config: ToolkitConfig,
+    calculation: str = "scf",
+    retry: bool = False,
+    starting_pot: bool = False,
+    disk_io: Optional[str] = None,
+):
+    """Writes a Quantum ESPRESSO `pw.x` input card.
+    
+    Uses universal ASE atomic masses, sets `K_POINTS gamma` for (1, 1, 1),
+    and supports starting potential density reuse (`startingpot = 'file'`).
+    """
     cell = atoms.get_cell()
     pos = atoms.positions
     symbols = atoms.get_chemical_symbols()
-
     unique_symbols = sorted(list(set(symbols)))
-    from ase.data import atomic_masses, atomic_numbers
-    mass_dict = {"Li": 6.941, "Cl": 35.453, "C": 12.011, "Si": 28.085, "N": 14.007, "F": 18.9984}
 
     # Fortran namelist parser requires forward slashes
-    clean_pseudo_dir = config.pseudo_dir.replace("\\", "/") if getattr(config, "pseudo_dir", None) else "./pseudo"
-    mixing_beta = 0.2 if retry else 0.4
+    clean_pseudo_dir = config.pseudo_dir.replace("\\", "/") if config.pseudo_dir else "./pseudo"
+    
+    conv_thr = config.conv_thr
+    diagonalization = config.diagonalization
+    mixing_ndim = config.mixing_ndim
+    base_mixing_beta = config.mixing_beta
+    mixing_beta = 0.2 if retry else base_mixing_beta
     retry_lines = "\n  mixing_mode = 'local-TF',\n  electron_maxstep = 150," if retry else ""
+    startingpot_line = "\n  startingpot = 'file'," if starting_pot else ""
+    disk_io_val = disk_io if disk_io is not None else ("low" if starting_pot else "none")
 
     header = f"""&CONTROL
   calculation = '{calculation}',
@@ -43,7 +76,7 @@ def write_qe_input(atoms, pw_in_path, config, calculation="scf", retry=False):
   prefix = 'calc',
   tprnfor = .true.,
   tstress = .false.,
-  disk_io = 'none'
+  disk_io = '{disk_io_val}'
 /
 &SYSTEM
   ibrav = 0,
@@ -59,14 +92,16 @@ def write_qe_input(atoms, pw_in_path, config, calculation="scf", retry=False):
   degauss = 0.005
 /
 &ELECTRONS
-  conv_thr = 1.0d-5,
-  mixing_beta = {mixing_beta}{retry_lines}
+  conv_thr = {conv_thr},
+  mixing_beta = {mixing_beta},
+  mixing_ndim = {mixing_ndim},
+  diagonalization = '{diagonalization}',{retry_lines}{startingpot_line}
 /
 ATOMIC_SPECIES
 """
     for s in unique_symbols:
         upf_name = os.path.basename(config.pseudopotentials[s])
-        mass = mass_dict.get(s, float(atomic_masses[atomic_numbers.get(s, 0)]))
+        mass = float(atomic_masses[atomic_numbers[s]])
         header += f"  {s:<3} {mass:8.4f}  {upf_name}\n"
 
     header += "\nCELL_PARAMETERS (angstrom)\n"
@@ -77,54 +112,65 @@ ATOMIC_SPECIES
     for s, p in zip(symbols, pos):
         header += f"  {s:<3} {p[0]:14.8f} {p[1]:14.8f} {p[2]:14.8f}\n"
 
-    header += f"\nK_POINTS (automatic)\n  {config.kpoints[0]} {config.kpoints[1]} {config.kpoints[2]} 0 0 0\n"
+    if tuple(config.kpoints) == (1, 1, 1):
+        header += "\nK_POINTS gamma\n"
+    else:
+        k = config.kpoints
+        header += f"\nK_POINTS (automatic)\n  {k[0]} {k[1]} {k[2]} 0 0 0\n"
 
     with open(pw_in_path, "w") as f:
         f.write(header)
 
 
-def parse_qe_output(pw_out_path):
-    """Parses total energy (eV) and forces (eV/A) from `pw.x` output, returning `(None, None)` if unconverged."""
+def parse_qe_output(pw_out_path: str) -> Tuple[Optional[float], Optional[np.ndarray]]:
+    """Parses total energy (eV) and forces (eV/A) from `pw.x` output in a single pass.
+    
+    Returns `(None, None)` if calculation is unconverged or file does not exist.
+    """
     if not os.path.isfile(pw_out_path):
         return None, None
 
-    energy_ev = None
-    forces_list = []
+    energy_ev: Optional[float] = None
+    forces_list: List[List[float]] = []
+    in_forces = False
+    not_converged = False
 
     with open(pw_out_path, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
-
-    for line in lines:
-        if "convergence NOT achieved" in line:
-            return None, None
-
-    for i, line in enumerate(lines):
-        if "!    total energy" in line:
-            parts = line.split("=")
-            if len(parts) > 1:
-                e_ry = float(parts[1].replace("Ry", "").strip())
-                energy_ev = e_ry * Ry
-
-        if "Forces acting on atoms (cartesian axes, Ry/au):" in line:
-            forces_list = []
-            for j in range(i + 1, len(lines)):
-                fline = lines[j].strip()
+        for line in f:
+            if "convergence NOT achieved" in line:
+                not_converged = True
+                break
+            if "!    total energy" in line:
+                parts = line.split("=")
+                if len(parts) > 1:
+                    try:
+                        e_ry = float(parts[1].replace("Ry", "").strip())
+                        energy_ev = e_ry * RY_TO_EV
+                    except ValueError:
+                        pass
+            elif "Forces acting on atoms (cartesian axes, Ry/au):" in line:
+                in_forces = True
+                forces_list = []
+            elif in_forces:
+                fline = line.strip()
                 if "total force" in fline:
-                    break
-                if not fline:
-                    continue
-                m = re.search(r"force =\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)", fline)
-                if m:
-                    fx = float(m.group(1)) * (Ry / Bohr)
-                    fy = float(m.group(2)) * (Ry / Bohr)
-                    fz = float(m.group(3)) * (Ry / Bohr)
-                    forces_list.append([fx, fy, fz])
+                    in_forces = False
+                elif fline:
+                    m = re.search(r"force =\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)", fline)
+                    if m:
+                        fx = float(m.group(1)) * RY_BOHR_TO_EV_A
+                        fy = float(m.group(2)) * RY_BOHR_TO_EV_A
+                        fz = float(m.group(3)) * RY_BOHR_TO_EV_A
+                        forces_list.append([fx, fy, fz])
+
+    if not_converged:
+        return None, None
 
     forces_ev_a = np.array(forces_list) if forces_list else None
     return energy_ev, forces_ev_a
 
 
-def resolve_pw_executable(pw_exe=None):
+def resolve_pw_executable(pw_exe: Optional[str] = None) -> str:
     """Resolves the Quantum ESPRESSO `pw` executable path across Linux and Windows."""
     if pw_exe:
         if os.path.isfile(pw_exe):
@@ -164,16 +210,14 @@ def resolve_pw_executable(pw_exe=None):
             "Windows binaries can be downloaded from: https://github.com/QMatSuite/quantum-espresso-windows-exe"
         )
     else:
-        found = shutil.which("pw.x") or shutil.which("pw")
-        if found:
-            return found
-        for p in ["/usr/local/bin/pw.x", "/usr/bin/pw.x"]:
-            if os.path.isfile(p):
-                return p
-        return "/usr/local/bin/pw.x"
+        for name in ["pw.x", "pw"]:
+            found = shutil.which(name)
+            if found:
+                return found
+        return "/usr/bin/pw.x"
 
 
-def resolve_mpi_runner(mpi_command=None, n_procs=2):
+def resolve_mpi_runner(mpi_command: Optional[str] = None, n_procs: int = 2) -> Tuple[Optional[str], Optional[str]]:
     """Resolves the MPI launcher and process-count flag, returning `(None, None)` for `n_procs <= 1`."""
     if n_procs <= 1:
         return None, None
@@ -183,7 +227,7 @@ def resolve_mpi_runner(mpi_command=None, n_procs=2):
         flag = "-n" if ("mpiexec" in cmd_lower and is_windows()) else ("-np" if "mpirun" in cmd_lower else "-n")
         return mpi_command, flag
 
-    for env_var in ["HYDEPH_MPI_CMD", "MPI_CMD"]:
+    for env_var in ["HYDEPH_MPI_CMD", "MPI_CMD", "MPIEXEC", "MPIRUN"]:
         env_mpi = os.environ.get(env_var)
         if env_mpi:
             flag = "-n" if is_windows() else "-np"
@@ -225,7 +269,14 @@ def resolve_mpi_runner(mpi_command=None, n_procs=2):
         return "/usr/bin/mpirun", "-np"
 
 
-def build_qe_command(pw_exe, pw_in="pw.in", n_procs=2, mpi_command=None, mpi_args=None):
+def build_qe_command(
+    pw_exe: str,
+    pw_in: str = "pw.in",
+    n_procs: int = 2,
+    mpi_command: Optional[str] = None,
+    mpi_args: Optional[List[str]] = None,
+    pw_args: Optional[List[str]] = None,
+) -> List[str]:
     """Builds the command argument list for running Quantum ESPRESSO."""
     cmd_args = []
     if n_procs > 1:
@@ -236,12 +287,18 @@ def build_qe_command(pw_exe, pw_in="pw.in", n_procs=2, mpi_command=None, mpi_arg
             if mpi_args:
                 cmd_args.extend(mpi_args)
 
-    cmd_args.append(pw_exe)
+    if pw_exe.endswith(".py"):
+        cmd_args.extend([sys.executable, pw_exe])
+    else:
+        cmd_args.append(pw_exe)
+
     cmd_args.extend(["-in", pw_in])
+    if pw_args:
+        cmd_args.extend(pw_args)
     return cmd_args
 
 
-def check_pw_in_matches_atoms(pw_in, atoms, tol=1e-3):
+def check_pw_in_matches_atoms(pw_in: str, atoms: Atoms, tol: float = 1e-3) -> bool:
     """Verifies that atomic positions in existing `pw.in` match `atoms` within `tol`."""
     if not os.path.isfile(pw_in):
         return True
@@ -269,7 +326,7 @@ def check_pw_in_matches_atoms(pw_in, atoms, tol=1e-3):
         return True
 
 
-def find_frame_calc_dir(dft_dir, cand_idx, frame_id, atoms):
+def find_frame_calc_dir(dft_dir: str, cand_idx: int, frame_id: str, atoms: Atoms) -> Tuple[str, bool]:
     """Finds the calculation directory for a frame and returns `(calc_dir, is_converged)`."""
     canonical_dir = os.path.join(dft_dir, f"frame_{cand_idx:03d}_{frame_id}")
     candidates = [
@@ -299,20 +356,36 @@ def find_frame_calc_dir(dft_dir, cand_idx, frame_id, atoms):
 
 
 class QERunner:
-    def __init__(self, config, n_procs=2, pw_exe=None, mpi_command=None, mpi_args=None, n_workers=None, timeout_s=None):
+    """Manages Quantum ESPRESSO calculations with parallel execution and smart resumption."""
+
+    def __init__(
+        self,
+        config: ToolkitConfig,
+        n_procs: Optional[int] = None,
+        pw_exe: Optional[str] = None,
+        mpi_command: Optional[str] = None,
+        mpi_args: Optional[List[str]] = None,
+        n_workers: Optional[int] = None,
+        timeout_s: Optional[float] = None,
+    ):
         self.config = config
-        self.n_procs = n_procs
+        self.n_procs = int(n_procs if n_procs is not None else config.n_procs_qe)
+        self.pw_exe = resolve_pw_executable(pw_exe or config.pw_exe)
+        self.mpi_command = mpi_command or config.mpi_command
+        self.mpi_args = mpi_args or config.mpi_args
+        self.n_workers = int(n_workers if n_workers is not None else config.n_workers_qe)
+        self.timeout_s = timeout_s if timeout_s is not None else config.qe_timeout_s
+        self.last_failed_entries: List[Dict[str, Any]] = []
 
-        chosen_pw = pw_exe or getattr(config, "pw_exe", None)
-        self.pw_exe = resolve_pw_executable(chosen_pw)
-
-        self.mpi_command = mpi_command or getattr(config, "mpi_command", None)
-        self.mpi_args = mpi_args or getattr(config, "mpi_args", None)
-        self.n_workers = int(n_workers if n_workers is not None else getattr(config, "n_workers_qe", 1))
-        self.timeout_s = timeout_s if timeout_s is not None else getattr(config, "qe_timeout_s", None)
-        self.last_failed_entries = []
-
-    def label_single_frame(self, atoms, calc_dir, retry=False, timeout_s=None):
+    def label_single_frame(
+        self,
+        atoms: Atoms,
+        calc_dir: str,
+        retry: bool = False,
+        timeout_s: Optional[float] = None,
+        ref_save_dir: Optional[str] = None,
+        disk_io: Optional[str] = None,
+    ) -> Atoms:
         """Runs or reuses a cached single-point QE calculation for `atoms` in `calc_dir`."""
         os.makedirs(calc_dir, exist_ok=True)
         pw_in = os.path.join(calc_dir, "pw.in")
@@ -329,13 +402,13 @@ class QERunner:
                 if check_pw_in_matches_atoms(pw_in, atoms):
                     e_ev, f_ev_a = parse_qe_output(pw_out)
                     if e_ev is not None and f_ev_a is not None and len(f_ev_a) == len(atoms):
-                        print(f"      [Cache hit] Reusing converged calculation in {calc_dir}", flush=True)
+                        logger.info(f"      [Cache hit] Reusing converged calculation in {calc_dir}")
                         at_labeled = atoms.copy()
                         at_labeled.info["energy"] = e_ev
                         at_labeled.arrays["forces"] = f_ev_a
                         return at_labeled
                 else:
-                    print(f"      [Cache mismatch] Atomic positions in {pw_in} differ from frame. Recomputing...", flush=True)
+                    logger.info(f"      [Cache mismatch] Atomic positions in {pw_in} differ from frame. Recomputing...")
             else:
                 tmp_dir = os.path.join(calc_dir, "tmp")
                 if os.path.isdir(tmp_dir):
@@ -348,10 +421,32 @@ class QERunner:
                                 shutil.rmtree(item_p, ignore_errors=True)
                     except Exception:
                         pass
-                print(f"      [Resuming] Incomplete calculation in {calc_dir}. Cleaned scratch tmp/ and restarting...", flush=True)
+                logger.info(f"      [Resuming] Incomplete calculation in {calc_dir}. Cleaned scratch tmp/ and restarting...")
 
-        write_qe_input(atoms, pw_in, self.config, retry=retry)
-        os.makedirs(os.path.join(calc_dir, "tmp"), exist_ok=True)
+        tmp_dir = os.path.join(calc_dir, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        has_starting_pot = False
+        if ref_save_dir and os.path.isdir(ref_save_dir):
+            dest_save = os.path.join(tmp_dir, "calc.save")
+            try:
+                if os.path.isdir(dest_save):
+                    shutil.rmtree(dest_save, ignore_errors=True)
+                shutil.copytree(ref_save_dir, dest_save)
+                has_starting_pot = True
+                logger.info(f"      [Density Reuse] Transferred ground-state density from {os.path.basename(ref_save_dir)} -> {dest_save}")
+            except Exception as e:
+                logger.warning(f"      [Density Reuse] Could not copy reference density from {ref_save_dir}: {e}")
+                has_starting_pot = False
+
+        write_qe_input(
+            atoms,
+            pw_in,
+            self.config,
+            retry=retry,
+            starting_pot=has_starting_pot,
+            disk_io=disk_io,
+        )
 
         cmd_args = build_qe_command(
             self.pw_exe,
@@ -361,8 +456,15 @@ class QERunner:
             mpi_args=self.mpi_args,
         )
 
-        # Prepend pw_exe directory to PATH so colocated MKL/MS-MPI DLLs resolve on Windows
         env = os.environ.copy()
+        # Prevent thread oversubscription when multiple MPI workers run
+        env.update({
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+        })
         if os.path.isabs(self.pw_exe):
             pw_dir = os.path.dirname(self.pw_exe)
             if pw_dir:
@@ -381,6 +483,8 @@ class QERunner:
                 last_iter = 0
                 t_start = time.time()
                 t_last_log = t_start
+                sleep_interval = min(0.5, max(0.05, float(eff_timeout) / 5.0 if eff_timeout else 0.5))
+
                 while proc.poll() is None:
                     now = time.time()
                     if eff_timeout is not None and (now - t_start) > float(eff_timeout):
@@ -390,7 +494,7 @@ class QERunner:
                         except Exception:
                             pass
                         raise RuntimeError(f"QE calculation timed out after {float(eff_timeout):.1f}s in {calc_dir}")
-                    time.sleep(0.05)
+                    time.sleep(sleep_interval)
                     now = time.time()
                     if (now - t_last_log) >= 2.0 and os.path.isfile(pw_out):
                         t_last_log = now
@@ -404,10 +508,10 @@ class QERunner:
                                         cur_iter = int(m.group(1))
                                         if cur_iter != last_iter:
                                             last_iter = cur_iter
-                                            print(f"      [pw] SCF iteration {cur_iter}...", flush=True)
+                                            logger.info(f"      [pw] SCF iteration {cur_iter}...")
                                     break
                                 elif "Forces acting on atoms" in line:
-                                    print("      [pw] SCF converged! Calculating atomic forces...", flush=True)
+                                    logger.info("      [pw] SCF converged! Calculating atomic forces...")
                                     break
                         except Exception:
                             pass
@@ -484,14 +588,14 @@ class QERunner:
 
     def label_all_frames(
         self,
-        frames,
-        max_frames=None,
-        max_new_frames=None,
-        replace_failed_frames=None,
+        frames: List[Atoms],
+        max_frames: Optional[int] = None,
+        max_new_frames: Optional[int] = None,
+        replace_failed_frames: Optional[bool] = None,
         sampler=None,
-        at_gs=None,
-        n_workers=None,
-    ):
+        at_gs: Optional[Atoms] = None,
+        n_workers: Optional[int] = None,
+    ) -> List[Atoms]:
         """Labels candidate frames with DFT, retrying failed runs and optionally replacing failed rattle/MD frames."""
         dft_dir = os.path.join(self.config.workspace_dir, "dft_calculations")
         os.makedirs(dft_dir, exist_ok=True)
@@ -524,8 +628,8 @@ class QERunner:
 
         next_cand_idx = max_cand_idx + 1
 
-        print(f"\n[-] High-Fidelity DFT Labeling (Quantum ESPRESSO, np={self.n_procs}, workers={eff_workers})...")
-        print(f"    Total candidate pool: {len(frames)} frames")
+        logger.info(f"\n[-] High-Fidelity DFT Labeling (Quantum ESPRESSO, np={self.n_procs}, workers={eff_workers})...")
+        logger.info(f"    Total candidate pool: {len(frames)} frames")
 
         type_completed = {}
         for e in completed_entries:
@@ -539,22 +643,18 @@ class QERunner:
 
         if completed_entries:
             comp_str = ", ".join(f"{k}: {v}" for k, v in sorted(type_completed.items()))
-            print(f"    [i] Already converged: {len(completed_entries)} frames ({comp_str})")
+            logger.info(f"    [i] Already converged: {len(completed_entries)} frames ({comp_str})")
         if pending_entries:
             pend_str = ", ".join(f"{k}: {v}" for k, v in sorted(type_pending.items()))
-            print(f"    [i] Pending / uncalculated: {len(pending_entries)} frames ({pend_str})")
+            logger.info(f"    [i] Pending / uncalculated: {len(pending_entries)} frames ({pend_str})")
         else:
-            print(f"    [i] All {len(frames)} candidate frames are already converged!")
+            logger.info(f"    [i] All {len(frames)} candidate frames are already converged!")
 
-        resume_mode = getattr(self.config, "dft_resume_mode", "target_total")
-        dft_target = max_frames if max_frames is not None else getattr(self.config, "max_dft_frames", None)
-        new_limit = max_new_frames if max_new_frames is not None else getattr(self.config, "max_new_dft_frames", None)
-        do_retry = getattr(self.config, "retry_failed_dft", True)
-        do_replace = (
-            replace_failed_frames
-            if replace_failed_frames is not None
-            else getattr(self.config, "replace_failed_frames", False)
-        )
+        resume_mode = self.config.dft_resume_mode
+        dft_target = max_frames if max_frames is not None else self.config.max_dft_frames
+        new_limit = max_new_frames if max_new_frames is not None else self.config.max_new_dft_frames
+        do_retry = self.config.retry_failed_dft
+        do_replace = replace_failed_frames if replace_failed_frames is not None else self.config.replace_failed_frames
 
         to_calculate = []
         if not pending_entries:
@@ -569,8 +669,8 @@ class QERunner:
         elif dft_target is not None:
             n_done = len(completed_entries)
             if n_done >= dft_target:
-                print(f"    [i] Target max_dft_frames={dft_target} already satisfied by {n_done} converged frames.")
-                print("        Reusing all converged frames without duplicate DFT execution.")
+                logger.info(f"    [i] Target max_dft_frames={dft_target} already satisfied by {n_done} converged frames.")
+                logger.info("        Reusing all converged frames without duplicate DFT execution.")
                 to_calculate = []
             else:
                 needed = dft_target - n_done
@@ -582,7 +682,7 @@ class QERunner:
                 )
                 to_calculate = sorted_pending[:needed]
                 calc_str = ", ".join(f"{e['frame_id']} ({e['sample_type']})" for e in to_calculate)
-                print(f"    [i] Need {needed} additional frames to reach target {dft_target}. Selected: {calc_str}")
+                logger.info(f"    [i] Need {needed} additional frames to reach target {dft_target}. Selected: {calc_str}")
         else:
             to_calculate = list(pending_entries)
 
@@ -602,6 +702,28 @@ class QERunner:
         failed_entries = []
         state_lock = threading.Lock()
 
+        ref_save_dir = None
+        if self.config.reuse_gs_density and to_calculate:
+            ref_atoms = at_gs if at_gs is not None else (frames[0] if frames else None)
+            if ref_atoms is not None:
+                ref_dir = os.path.join(dft_dir, "reference_gs")
+                cand_save = os.path.join(ref_dir, "tmp", "calc.save")
+                if os.path.isfile(os.path.join(ref_dir, "pw.out")) and not os.path.isdir(cand_save):
+                    try:
+                        os.remove(os.path.join(ref_dir, "pw.out"))
+                    except Exception:
+                        pass
+                logger.info(f"\n[-] [Density Reuse] Pre-converging reference GS density in {os.path.basename(ref_dir)}...")
+                try:
+                    self.label_single_frame(ref_atoms, ref_dir, retry=False, disk_io="low")
+                    if os.path.isdir(cand_save):
+                        ref_save_dir = cand_save
+                        logger.info(f"    [+] Reference GS density ready: {ref_save_dir}")
+                    else:
+                        logger.warning(f"    [!] Reference calculation completed, but {cand_save} was not generated; falling back to atomic densities.")
+                except Exception as exc:
+                    logger.warning(f"    [!] Failed to prepare reference GS density ({exc}); falling back to atomic densities.")
+
         def _run_primary_entry(step_num, entry):
             idx = entry["index"]
             fr = entry["atoms"]
@@ -610,9 +732,9 @@ class QERunner:
             stype = entry["sample_type"]
 
             t0 = time.time()
-            print(f"\n    ---> [{step_num}/{len(to_calculate)}] Calculating {label} ({stype}) in {os.path.basename(cdir)}...")
+            logger.info(f"\n    ---> [{step_num}/{len(to_calculate)}] Calculating {label} ({stype}) in {os.path.basename(cdir)}...")
             try:
-                labeled_fr = self.label_single_frame(fr, cdir, retry=False)
+                labeled_fr = self.label_single_frame(fr, cdir, retry=False, ref_save_dir=ref_save_dir)
                 labeled_fr.info["qe_status"] = "converged"
                 dt = time.time() - t0
                 with state_lock:
@@ -620,7 +742,7 @@ class QERunner:
                     type_completed[stype] = type_completed.get(stype, 0) + 1
                     current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
                     ase.io.write(out_xyz, current_frames, format="extxyz")
-                print(f"    [+] {label} labeled | E = {labeled_fr.info['energy']:.4f} eV | Max F = {np.abs(labeled_fr.arrays['forces']).max():.4f} eV/A ({dt:.1f} s)")
+                logger.info(f"    [+] {label} labeled | E = {labeled_fr.info['energy']:.4f} eV | Max F = {np.abs(labeled_fr.arrays['forces']).max():.4f} eV/A ({dt:.1f} s)")
             except RuntimeError as err:
                 with state_lock:
                     if do_retry:
@@ -629,17 +751,17 @@ class QERunner:
                         entry["attempts"] = 1
                         entry["last_error"] = str(err)
                         retry_queue.append(entry)
-                        print(f"    [!] {label} ({stype}) failed on attempt 1. Tagged for retry after remaining frames.")
+                        logger.warning(f"    [!] {label} ({stype}) failed on attempt 1. Tagged for retry after remaining frames.")
                     else:
                         fr.info["qe_status"] = "failed"
                         entry["status"] = "failed"
                         entry["attempts"] = 1
                         entry["last_error"] = str(err)
                         failed_entries.append(entry)
-                        print(f"    [!] {label} ({stype}) failed and retry is disabled. Ignoring frame.")
+                        logger.warning(f"    [!] {label} ({stype}) failed and retry is disabled. Ignoring frame.")
 
         if to_calculate:
-            print(f"\n[-] Executing {len(to_calculate)} DFT calculation(s)...")
+            logger.info(f"\n[-] Executing {len(to_calculate)} DFT calculation(s)...")
             if eff_workers > 1 and len(to_calculate) > 1:
                 with ThreadPoolExecutor(max_workers=eff_workers) as pool:
                     futures = [
@@ -654,7 +776,7 @@ class QERunner:
                     _run_primary_entry(step_num, entry)
 
         if retry_queue:
-            print(f"\n[-] Retrying {len(retry_queue)} tagged DFT calculation(s)...")
+            logger.info(f"\n[-] Retrying {len(retry_queue)} tagged DFT calculation(s)...")
             for retry_num, entry in enumerate(retry_queue, 1):
                 idx = entry["index"]
                 fr = entry["atoms"]
@@ -663,15 +785,15 @@ class QERunner:
                 stype = entry["sample_type"]
 
                 t0 = time.time()
-                print(f"\n    ---> [Retry {retry_num}/{len(retry_queue)}] Re-running {label} ({stype}) in {os.path.basename(cdir)}...")
+                logger.info(f"\n    ---> [Retry {retry_num}/{len(retry_queue)}] Re-running {label} ({stype}) in {os.path.basename(cdir)}...")
                 try:
-                    labeled_fr = self.label_single_frame(fr, cdir, retry=True)
+                    labeled_fr = self.label_single_frame(fr, cdir, retry=True, ref_save_dir=ref_save_dir)
                     labeled_fr.info["qe_status"] = "converged_on_retry"
                     entry["status"] = "converged_on_retry"
                     entry["attempts"] = 2
                     labeled_dict[idx] = labeled_fr
                     dt = time.time() - t0
-                    print(f"    [+] {label} converged on retry | E = {labeled_fr.info['energy']:.4f} eV | Max F = {np.abs(labeled_fr.arrays['forces']).max():.4f} eV/A ({dt:.1f} s)")
+                    logger.info(f"    [+] {label} converged on retry | E = {labeled_fr.info['energy']:.4f} eV | Max F = {np.abs(labeled_fr.arrays['forces']).max():.4f} eV/A ({dt:.1f} s)")
                     type_completed[stype] = type_completed.get(stype, 0) + 1
                     current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
                     ase.io.write(out_xyz, current_frames, format="extxyz")
@@ -681,7 +803,7 @@ class QERunner:
                     entry["attempts"] = 2
                     entry["last_error"] = str(err)
                     failed_entries.append(entry)
-                    print(f"    [!] {label} ({stype}) failed a second time.")
+                    logger.warning(f"    [!] {label} ({stype}) failed a second time.")
 
                     if do_replace and stype in ("core_rattle", "foundation_md_fps"):
                         repl_entry, next_cand_idx = self._obtain_replacement_entry(
@@ -691,27 +813,27 @@ class QERunner:
                         r_fr = repl_entry["atoms"]
                         r_cdir = repl_entry["calc_dir"]
                         r_label = repl_entry["frame_id"]
-                        print(f"    [->] Taking replacement frame {r_label} ({stype}) in {os.path.basename(r_cdir)} to fulfill quota...")
+                        logger.info(f"    [->] Taking replacement frame {r_label} ({stype}) in {os.path.basename(r_cdir)} to fulfill quota...")
                         try:
                             try:
-                                r_labeled = self.label_single_frame(r_fr, r_cdir, retry=False)
+                                r_labeled = self.label_single_frame(r_fr, r_cdir, retry=False, ref_save_dir=ref_save_dir)
                             except RuntimeError:
-                                print(f"    [!] Replacement {r_label} ({stype}) failed on attempt 1; retrying...")
-                                r_labeled = self.label_single_frame(r_fr, r_cdir, retry=True)
+                                logger.warning(f"    [!] Replacement {r_label} ({stype}) failed on attempt 1; retrying...")
+                                r_labeled = self.label_single_frame(r_fr, r_cdir, retry=True, ref_save_dir=ref_save_dir)
                             r_labeled.info["qe_status"] = "converged"
                             labeled_dict[r_idx] = r_labeled
                             type_completed[stype] = type_completed.get(stype, 0) + 1
                             current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
                             ase.io.write(out_xyz, current_frames, format="extxyz")
-                            print(f"    [+] Replacement {r_label} ({stype}) converged | E = {r_labeled.info['energy']:.4f} eV")
+                            logger.info(f"    [+] Replacement {r_label} ({stype}) converged | E = {r_labeled.info['energy']:.4f} eV")
                         except RuntimeError as repl_err:
                             r_fr.info["qe_status"] = "failed"
                             repl_entry["status"] = "failed"
                             repl_entry["last_error"] = str(repl_err)
                             failed_entries.append(repl_entry)
-                            print(f"    [!] Replacement {r_label} ({stype}) also failed. Ignoring slot and continuing.")
+                            logger.warning(f"    [!] Replacement {r_label} ({stype}) also failed. Ignoring slot and continuing.")
                     else:
-                        print(f"    [i] Ignoring failed calculation {label} ({stype}) and continuing with remaining frames.")
+                        logger.info(f"    [i] Ignoring failed calculation {label} ({stype}) and continuing with remaining frames.")
 
         self.last_failed_entries = failed_entries
         final_labeled = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
@@ -720,7 +842,7 @@ class QERunner:
 
         if failed_entries:
             fail_str = ", ".join(f"{e['frame_id']} ({e['sample_type']})" for e in failed_entries)
-            print(f"\n[!] Ignored {len(failed_entries)} failed DFT calculation(s): {fail_str}")
+            logger.warning(f"\n[!] Ignored {len(failed_entries)} failed DFT calculation(s): {fail_str}")
 
         if not final_labeled and (to_calculate or completed_entries):
             raise RuntimeError("All QE calculations failed; no converged frames available for training.")
@@ -730,6 +852,5 @@ class QERunner:
             st = fr.info.get("sample_type", "unknown")
             final_types[st] = final_types.get(st, 0) + 1
         summary_str = ", ".join(f"{k}: {v}" for k, v in sorted(final_types.items()))
-        print(f"\n[+] DFT Labeling Complete: {len(final_labeled)} total frames ({summary_str}) -> {out_xyz}")
+        logger.info(f"\n[+] DFT Labeling Complete: {len(final_labeled)} total frames ({summary_str}) -> {out_xyz}")
         return final_labeled
-

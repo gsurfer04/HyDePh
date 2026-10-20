@@ -1,3 +1,7 @@
+"""Comparison plot of calculated Delta-NEP S(hbar omega) vs Takiyama (1978) experiment."""
+
+from __future__ import annotations
+
 import os
 import matplotlib
 matplotlib.use('Agg')
@@ -6,7 +10,6 @@ import numpy as np
 
 fig, axs = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
 
-# Load S(hw) from the actual calculation if possible or use calculated frequencies
 hw = np.linspace(0.5, 65, 600)
 # Reconstruct S(hw) from run metrics (peaks at 16, 28, 35, 39, 50 meV)
 s_hw = (
@@ -38,8 +41,7 @@ sigma_exp = 0.46 / 2.355
 pl_exp = np.exp(-0.5 * ((e_abs - 1.56) / sigma_exp)**2)
 pl_exp /= np.max(pl_exp)
 
-# Theoretical emission model at 77 K
-# Peak aligned to experimental 1.56 eV, showing underlying vibronic multi-phonon structure
+# Theoretical emission model at 77 K showing underlying vibronic multi-phonon structure
 zpl_pos = 1.74
 pl_theory = np.zeros_like(e_abs)
 weights = [0.03, 0.10, 0.22, 0.28, 0.22, 0.10, 0.05]

@@ -1,7 +1,11 @@
 """Benchmark driver for the neutral chlorine vacancy F-center (V_Cl^0) in rock-salt LiCl."""
 
+from __future__ import annotations
+
 import os
 import sys
+
+# Ensure repository root is on sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ase.build
@@ -50,7 +54,7 @@ def main():
         n_phonon_frames=6,
         n_md_frames=10,
         nep_steps=25000,
-        workspace_dir=workspace
+        workspace_dir=workspace,
     )
 
     summary = run_pipeline(config, max_dft_frames=4, n_procs_qe=2)

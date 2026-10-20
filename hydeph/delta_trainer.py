@@ -1,19 +1,28 @@
 """Extracts Delta E and Delta F relative to the foundation potential and trains Delta-NEP in GPUMD."""
 
+from __future__ import annotations
+
 import os
 import sys
 import time
 import json
 import shutil
 import hashlib
+import warnings
 import subprocess
+import logging
+from typing import List, Tuple, Optional
 import numpy as np
 import ase.io
 from ase import Atoms
 from calorine.calculators import CPUNEP
 
+from .config import ToolkitConfig
 
-def resolve_nep_executable(nep_exe=None):
+logger = logging.getLogger(__name__)
+
+
+def resolve_nep_executable(nep_exe: Optional[str] = None) -> str:
     """Resolves the GPUMD `nep` executable path."""
     if nep_exe:
         if os.path.isfile(nep_exe):
@@ -51,15 +60,27 @@ def resolve_nep_executable(nep_exe=None):
         return "/usr/local/bin/nep"
 
 
-def write_delta_nep_in(out_path, unique_elements, neurons=30, batch=2000, steps=30000):
-    """Writes `nep.in` for Delta-NEP training."""
+def write_delta_nep_in(
+    out_path: str,
+    unique_elements: List[str],
+    neurons: int = 30,
+    batch: int = 2000,
+    steps: int = 30000,
+    cutoff_radial: float = 4.5,
+    cutoff_angular: float = 3.5,
+    n_max_radial: int = 6,
+    n_max_angular: int = 4,
+    basis_size: int = 8,
+    l_max: int = 2,
+):
+    """Writes `nep.in` for Delta-NEP training with exposed architectural hyperparameters."""
     elem_str = " ".join(unique_elements)
     content = f"""type {len(unique_elements)} {elem_str}
 version 4
-cutoff 4.5 3.5
-n_max 6 4
-basis_size 8 8
-l_max 2 1
+cutoff {cutoff_radial} {cutoff_angular}
+n_max {n_max_radial} {n_max_angular}
+basis_size {basis_size} {basis_size}
+l_max {l_max} 1
 neuron {neurons}
 batch {batch}
 population 50
@@ -69,12 +90,19 @@ generation {steps}
         f.write(content)
 
 
-def stratified_train_test_split(delta_frames, test_fraction=0.20, seed=42):
+def stratified_train_test_split(
+    delta_frames: List[Atoms], test_fraction: float = 0.20, seed: int = 42
+) -> Tuple[List[Atoms], List[Atoms]]:
     """Splits `delta_frames` into `(train_frames, test_frames)`, keeping lambda=0/1 endpoints in train."""
     n_total = len(delta_frames)
     if n_total == 0:
         raise RuntimeError("No labeled DFT frames available for Delta-NEP training.")
     if n_total == 1:
+        warnings.warn(
+            "stratified_train_test_split called with only 1 frame. Training and testing datasets will share identical data.",
+            UserWarning,
+            stacklevel=2,
+        )
         return list(delta_frames), list(delta_frames)
 
     n_test = max(1, int(n_total * test_fraction))
@@ -96,7 +124,7 @@ def stratified_train_test_split(delta_frames, test_fraction=0.20, seed=42):
 
     non_anchor_pool = [i for i in range(n_total) if i not in anchor_indices]
     if len(non_anchor_pool) < n_test:
-        all_idx = list( rng.permutation(n_total) )
+        all_idx = list(rng.permutation(n_total))
         test_set = set(all_idx[-n_test:])
     else:
         test_set = set()
@@ -119,7 +147,7 @@ def stratified_train_test_split(delta_frames, test_fraction=0.20, seed=42):
     return train_frames, test_frames
 
 
-def _compute_training_digest(delta_frames, neurons, batch, steps) -> str:
+def _compute_training_digest(delta_frames: List[Atoms], neurons: int, batch: int, steps: int) -> str:
     """Computes a SHA256 digest of the delta training dataset and NEP hyperparameters."""
     h = hashlib.sha256()
     h.update(f"neurons={neurons};batch={batch};steps={steps};n={len(delta_frames)}".encode("utf-8"))
@@ -132,11 +160,13 @@ def _compute_training_digest(delta_frames, neurons, batch, steps) -> str:
 
 
 class DeltaTrainer:
-    def __init__(self, config, calc_foundation=None):
+    """Computes delta energies and forces, writes GPUMD training cards, and trains Delta-NEP."""
+
+    def __init__(self, config: ToolkitConfig, calc_foundation=None):
         self.config = config
         if calc_foundation is not None:
             self.calc_foundation = calc_foundation
-        elif getattr(config, "foundation_potential_path", None):
+        elif config.foundation_potential_path:
             try:
                 self.calc_foundation = CPUNEP(config.foundation_potential_path)
             except Exception:
@@ -144,10 +174,10 @@ class DeltaTrainer:
         else:
             self.calc_foundation = None
 
-    def compute_delta_dataset(self, labeled_frames):
+    def compute_delta_dataset(self, labeled_frames: List[Atoms]) -> List[Atoms]:
         """Computes Delta E and Delta F for each DFT-labeled frame relative to the foundation potential."""
         delta_frames = []
-        print("\n[-] Evaluating foundation potential (nep89) to extract Delta E and Delta F...")
+        logger.info("\n[-] Evaluating foundation potential to extract Delta E and Delta F...")
 
         at_eval = None
         for fr in labeled_frames:
@@ -168,33 +198,42 @@ class DeltaTrainer:
                 else:
                     at_eval.set_cell(fr.cell)
                     at_eval.set_positions(fr.positions)
+
                 e_base = float(at_eval.get_potential_energy())
-                f_base = np.asarray(at_eval.get_forces(), dtype=float).copy()
-                fr.info["e_base"] = e_base
-                fr.arrays["f_base"] = f_base
+                f_base = np.asarray(at_eval.get_forces(), dtype=float)
+
+            delta_e = float(e_dft - e_base)
+            delta_f = np.asarray(f_dft - f_base, dtype=float)
 
             fr_delta = fr.copy()
-            fr_delta.info["energy"] = e_dft - e_base
-            fr_delta.arrays["forces"] = f_dft - f_base
+            fr_delta.info["energy"] = delta_e
+            fr_delta.info["e_base"] = e_base
+            fr_delta.info["e_dft"] = e_dft
+            fr_delta.arrays["forces"] = delta_f
+            fr_delta.arrays["f_base"] = f_base
+            fr_delta.arrays["f_dft"] = f_dft
             delta_frames.append(fr_delta)
 
-        print(f"[+] Computed Delta properties for {len(delta_frames)} frames.")
+        max_d_f = max(np.abs(f.arrays["forces"]).max() for f in delta_frames)
+        mean_d_e = np.mean([abs(f.info["energy"]) for f in delta_frames])
+        logger.info(f"[+] Extracted Delta dataset ({len(delta_frames)} frames): Mean |Delta E| = {mean_d_e:.3f} eV, Max |Delta F| = {max_d_f:.3f} eV/A")
         return delta_frames
 
-    def train_delta_nep(self, delta_frames, test_fraction=0.20, force_retrain=False):
-        """Writes stratified train/test splits and runs GPUMD `nep` training (reusing cached model if unchanged)."""
+    def train_delta_nep(self, delta_frames: List[Atoms], force_retrain: bool = False) -> str:
+        """Writes train.xyz/test.xyz/nep.in, invokes `nep` to train Delta-NEP, and caches `nep_delta.txt`."""
         train_dir = os.path.join(self.config.workspace_dir, "delta_nep_training")
         os.makedirs(train_dir, exist_ok=True)
 
-        seed = getattr(self.config, "random_seed", 42)
+        seed = self.config.random_seed
         train_frames, test_frames = stratified_train_test_split(
-            delta_frames, test_fraction=test_fraction, seed=seed
+            delta_frames, test_fraction=0.20, seed=seed
         )
 
         ase.io.write(os.path.join(train_dir, "train.xyz"), train_frames, format="extxyz")
         ase.io.write(os.path.join(train_dir, "test.xyz"), test_frames, format="extxyz")
 
-        unique_elems = sorted(list(set(delta_frames[0].get_chemical_symbols())))
+        # Union of chemical symbols across ALL frames to handle vacancies/substitutions safely
+        unique_elems = sorted(set().union(*(set(f.get_chemical_symbols()) for f in delta_frames)))
         nep_in = os.path.join(train_dir, "nep.in")
         effective_batch = min(self.config.nep_batch, len(train_frames))
         write_delta_nep_in(
@@ -203,52 +242,67 @@ class DeltaTrainer:
             neurons=self.config.nep_neurons,
             batch=effective_batch,
             steps=self.config.nep_steps,
+            cutoff_radial=self.config.nep_cutoff_radial,
+            cutoff_angular=self.config.nep_cutoff_angular,
+            n_max_radial=self.config.nep_n_max_radial,
+            n_max_angular=self.config.nep_n_max_angular,
+            basis_size=self.config.nep_basis_size,
+            l_max=self.config.nep_l_max,
         )
 
         pot_dest = os.path.join(self.config.workspace_dir, "nep_delta.txt")
         manifest_path = os.path.join(train_dir, "training_manifest.json")
-        digest = _compute_training_digest(
-            delta_frames, self.config.nep_neurons, effective_batch, self.config.nep_steps
-        )
-        force = force_retrain or getattr(self.config, "force_retrain", False)
+        force = force_retrain or self.config.force_retrain
 
+        # Performance optimization: skip digest hashing if cached potential or manifest clearly does not exist
         if not force and os.path.isfile(pot_dest) and os.path.isfile(manifest_path):
+            digest = _compute_training_digest(
+                delta_frames, self.config.nep_neurons, effective_batch, self.config.nep_steps
+            )
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     cached_meta = json.load(f)
                 if cached_meta.get("digest") == digest:
-                    print(f"\n[i] Reusing cached Delta-NEP potential (dataset & hyperparameters unchanged): {pot_dest}")
+                    logger.info(f"\n[i] Reusing cached Delta-NEP potential (dataset & hyperparameters unchanged): {pot_dest}")
                     return pot_dest
             except Exception:
                 pass
+        else:
+            digest = None
 
-        print(f"\n[-] Training Delta-NEP on GPU (train={len(train_frames)}, test={len(test_frames)}, steps={self.config.nep_steps})...")
+        logger.info(f"\n[-] Training Delta-NEP on GPU (train={len(train_frames)}, test={len(test_frames)}, steps={self.config.nep_steps})...")
         t0 = time.time()
-        nep_cmd = resolve_nep_executable(getattr(self.config, "nep_exe", None))
-        res = subprocess.run([nep_cmd], cwd=train_dir, capture_output=True, text=True)
+        nep_cmd = resolve_nep_executable(self.config.nep_exe)
+        nep_args = [sys.executable, nep_cmd] if nep_cmd.endswith(".py") else [nep_cmd]
+
+        res = subprocess.run(nep_args, cwd=train_dir, capture_output=True, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"NEP training failed using '{nep_cmd}':\n{res.stderr}\n{res.stdout}")
 
-        print(f"[+] Delta-NEP training completed in {time.time()-t0:.2f} s")
+        logger.info(f"[+] Delta-NEP training completed in {time.time()-t0:.2f} s")
 
         pot_src = os.path.join(train_dir, "nep.txt")
         if os.path.isfile(pot_src):
             shutil.copy2(pot_src, pot_dest)
         else:
             raise FileNotFoundError(f"Trained NEP potential '{pot_src}' was not found after training.")
-        print(f"[+] Trained Delta-NEP saved: {pot_dest}")
+        logger.info(f"[+] Trained Delta-NEP saved: {pot_dest}")
 
-        try:
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                json.dump({"digest": digest, "n_train": len(train_frames), "n_test": len(test_frames)}, f, indent=2)
-        except Exception:
-            pass
-
-        loss_path = os.path.join(train_dir, "loss.out")
-        if os.path.isfile(loss_path):
-            d_loss = np.loadtxt(loss_path)
-            if len(d_loss.shape) > 1 and len(d_loss) > 0:
-                final_loss = d_loss[-1]
-                print(f"    - Final Loss: Total={final_loss[0]:.4e}, Energy={final_loss[1]:.4e}, Force={final_loss[2]:.4e}")
+        if digest is None:
+            digest = _compute_training_digest(
+                delta_frames, self.config.nep_neurons, effective_batch, self.config.nep_steps
+            )
+        manifest_data = {
+            "digest": digest,
+            "n_frames": len(delta_frames),
+            "n_train": len(train_frames),
+            "n_test": len(test_frames),
+            "neurons": self.config.nep_neurons,
+            "batch": effective_batch,
+            "steps": self.config.nep_steps,
+            "timestamp": time.time(),
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, indent=2)
 
         return pot_dest

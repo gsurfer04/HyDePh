@@ -4,7 +4,19 @@ Trains Delta-NEP potentials on top of foundation models to compute
 multi-temperature optical spectra for point defects in solids.
 """
 
-__version__ = "0.4.0"
+from __future__ import annotations
+
+import logging
+
+__version__ = "0.5.0"
+
+# Configure root hydeph package logger
+logger = logging.getLogger("hydeph")
+if not logger.handlers:
+    _default_handler = logging.StreamHandler()
+    _default_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(_default_handler)
+    logger.setLevel(logging.INFO)
 
 from .config import ToolkitConfig
 from .defect_builder import DefectBuilder

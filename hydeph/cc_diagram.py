@@ -1,26 +1,50 @@
 """1D Franck-Condon configuration coordinate potential energy curves and Stokes shift analysis."""
 
+from __future__ import annotations
+
 import os
+import json
+import csv
+import warnings
+import logging
+from typing import Optional, Dict, Any, Tuple
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from typing import Optional, Dict, Any
 from ase import Atoms
 
+from .config import ToolkitConfig
 from .defect_builder import mic_displacement
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
 
-# hbar * Omega (meV) = 91.43476 * sqrt(Delta E_rel (eV)) / Delta Q (amu^(1/2) A)
-CC_HBAR_OMEGA_PREFACTOR = 91.43476
+logger = logging.getLogger(__name__)
+
+# Module-level physical constants and prefactors
+NV_ZPL_EV = 1.945  # Reference canonical NV- defect ZPL energy in eV
+CC_HBAR_OMEGA_PREFACTOR = 91.43476  # Prefactor: 91.43476 * sqrt(Delta E_rel (eV)) / Delta Q (amu^(1/2) A)
 
 
 class ConfigurationCoordinateEngine:
     """Evaluates 1D potential surfaces along R(lambda) = R_GS + lambda * (R_ES - R_GS) and extracts Stokes shift parameters."""
 
-    def __init__(self, config, calculator):
+    def __init__(self, config: ToolkitConfig, calculator):
         self.config = config
         self.calc = calculator
+        self.last_results: Optional[Dict[str, Any]] = None
+
+    def _derive_zpl(self, at_gs: Atoms, at_es: Atoms) -> Optional[float]:
+        """Derives ZPL energy from atoms info (e.g. DFT energies) or stored CC results if available."""
+        if "energy" in at_es.info and "energy" in at_gs.info:
+            return float(at_es.info["energy"] - at_gs.info["energy"])
+        if self.last_results is not None and "e_zpl_eV" in self.last_results:
+            return float(self.last_results["e_zpl_eV"])
+        return None
 
     def calculate_cc_curve(
         self,
@@ -32,9 +56,9 @@ class ConfigurationCoordinateEngine:
         zpl_energy_eV: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Calculates ground- and excited-state potential energy curves along the 1D configuration coordinate."""
-        l_min = lambda_min if lambda_min is not None else getattr(self.config, "cc_lambda_min", -0.30)
-        l_max = lambda_max if lambda_max is not None else getattr(self.config, "cc_lambda_max", 1.30)
-        n_pts = n_points if n_points is not None else getattr(self.config, "cc_n_points", 81)
+        l_min = lambda_min if lambda_min is not None else self.config.cc_lambda_min
+        l_max = lambda_max if lambda_max is not None else self.config.cc_lambda_max
+        n_pts = n_points if n_points is not None else self.config.cc_n_points
 
         m = at_gs.get_masses()
         pos_gs = at_gs.positions.copy()
@@ -49,7 +73,8 @@ class ConfigurationCoordinateEngine:
         v_ref = float(at_eval.get_potential_energy())
 
         e_gs_list = []
-        for lam in lambdas:
+        pbar = tqdm(lambdas, desc="CC curve evaluation", unit="pt", leave=False)
+        for lam in pbar:
             at_eval.set_positions(pos_gs + lam * dr)
             e_val = float(at_eval.get_potential_energy()) - v_ref
             e_gs_list.append(e_val)
@@ -60,13 +85,30 @@ class ConfigurationCoordinateEngine:
         e_rel_gs_eV = float(at_eval.get_potential_energy()) - v_ref
         e_rel_gs_meV = e_rel_gs_eV * 1000.0
 
-        user_zpl = zpl_energy_eV if zpl_energy_eV is not None else getattr(self.config, "zpl_energy_eV", None)
+        user_zpl = zpl_energy_eV if zpl_energy_eV is not None else self.config.zpl_energy_eV
         if user_zpl is not None:
             e_zpl = float(user_zpl)
             zpl_source = "user_configured"
         else:
-            e_zpl = 1.945
-            zpl_source = "default_canonical_1.945eV"
+            derived = self._derive_zpl(at_gs, at_es)
+            if derived is not None and derived > 0:
+                e_zpl = derived
+                zpl_source = "derived_from_dft"
+                warnings.warn(
+                    f"Auto-derived ZPL energy: {e_zpl:.4f} eV from GS and ES ground/excited state energies.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                e_zpl = NV_ZPL_EV
+                zpl_source = f"default_reference_{NV_ZPL_EV}eV"
+                warnings.warn(
+                    f"No ZPL energy specified in ToolkitConfig and could not be derived from DFT energies. "
+                    f"Falling back to reference canonical NV- ZPL ({NV_ZPL_EV} eV). "
+                    "For accurate defect-specific diagrams, specify `ToolkitConfig.zpl_energy_eV`.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         # Equal-curvature Franck-Condon excited state: E_ES(lambda) = E_ZPL + Delta E_rel,ES * (1 - lambda)^2
         e_rel_es_eV = e_rel_gs_eV
@@ -113,17 +155,51 @@ class ConfigurationCoordinateEngine:
             "k_curvature_gs": k_fit_eV_amu_A2,
         }
 
-        print(f"[+] 1D Configuration Coordinate analysis complete:")
-        print(f"    • Mass-weighted displacement Delta Q: {dq_total:.4f} amu^(1/2) A")
-        print(f"    • Zero-Phonon Line E_ZPL: {e_zpl:.4f} eV ({zpl_source})")
-        print(f"    • GS Relaxation Energy Delta E_rel,GS: {e_rel_gs_meV:.1f} meV ({e_rel_gs_eV:.4f} eV)")
-        print(f"    • ES Relaxation Energy Delta E_rel,ES: {e_rel_es_meV:.1f} meV ({e_rel_es_eV:.4f} eV)")
-        print(f"    • Vertical Absorption E_abs: {e_abs_eV:.4f} eV")
-        print(f"    • Vertical Emission E_em: {e_em_eV:.4f} eV")
-        print(f"    • Total Stokes Shift Delta E_Stokes: {stokes_shift_meV:.1f} meV ({stokes_shift_eV:.4f} eV)")
-        print(f"    • Effective Phonon Frequency hbar*Omega: {hbar_omega_meV:.1f} meV (S_1D = {s_factor_1d:.2f})")
+        self.last_results = results
+
+        logger.info("[+] 1D Configuration Coordinate analysis complete:")
+        logger.info(f"    • Mass-weighted displacement Delta Q: {dq_total:.4f} amu^(1/2) A")
+        logger.info(f"    • Zero-Phonon Line E_ZPL: {e_zpl:.4f} eV ({zpl_source})")
+        logger.info(f"    • GS Relaxation Energy Delta E_rel,GS: {e_rel_gs_meV:.1f} meV ({e_rel_gs_eV:.4f} eV)")
+        logger.info(f"    • ES Relaxation Energy Delta E_rel,ES: {e_rel_es_meV:.1f} meV ({e_rel_es_eV:.4f} eV)")
+        logger.info(f"    • Vertical Absorption E_abs: {e_abs_eV:.4f} eV")
+        logger.info(f"    • Vertical Emission E_em: {e_em_eV:.4f} eV")
+        logger.info(f"    • Total Stokes Shift Delta E_Stokes: {stokes_shift_meV:.1f} meV ({stokes_shift_eV:.4f} eV)")
+        logger.info(f"    • Effective Phonon Frequency hbar*Omega: {hbar_omega_meV:.1f} meV (S_1D = {s_factor_1d:.2f})")
 
         return results
+
+    def export_results(self, cc_results: Dict[str, Any], output_dir: Optional[str] = None) -> Dict[str, str]:
+        """Exports numerical results to JSON and CSV files."""
+        out_dir = output_dir or self.config.workspace_dir
+        os.makedirs(out_dir, exist_ok=True)
+
+        json_path = os.path.join(out_dir, "configuration_coordinate_data.json")
+        csv_path = os.path.join(out_dir, "configuration_coordinate_curve.csv")
+
+        # Scalar JSON export
+        scalars = {
+            k: float(v) if isinstance(v, (np.floating, float, np.integer, int)) else v
+            for k, v in cc_results.items()
+            if not isinstance(v, np.ndarray) and k != "figure_path"
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(scalars, f, indent=2)
+
+        # Tabular CSV export
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["lambda", "Q_amu_A", "E_GS_eV", "E_ES_eV"])
+            for lam, q, e_g, e_e in zip(
+                cc_results["lambda_grid"],
+                cc_results["q_grid"],
+                cc_results["e_gs"],
+                cc_results["e_es"],
+            ):
+                writer.writerow([f"{lam:.6f}", f"{q:.6f}", f"{e_g:.6f}", f"{e_e:.6f}"])
+
+        logger.info(f"[+] Numerical CC results exported: {json_path} and {csv_path}")
+        return {"json": json_path, "csv": csv_path}
 
     def plot_configuration_coordinate(
         self,
@@ -134,8 +210,8 @@ class ConfigurationCoordinateEngine:
     ) -> str:
         """Renders a 2-panel configuration coordinate and optical spectra diagram, returning the saved file path."""
         if output_path is None:
-            fig_name = getattr(self.config, "cc_figure_name", "configuration_coordinate.png")
-            ws_dir = getattr(self.config, "workspace_dir", "./hydeph_run")
+            fig_name = self.config.cc_figure_name
+            ws_dir = self.config.workspace_dir
             output_path = os.path.join(ws_dir, fig_name)
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -274,12 +350,13 @@ class ConfigurationCoordinateEngine:
         plt.savefig(output_path, dpi=300)
         plt.close(fig)
 
-        print(f"[+] Publication-grade Configuration Coordinate diagram saved: {output_path}")
+        logger.info(f"[+] Publication-grade Configuration Coordinate diagram saved: {output_path}")
+        self.export_results(cc_results, os.path.dirname(os.path.abspath(output_path)))
         return os.path.abspath(output_path)
 
 
 def plot_configuration_coordinate(
-    config,
+    config: ToolkitConfig,
     calculator,
     at_gs: Atoms,
     at_es: Atoms,

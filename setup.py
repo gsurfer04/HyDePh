@@ -2,18 +2,31 @@ from setuptools import setup, find_packages
 
 setup(
     name="hydeph",
-    version="0.3.2",
+    version="0.5.0",
     description="HyDePh: High-Definition Hybrid Defect Photoluminescence & Anharmonic Spectroscopy",
     author="Quantum Materials & Machine Learning Team",
     packages=find_packages(),
     python_requires=">=3.9",
     install_requires=[
-        "numpy>=1.22.0",
-        "scipy>=1.8.0",
-        "matplotlib>=3.5.0",
-        "ase>=3.22.0",
-        "calorine>=2.3.0",
+        "numpy>=1.22.0,<3",
+        "scipy>=1.8.0,<2",
+        "matplotlib>=3.5.0,<4",
+        "ase>=3.22.0,<4",
+        "calorine>=2.3.0,<3",
     ],
+    extras_require={
+        "dev": [
+            "pytest>=7.0",
+            "black>=23.0",
+            "ruff>=0.4",
+            "mypy>=1.0",
+        ],
+    },
+    entry_points={
+        "console_scripts": [
+            "hydeph=hydeph.pipeline:main",
+        ],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

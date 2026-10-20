@@ -33,14 +33,15 @@ V_{\mathrm{hybrid}}(\mathbf{R}) &= V_{\mathrm{foundation}}(\mathbf{R}) + \Delta 
 $$
 
 Key capabilities:
-1. **Defect Embedding**: Tiles pristine bulk unit cells around a defect unit cell and locates the defect coordinate.
-2. **4-Phase Active Sampling**: Generates candidate configurations across the Franck-Condon coordinate, defect-core rattling, and high-temperature foundation MD with Farthest Point Sampling (FPS).
-3. **DFT Labeling & Resumption**: Runs Quantum ESPRESSO (`pw.x` / `pw.exe`) with MPI + GPU support, live SCF progress, disk caching, and type-balanced resumption.
-4. **GPU $\Delta$-NEP Training**: Fits the residual potential in GPUMD.
+1. **Defect Embedding**: Vectorized tiling of pristine bulk unit cells around a defect unit cell and defect coordinate detection.
+2. **4-Phase Active Sampling**: Generates candidate configurations across the Franck-Condon coordinate, defect-core rattling, and high-temperature foundation MD with incremental Farthest Point Sampling (FPS).
+3. **DFT Labeling & Resumption**: Runs Quantum ESPRESSO (`pw.x` / `pw.exe`) with Gamma-point real wavefunctions (`K_POINTS gamma`), universal ASE atomic masses, disk caching, and type-balanced resumption.
+4. **GPU $\Delta$-NEP Training**: Fits the residual potential in GPUMD with customizable architecture cutoffs and basis sizes.
 5. **Multi-Regime Lineshapes**: Computes Huang-Rhys factors $S$, spectral densities $S(\hbar\omega)$, and multi-temperature emission spectra $A(E - E_{\mathrm{ZPL}}, T)$ via mass-weighted optical projection ($\mathbf{u}_{\mathrm{opt}}$), using quantum generating functions for weak/intermediate coupling ($S < 10$) and semiclassical Marcus convolution for strong coupling ($S \ge 10$).
-6. **1D Configuration Coordinate & Stokes Shift**: Evaluates potential surfaces along $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda (\mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}})$ to extract $\Delta Q$, relaxation energies $\Delta E_{\mathrm{rel}}$, vertical transitions $E_{\mathrm{abs}}$ and $E_{\mathrm{em}}$, effective phonon energy $\hbar\Omega$, and Stokes shift $\Delta E_{\mathrm{Stokes}}$.
+6. **1D Configuration Coordinate & Stokes Shift**: Evaluates potential surfaces along $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda (\mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}})$ to extract $\Delta Q$, relaxation energies $\Delta E_{\mathrm{rel}}$, vertical transitions $E_{\mathrm{abs}}$ and $E_{\mathrm{em}}$, effective phonon energy $\hbar\Omega$, Stokes shift $\Delta E_{\mathrm{Stokes}}$, and auto-derived ZPL.
+7. **Numerical Data Export**: Automatically exports publication-ready CSV and JSON data alongside figures.
 
-See the **[Theoretical Walkthrough](docs/THEORY_WALKTHROUGH.md)** for the mathematical formulation and literature references.
+See the **[Theoretical Walkthrough](docs/THEORY_WALKTHROUGH.md)** for the mathematical formulation and literature references, **[CHANGELOG.md](CHANGELOG.md)** for release notes, and **[CONTRIBUTING.md](CONTRIBUTING.md)** for developer setup.
 
 ---
 
@@ -54,12 +55,30 @@ cd HyDePh
 pip install -e .
 ```
 
+For development dependencies (testing, linting, formatting):
+```bash
+pip install -e ".[dev]"
+```
+
 Prerequisites:
 - [GPUMD / NEP](https://github.com/brucefan992/GPUMD) (`gpumd` and `nep` / `nep.exe`)
 - [Quantum ESPRESSO](https://www.quantum-espresso.org/): `pw.x` on Linux, or `pw.exe` from [QMatSuite/quantum-espresso-windows-exe](https://github.com/QMatSuite/quantum-espresso-windows-exe) with Microsoft MPI on Windows
 - NVIDIA GPU with CUDA support (or CPU fallback for potential evaluation)
 
-### 2. Python API
+### 2. Command-Line Interface (CLI)
+
+Run end-to-end calculations directly from a YAML or TOML configuration file:
+
+```bash
+hydeph config.yaml
+```
+
+Optional flags:
+```bash
+hydeph config.yaml --max-dft 25 --workers 2
+```
+
+### 3. Python API
 
 ```python
 from hydeph import ToolkitConfig, run_pipeline
@@ -82,7 +101,7 @@ config = ToolkitConfig(
 summary = run_pipeline(config)
 ```
 
-### 3. Charged Defects & Spin States (e.g., $\text{NV}^-$ in Diamond)
+### 4. Charged Defects & Spin States (e.g., $\text{NV}^-$ in Diamond)
 
 ```python
 from hydeph import ToolkitConfig, run_pipeline
@@ -120,6 +139,9 @@ summary = run_pipeline(config)
 | `excited_cell_path` | `str` | `None` | Path to explicit excited-state cell or supercell; falls back to coordination-shell breathing when omitted. |
 | `excited_state_displacement` | `float` | `None` | Radial breathing displacement (Å) for procedural excited states ($0.08\ \text{\AA}$ for covalent hosts, $0.15\ \text{\AA}$ for ionic hosts). |
 | `substitutional_element` | `str` | `None` | Replacement species symbol when `defect_type="substitutional"` (or specify `"Host->Sub"` in `defect_site_element`). |
+| `conv_thr` | `str` | `"1.0d-5"` | SCF convergence threshold in Quantum ESPRESSO. |
+| `mixing_beta` | `float` | `0.4` | SCF charge density mixing factor. |
+| `diagonalization` | `str` | `"david"` | Diagonalization method in Quantum ESPRESSO (`'david'`, `'cg'`). |
 
 ### Sampling & Resumption
 
@@ -133,8 +155,24 @@ summary = run_pipeline(config)
 | `dft_resume_mode` | `str` | `"target_total"` | `"target_total"` (reach `max_dft_frames` total) or `"max_new"` (run up to `max_new_dft_frames` new frames). |
 | `retry_failed_dft` | `bool` | `True` | Tags failed or non-converged QE frames to retry with conservative mixing (`mixing_mode='local-TF'`, `mixing_beta=0.2`) after remaining frames finish. |
 | `replace_failed_frames` | `bool` | `False` | When `True`, replaces a rattle or MD frame that fails a second time with a new frame of the same type to fulfill the quota; when `False`, ignores failed frames and continues with the rest. |
+| `reuse_gs_density` | `bool` | `False` | Pre-converges a reference ground-state SCF with `disk_io='low'`, copies `calc.save/` into each frame's scratch directory, and sets `startingpot='file'` in `&ELECTRONS`, reducing SCF iterations by ~30–50% per frame. |
+| `n_procs_qe` | `int` | `2` | Number of MPI processes per Quantum ESPRESSO worker. |
 | `n_workers_qe` | `int` | `1` | Number of independent `pw.x` frame calculations to run concurrently. |
 | `qe_timeout_s` | `float` | `None` | Optional wall-clock timeout (seconds) per `pw.x` run before terminating and queuing for retry. |
+
+### Delta-NEP Architecture Hyperparameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `nep_neurons` | `int` | `30` | Number of neurons in Delta-NEP hidden layer. |
+| `nep_batch` | `int` | `2000` | Batch size for Delta-NEP training. |
+| `nep_steps` | `int` | `30000` | Number of training generations for Delta-NEP. |
+| `nep_cutoff_radial` | `float` | `4.5` | Radial cutoff for Delta-NEP in Å. |
+| `nep_cutoff_angular` | `float` | `3.5` | Angular cutoff for Delta-NEP in Å. |
+| `nep_n_max_radial` | `int` | `6` | Radial expansion basis size for Delta-NEP. |
+| `nep_n_max_angular` | `int` | `4` | Angular expansion basis size for Delta-NEP. |
+| `nep_basis_size` | `int` | `8` | Descriptor basis size for Delta-NEP. |
+| `nep_l_max` | `int` | `2` | Maximum angular momentum for Delta-NEP expansion. |
 
 ### Spectroscopy, Graphing & 1D Configuration Coordinate
 
@@ -152,7 +190,7 @@ summary = run_pipeline(config)
 | `dephasing_gamma_meV` | `float` | `None` | ZPL dephasing width ($\text{meV}$); defaults to $\gamma(T) = 1.5 + 2.0\times 10^{-4} T^2\ \text{meV}$. |
 | `finite_size_acoustic_cutoff` | `bool` | `True` | Enforces $S(\hbar\omega) \to 0$ as $\omega \to 0$. |
 | `plot_configuration_coordinate` | `bool` | `True` | Computes and plots the 2-panel 1D configuration coordinate and Stokes shift figure. |
-| `zpl_energy_eV` | `float` | `None` | Zero-Phonon Line energy in $\text{eV}$ (defaults to $1.945\ \text{eV}$). |
+| `zpl_energy_eV` | `float` | `None` | Zero-Phonon Line energy in $\text{eV}$. Auto-derived from ground/excited state energies when omitted. |
 | `cc_figure_name` | `str` | `"configuration_coordinate.png"` | Filename for the 1D configuration coordinate diagram. |
 | `cc_lambda_min` / `cc_lambda_max` | `float` | `-0.30` / `1.30` | Dimensionless coordinate range $\lambda$ along $\mathbf{R}(\lambda)$. |
 | `cc_n_points` | `int` | `81` | Grid points along the 1D configuration coordinate path. |
@@ -238,16 +276,18 @@ flowchart TD
 
 ```
 hydeph/
-├── __init__.py                    # Package exports
-├── config.py                      # ToolkitConfig dataclass and validation
-├── defect_builder.py              # Supercell embedding & defect coordinate locator
-├── frame_sampler.py               # 4-phase frame sampler (FC, rattle, MD+FPS)
-├── qe_runner.py                   # Quantum ESPRESSO runner with caching & resumption
+├── __init__.py                    # Package exports & logging configuration
+├── __main__.py                    # Python module CLI entrypoint
+├── config.py                      # ToolkitConfig dataclass, file I/O & validation
+├── defect_builder.py              # Vectorized supercell embedding & defect locator
+├── frame_sampler.py               # 4-phase frame sampler (FC, rattle, streamed MD+FPS)
+├── qe_runner.py                   # Quantum ESPRESSO runner (Gamma-point, single-pass parser)
 ├── delta_trainer.py               # Baseline subtraction & GPUMD Delta-NEP trainer
-├── calculator.py                  # HybridDefectCalculator (V_base + Delta_V)
-├── lineshape.py                   # Quantum generating function & anharmonic MD engine
+├── calculator.py                  # HybridDefectCalculator with property gating
+├── lineshape.py                   # Quantum generating function & numerical exporter
 ├── cc_diagram.py                  # 1D configuration coordinate & Stokes shift engine
-├── pipeline.py                    # Turnkey pipeline orchestrator
+└── pipeline.py                    # Turnkey pipeline orchestrator & CLI main
+examples/
 ├── run_licl_fcenter.py            # Benchmark driver for LiCl F-center
 └── plot_experimental_comparison.py
 docs/
@@ -256,7 +296,11 @@ scripts/
 ├── make_github_diagram.py         # Generates LiCl F-center benchmark diagram
 └── make_stiff_vs_soft_diagram.py  # Generates stiff vs. soft host comparison diagram
 assets/                            # Benchmark figures
-tests/                             # Unit test suite
+tests/                             # Automated test suite (52 unit tests)
+CHANGELOG.md                       # Release notes and history
+CONTRIBUTING.md                    # Developer and contribution guidelines
+pyproject.toml                     # Project packaging, CLI script & dependencies
+setup.py                           # Legacy setuptools installation entrypoint
 ```
 
 ## License
