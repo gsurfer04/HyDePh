@@ -12,7 +12,7 @@ setup(
         "scipy>=1.8.0,<2",
         "matplotlib>=3.5.0,<4",
         "ase>=3.22.0,<4",
-        "calorine>=2.3.0,<3",
+        "calorine>=2.3.0",
     ],
     extras_require={
         "dev": [
