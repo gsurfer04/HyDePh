@@ -319,6 +319,7 @@ def test_qe_ground_state_density_reuse(tmp_path):
     text = pw_in.read_text()
     assert "disk_io = 'low'" in text
     assert "startingpot = 'file'" in text
+    assert "startingwfc = 'file'" in text
 
     # 3. Explicit disk_io='low' with starting_pot=False -> disk_io = 'low', no startingpot
     write_qe_input(at, str(pw_in), cfg, starting_pot=False, disk_io="low")

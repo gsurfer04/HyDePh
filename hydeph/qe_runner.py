@@ -65,12 +65,18 @@ def write_qe_input(
     base_mixing_beta = config.mixing_beta
     mixing_beta = 0.2 if retry else base_mixing_beta
     retry_lines = "\n  mixing_mode = 'local-TF',\n  electron_maxstep = 150," if retry else ""
-    startingpot_line = "\n  startingpot = 'file'," if starting_pot else ""
+    startingpot_line = (
+        "\n  startingpot = 'file',  ! Reuses ground-state charge density from calc.save/"
+        "\n  startingwfc = 'file',  ! Reuses ground-state wavefunctions from calc.save/"
+        if starting_pot
+        else ""
+    )
+    restart_comment = "  ! Preserves frame ATOMIC_POSITIONS (avoids overwriting from restart file)" if starting_pot else ""
     disk_io_val = disk_io if disk_io is not None else ("low" if starting_pot else "none")
 
     header = f"""&CONTROL
   calculation = '{calculation}',
-  restart_mode = 'from_scratch',
+  restart_mode = 'from_scratch',{restart_comment}
   pseudo_dir = '{clean_pseudo_dir}',
   outdir = './tmp',
   prefix = 'calc',
