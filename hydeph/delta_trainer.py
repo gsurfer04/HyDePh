@@ -9,6 +9,7 @@ import json
 import shutil
 import hashlib
 import warnings
+import threading
 import subprocess
 import logging
 from typing import List, Tuple, Optional
@@ -18,6 +19,12 @@ from ase import Atoms
 from calorine.calculators import CPUNEP
 
 from .config import ToolkitConfig
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +187,7 @@ class DeltaTrainer:
         logger.info("\n[-] Evaluating foundation potential to extract Delta E and Delta F...")
 
         at_eval = None
-        for fr in labeled_frames:
+        for fr in tqdm(labeled_frames, desc="Extracting delta baselines", unit="frame", leave=False):
             e_dft = fr.info["energy"]
             f_dft = fr.arrays["forces"]
 
@@ -275,7 +282,49 @@ class DeltaTrainer:
         nep_cmd = resolve_nep_executable(self.config.nep_exe)
         nep_args = [sys.executable, nep_cmd] if nep_cmd.endswith(".py") else [nep_cmd]
 
-        res = subprocess.run(nep_args, cwd=train_dir, capture_output=True, text=True)
+        loss_out = os.path.join(train_dir, "loss.out")
+        if os.path.isfile(loss_out):
+            try:
+                os.remove(loss_out)
+            except Exception:
+                pass
+
+        total_steps = self.config.nep_steps
+        pbar = tqdm(total=total_steps, desc="Training Delta-NEP", unit="gen", leave=False)
+        stop_event = threading.Event()
+
+        def _monitor_loss():
+            last_gen = 0
+            while not stop_event.is_set():
+                if os.path.isfile(loss_out):
+                    try:
+                        with open(loss_out, "r", encoding="utf-8", errors="replace") as lf:
+                            lines = lf.readlines()
+                        for line in reversed(lines[-5:]):
+                            parts = line.strip().split()
+                            if parts and parts[0].isdigit():
+                                cur_gen = int(parts[0])
+                                if cur_gen > last_gen:
+                                    advance = min(cur_gen - last_gen, max(0, total_steps - last_gen))
+                                    pbar.update(advance)
+                                    last_gen = cur_gen
+                                break
+                    except Exception:
+                        pass
+                stop_event.wait(0.25)
+            if last_gen < total_steps:
+                pbar.update(total_steps - last_gen)
+
+        monitor_thread = threading.Thread(target=_monitor_loss, daemon=True)
+        monitor_thread.start()
+
+        try:
+            res = subprocess.run(nep_args, cwd=train_dir, capture_output=True, text=True)
+        finally:
+            stop_event.set()
+            monitor_thread.join(timeout=2.0)
+            pbar.close()
+
         if res.returncode != 0:
             raise RuntimeError(f"NEP training failed using '{nep_cmd}':\n{res.stderr}\n{res.stdout}")
 

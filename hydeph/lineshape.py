@@ -19,6 +19,12 @@ from scipy.signal import fftconvolve, correlate
 from .config import ToolkitConfig
 from .defect_builder import mic_displacement
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
+
 logger = logging.getLogger(__name__)
 
 # Module-level physical constants and parameters
@@ -161,7 +167,21 @@ class LineshapeEngine:
         if cached_fp != current_fp:
             vib.clean()
 
-        vib.run()
+        orig_calc = vib.calculate
+        n_disps = 6 * len(at)
+        pbar_vib = tqdm(total=n_disps, desc="Normal modes (Hessian)", unit="disp", leave=False)
+
+        def _wrapped_calculate(atoms, disp):
+            res = orig_calc(atoms, disp)
+            pbar_vib.update(1)
+            return res
+
+        vib.calculate = _wrapped_calculate
+        try:
+            vib.run()
+        finally:
+            pbar_vib.close()
+
         try:
             with open(state_file, "w", encoding="utf-8") as f:
                 json.dump({"fingerprint": current_fp}, f)
@@ -237,7 +257,7 @@ class LineshapeEngine:
 
         logger.info(f"\n[-] Computing Harmonic Optical Lineshapes across temperatures: {self.config.temperatures} K (Range: [{e_min:.1f}, {e_max:.1f}] meV)...")
         lineshape_dict = {}
-        for T in self.config.temperatures:
+        for T in tqdm(self.config.temperatures, desc="Harmonic lineshapes", unit="T", leave=False):
             user_gamma = self.config.dephasing_gamma_meV
             if user_gamma is not None:
                 gamma = float(user_gamma)
@@ -432,7 +452,15 @@ class LineshapeEngine:
                     du_list.append((ue - ug) * 1000.0)
 
             dyn.attach(step_observer, interval=2)
-            dyn.run(n_steps)
+            pbar = tqdm(total=n_steps, desc=f"Anharmonic MD ({T:g} K)", unit="step", leave=False)
+            step_chunk = 50
+            steps_done = 0
+            while steps_done < n_steps:
+                this_chunk = min(step_chunk, n_steps - steps_done)
+                dyn.run(this_chunk)
+                steps_done += this_chunk
+                pbar.update(this_chunk)
+            pbar.close()
 
             du = np.array(du_list, dtype=float)
             if len(du) > 10:
