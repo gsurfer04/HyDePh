@@ -5,18 +5,6 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-- **WSL2 GPU-Accelerated Workflow Documentation**: Added dedicated documentation and setup guidelines in `README.md` strongly recommending Windows Subsystem for Linux (WSL2) with CUDA-accelerated Quantum ESPRESSO (`pw.x`) for massive speedups on Windows hardware.
-- **Dynamic OpenMP Thread Scaling**: `QERunner._resolve_omp_threads()` automatically balances CPU cores across active MPI ranks and concurrent workers, preventing 1-core throttling.
-- **Norm-Conserving UPF Cutoff Auto-Detection**: `inspect_upf_metadata()` parses pseudopotential headers and automatically lowers `ecutrho` to $4 \times \text{ecutwfc}$ for Norm-Conserving UPFs, eliminating dense FFT grid overhead.
-- **Spin-Parity Mismatch Detection**: Automatically validates electron count parity against `spin_multiplicity` / `tot_magnetization` to prevent fractional-spin occupations and artificial metallic charge sloshing.
-- **Davidson Subspace & Band Trimming**: Configures `diago_david_ndim = 2` and sizes `nbnd` compactly for gapped defect supercells.
-
-### Changed
-- Relaxed `calorine` dependency cap to allow calorine >= 4.0.
-
 ## [0.5.0] - 2026-10-20
 
 ### Added
@@ -39,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dependency Upper Bounds & Dev Tools**: Added upper bounds to core dependencies in `pyproject.toml` and `setup.py`, and added `ruff` and `mypy` to dev optional dependencies.
 - **Module-Level Physical Constants**: Consolidated physical constants (`HBAR_EV_FS`, `KB_EV_K`, `KB_MEV_K`, `MODE_COUPLING_PREFACTOR`, `NV_ZPL_EV`, `FFT_TIME_POINTS`, `FFT_N`) at module scope.
 - **Type Annotations**: Added `from __future__ import annotations` and type annotations across public API classes and methods.
+- **WSL2 GPU-Accelerated Workflow Documentation**: Added dedicated documentation and setup guidelines in `README.md` strongly recommending Windows Subsystem for Linux (WSL2) with CUDA-accelerated Quantum ESPRESSO (`pw.x`) for massive speedups on Windows hardware.
+- **Dynamic OpenMP Thread Scaling**: `QERunner._resolve_omp_threads()` automatically balances CPU cores across active MPI ranks and concurrent workers, preventing 1-core throttling.
+- **Norm-Conserving UPF Cutoff Auto-Detection**: `inspect_upf_metadata()` parses pseudopotential headers and automatically lowers `ecutrho` to $4 \times \text{ecutwfc}$ for Norm-Conserving UPFs, eliminating dense FFT grid overhead.
+- **Spin-Parity Mismatch Detection**: Automatically validates electron count parity against `spin_multiplicity` / `tot_magnetization` to prevent fractional-spin occupations and artificial metallic charge sloshing.
+- **Davidson Subspace & Band Trimming**: Configures `diago_david_ndim = 2` and sizes `nbnd` compactly for gapped defect supercells.
 
 ### Changed
 - Moved benchmark driver scripts (`run_licl_fcenter.py`, `plot_experimental_comparison.py`) from package root (`hydeph/`) to `examples/`.
@@ -46,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced `getattr()` dataclass access patterns with direct attribute access.
 - Reduced DFT process polling sleep to responsive intervals and configured `OMP_NUM_THREADS="1"` per worker to prevent thread contention.
 - Moved `FixAtoms` import to module level in `defect_builder.py`.
+- Relaxed `calorine` dependency cap to allow calorine >= 4.0.
 
 ## [0.4.0] - 2026-10-20
 
