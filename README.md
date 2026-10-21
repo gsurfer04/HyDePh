@@ -12,7 +12,8 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue" alt="Python Version"></a>
   <a href="https://github.com/brucefan992/GPUMD"><img src="https://img.shields.io/badge/Backend-GPUMD%20%2F%20NEP-orange" alt="GPUMD"></a>
-  <a href="https://www.quantum-espresso.org/"><img src="https://img.shields.io/badge/DFT-Quantum%20ESPRESSO-red" alt="QE"></a>
+  <a href="https://www.quantum-espresso.org/"><img src="https://img.shields.io/badge/DFT-Quantum%20ESPRESSO%20(GPU%2FCPU)-red" alt="QE"></a>
+  <a href="https://learn.microsoft.com/en-us/windows/wsl/"><img src="https://img.shields.io/badge/Windows-WSL2%20(CUDA%20Accelerated)-7057ff" alt="WSL2"></a>
   <a href="https://github.com/QMatSuite/quantum-espresso-windows-exe"><img src="https://img.shields.io/badge/Windows-Native%20QE%20(QMatSuite)-2F81F7" alt="Windows QE"></a>
   <a href="https://wiki.fysik.dtu.dk/ase/"><img src="https://img.shields.io/badge/Ecosystem-ASE-green" alt="ASE"></a>
 </p>
@@ -61,8 +62,10 @@ pip install -e ".[dev]"
 ```
 
 Prerequisites:
-- [GPUMD / NEP](https://github.com/brucefan992/GPUMD) (`gpumd` and `nep` / `nep.exe`)
-- [Quantum ESPRESSO](https://www.quantum-espresso.org/): `pw.x` on Linux, or `pw.exe` from [QMatSuite/quantum-espresso-windows-exe](https://github.com/QMatSuite/quantum-espresso-windows-exe) with Microsoft MPI on Windows
+- [GPUMD / NEP](https://github.com/brucefan992/GPUMD) (`gpumd` and `nep` / `nep.exe` with CUDA support)
+- [Quantum ESPRESSO](https://www.quantum-espresso.org/):
+  - **Linux / Windows WSL2 (Strongly Recommended)**: GPU-accelerated `pw.x` (CUDA/OpenACC). Utilizing an NVIDIA GPU inside WSL2 delivers an order-of-magnitude speedup for supercell DFT labeling over CPU execution.
+  - **Native Windows (CPU Fallback)**: `pw.exe` from [QMatSuite/quantum-espresso-windows-exe](https://github.com/QMatSuite/quantum-espresso-windows-exe) with Microsoft MPI.
 - NVIDIA GPU with CUDA support (or CPU fallback for potential evaluation)
 
 ### 2. Command-Line Interface (CLI)
@@ -200,17 +203,58 @@ summary = run_pipeline(config)
 
 ---
 
-## Windows & MPI Execution
+## Windows, WSL2 & MPI Execution
 
-HyDePh supports native Windows execution using [QMatSuite Quantum ESPRESSO binaries](https://github.com/QMatSuite/quantum-espresso-windows-exe) (built with Intel oneAPI, MKL, and Microsoft MPI).
+### 🚀 Recommended: Windows Subsystem for Linux (WSL2) with GPU-Accelerated Quantum ESPRESSO
 
-| Feature | Linux (OpenMPI / MPICH) | Windows (Microsoft MPI / QMatSuite) | HyDePh Handling |
+On Windows workstations and laptops equipped with an NVIDIA GPU, **running HyDePh inside WSL2 (e.g. Ubuntu) is strongly encouraged over native Windows CPU execution.**
+
+> [!TIP]
+> **Massive Speedup via GPU-Accelerated Quantum ESPRESSO in WSL2**
+>
+> In real-world defect benchmarks (such as the 142-atom 4H-SiC $kk$-divacancy supercell), running Quantum ESPRESSO with GPU support (`pw.x` compiled with NVIDIA HPC SDK / CUDA / OpenACC) inside WSL2 yields **massive speedups** over CPU-only execution. Turnaround time for the candidate DFT labeling stage drops from hours down to minutes.
+>
+> In addition, WSL2 seamlessly enables GPU acceleration for **both** the DFT labeling stage (`pw.x`) and the subsequent $\Delta$-NEP training stage (`gpumd` / `nep`), giving you an end-to-end GPU-accelerated pipeline on Windows hardware without requiring dual booting.
+
+#### Quick WSL2 Setup:
+
+1. **Install WSL2 & Linux Distribution** (in Windows PowerShell as Administrator, if not already installed):
+   ```powershell
+   wsl --install -d Ubuntu-24.04
+   ```
+2. **Verify GPU Passthrough**:
+   NVIDIA Windows display drivers automatically provide CUDA passthrough to WSL2. Verify inside your WSL2 bash terminal:
+   ```bash
+   nvidia-smi
+   ```
+3. **Install GPU-Accelerated Quantum ESPRESSO & GPUMD**:
+   Obtain or compile `pw.x` with CUDA support (e.g., via the [NVIDIA HPC SDK container](https://catalog.ngc.nvidia.com/orgs/hpc/containers/quantum_espresso), Spack, or manual `./configure --with-cuda`), and compile [GPUMD](https://github.com/brucefan992/GPUMD).
+4. **Install HyDePh in WSL2**:
+   ```bash
+   git clone https://github.com/gsurfer04/HyDePh.git
+   cd HyDePh
+   pip install -e .
+   ```
+
+> [!IMPORTANT]
+> **Best Practices for WSL2 Runs:**
+> - **Filesystem Location:** Place your input structures and `workspace_dir` on the native Linux ext4 filesystem (e.g., `~/hydeph_workspace/`) rather than the Windows mount (`/mnt/c/...` or cloud-synced folders like Google Drive/OneDrive). Native Linux disk I/O is substantially faster and avoids cloud sync contention.
+> - **Prevent Laptop Sleep:** During unattended DFT labeling runs, adjust Windows Power Settings to prevent the laptop from sleeping on AC power, avoiding interrupted SCF steps or timing outliers.
+
+---
+
+### Native Windows Execution (CPU Fallback via QMatSuite & MS-MPI)
+
+For environments without an NVIDIA GPU or where WSL2 cannot be used, HyDePh also provides full out-of-the-box support for native Windows execution using [QMatSuite Quantum ESPRESSO binaries](https://github.com/QMatSuite/quantum-espresso-windows-exe) (built with Intel oneAPI, MKL, and Microsoft MPI).
+
+| Feature | Linux / WSL2 (OpenMPI / MPICH / CUDA) | Windows (Microsoft MPI / QMatSuite) | HyDePh Handling |
 |---|---|---|---|
-| **MPI Launcher** | `mpirun` or `mpiexec` | `mpiexec.exe` | Auto-detects `mpiexec` on Windows and `mpirun` on Linux; runs directly when `n_procs=1`. |
-| **Process Count Flag** | `-np <N>` | `-n <N>` | Selects `-n` on Windows and `-np` on Linux. |
-| **Executable Name** | `pw.x` | `pw.exe` | Resolves `pw.exe` on Windows and `pw.x` on Linux. |
+| **Acceleration** | **NVIDIA GPU (CUDA / OpenACC)** or Multi-core CPU | Multi-core CPU (Intel MKL) | Automatically adapts OpenMP threads and MPI ranks across available CPU cores or GPU devices. |
+| **MPI Launcher** | `mpirun` or `mpiexec` | `mpiexec.exe` | Auto-detects `mpiexec` on Windows and `mpirun` on Linux/WSL2; runs directly when `n_procs=1`. |
+| **Process Count Flag** | `-np <N>` | `-n <N>` | Selects `-n` on Windows and `-np` on Linux/WSL2. |
+| **Executable Name** | `pw.x` | `pw.exe` | Resolves `pw.exe` on Windows and `pw.x` on Linux/WSL2. |
 | **Input File** | `-in pw.in` | `-in pw.in` | Passes `-in pw.in` via argument list. |
-| **Shared Libraries** | `RPATH` / `LD_LIBRARY_PATH` | Colocated in `bin/` | Prepends `pw.exe` directory to subprocess `PATH` for MKL and MS-MPI DLLs. |
+| **Shared Libraries** | `RPATH` / `LD_LIBRARY_PATH` | Colocated in `bin/` | Prepends `pw.exe` directory to subprocess `PATH` for MKL and MS-MPI DLLs on Windows. |
 | **Namelist Paths** | `/` | `/` | Normalizes `pseudo_dir` separators to `/` in `&CONTROL`. |
 
 ```python

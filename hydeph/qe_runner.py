@@ -611,6 +611,7 @@ class QERunner:
                     "\n  2. Microsoft MPI is installed (provides mpiexec.exe)."
                     f"\n  3. Resolved pw_exe: '{self.pw_exe}'"
                     f"\n  4. Execution command was: {' '.join(str(c) for c in cmd_args)}"
+                    "\n  * Tip: For massive speedups on NVIDIA GPUs, running HyDePh inside WSL2 with GPU-accelerated Quantum ESPRESSO is strongly recommended."
                 )
             raise RuntimeError(f"QE calculation failed in {calc_dir}.\n{tail_msg}{win_msg}")
 
