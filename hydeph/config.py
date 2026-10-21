@@ -55,6 +55,8 @@ class ToolkitConfig:
         Number of MPI processes per Quantum ESPRESSO worker. Default is 2.
     n_workers_qe : int
         Number of concurrent Quantum ESPRESSO worker processes. Default is 1.
+    omp_num_threads : int, optional
+        OpenMP threads per MPI process. If omitted, automatically computed from CPU cores / (n_procs_qe * n_workers_qe).
     mpi_command : str, optional
         Custom MPI runner command (e.g. "mpirun", "mpiexec").
     mpi_args : list of str, optional
@@ -69,6 +71,12 @@ class ToolkitConfig:
         Number of iterations used in mixing. Default is 8.
     diagonalization : str
         Diagonalization method ('david', 'cg', etc.). Default is "david".
+    diago_david_ndim : int
+        Subspace dimension multiplier for Davidson diagonalization (2 or 4). Default is 2.
+    nbnd : int, optional
+        Number of Kohn-Sham bands. If omitted, automatically sized from valence electron count when UPF metadata is available.
+    auto_spin_parity : bool
+        Automatically verify and adjust spin multiplicity / tot_magnetization parity against total valence electrons to prevent fractional spin occupations. Default is True.
 
     nep_exe : str, optional
         Path to GPUMD nep executable.
@@ -174,6 +182,7 @@ class ToolkitConfig:
     pw_exe: Optional[str] = None
     n_procs_qe: int = 2
     n_workers_qe: int = 1
+    omp_num_threads: Optional[int] = None
     mpi_command: Optional[str] = None
     mpi_args: Optional[List[str]] = None
     nep_exe: Optional[str] = None
@@ -183,6 +192,9 @@ class ToolkitConfig:
     mixing_beta: float = 0.4
     mixing_ndim: int = 8
     diagonalization: str = "david"
+    diago_david_ndim: int = 2
+    nbnd: Optional[int] = None
+    auto_spin_parity: bool = True
 
     charge: Optional[float] = None  # Net charge in e
     tot_charge: float = 0.0         # QE alias for charge

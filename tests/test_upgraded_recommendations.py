@@ -297,3 +297,44 @@ def test_single_pass_parse_qe_output(tmp_path):
     assert f_un is None
 
 
+def test_qe_speed_optimizations_upf_and_omp(tmp_path, monkeypatch):
+    """write_qe_input optimizes ecutrho, tot_magnetization parity, nbnd, and diago_david_ndim from UPF metadata, and QERunner scales OMP_NUM_THREADS."""
+    upf_c = tmp_path / "C_ONCV.upf"
+    upf_c.write_text(
+        '<UPF version="2.0.1">\n'
+        '  <PP_HEADER element="C" pseudo_type="NC" is_ultrasoft="F" is_paw="F" z_valence="4.00"/>\n'
+        '</UPF>\n'
+    )
+    upf_si = tmp_path / "Si_ONCV.upf"
+    upf_si.write_text(
+        '<UPF version="2.0.1">\n'
+        '  <PP_HEADER element="Si" pseudo_type="NC" is_ultrasoft="F" is_paw="F" z_valence="4.00"/>\n'
+        '</UPF>\n'
+    )
+
+    # 10 atoms * 4 valence electrons = 40 electrons (even parity)
+    at = Atoms("Si5C5", positions=np.zeros((10, 3)), cell=[10, 10, 10], pbc=True)
+    pw_in = tmp_path / "pw_opt.in"
+
+    # Default spin_multiplicity=2 (tot_magnetization=1, odd) mismatches 40 even electrons -> auto-adjusted to 2
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path),
+        pseudo_dir=str(tmp_path),
+        pseudopotentials={"C": "C_ONCV.upf", "Si": "Si_ONCV.upf"},
+        n_procs_qe=2,
+        n_workers_qe=2,
+    )
+    write_qe_input(at, str(pw_in), cfg)
+    text = pw_in.read_text()
+
+    assert "ecutrho = 160.0," in text
+    assert "tot_magnetization = 2," in text
+    assert "nbnd = 27," in text
+    assert "diago_david_ndim = 2," in text
+
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    runner = QERunner(cfg, n_procs=2, n_workers=2, pw_exe="pw.exe")
+    assert runner._resolve_omp_threads() == 4
+
+
+

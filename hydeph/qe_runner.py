@@ -37,10 +37,63 @@ def is_windows() -> bool:
     return sys.platform.startswith("win")
 
 
+def inspect_upf_metadata(upf_path: str) -> Dict[str, Any]:
+    """Reads lightweight header metadata (`is_norm_conserving`, `z_valence`) from a UPF file."""
+    info: Dict[str, Any] = {"is_norm_conserving": None, "z_valence": None}
+    if not upf_path or not os.path.isfile(upf_path):
+        return info
+    try:
+        header_lines = []
+        with open(upf_path, "r", encoding="utf-8", errors="replace") as f:
+            for _ in range(200):
+                line = f.readline()
+                if not line:
+                    break
+                header_lines.append(line)
+                if "<PP_MESH" in line or "<PP_R " in line or "</PP_HEADER>" in line:
+                    break
+        text = "".join(header_lines)
+
+        # Parse z_valence (UPF v2 attribute or UPF v1 line)
+        m_z2 = re.search(r'z_valence\s*=\s*"\s*([-\d.Ee+]+)\s*"', text, re.IGNORECASE)
+        if m_z2:
+            info["z_valence"] = float(m_z2.group(1))
+        else:
+            m_z1 = re.search(r"([-\d.Ee+]+)\s+Z\s+valence", text, re.IGNORECASE)
+            if m_z1:
+                info["z_valence"] = float(m_z1.group(1))
+
+        # Parse pseudopotential type (Norm-Conserving vs Ultrasoft/PAW)
+        m_us = re.search(r'is_ultrasoft\s*=\s*"\s*([TFtf])\s*"', text)
+        m_paw = re.search(r'is_paw\s*=\s*"\s*([TFtf])\s*"', text)
+        m_type = re.search(r'pseudo_type\s*=\s*"\s*([A-Za-z0-9_-]+)\s*"', text)
+        if m_us and m_us.group(1).upper() == "T":
+            info["is_norm_conserving"] = False
+        elif m_paw and m_paw.group(1).upper() == "T":
+            info["is_norm_conserving"] = False
+        elif m_type:
+            ptype = m_type.group(1).upper()
+            if ptype in ("NC", "SL", "NCPP"):
+                info["is_norm_conserving"] = True
+            elif ptype in ("US", "USPP", "PAW"):
+                info["is_norm_conserving"] = False
+        elif m_us and m_us.group(1).upper() == "F":
+            info["is_norm_conserving"] = True
+    except Exception:
+        pass
+    return info
+
+
+_PARITY_WARNED_KEYS = set()
+
+
 def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calculation: str = "scf", retry: bool = False):
     """Writes a Quantum ESPRESSO `pw.x` input card.
     
-    Uses universal ASE atomic masses and sets `K_POINTS gamma` for (1, 1, 1).
+    Uses universal ASE atomic masses, sets `K_POINTS gamma` for (1, 1, 1),
+    auto-detects Norm-Conserving UPF cutoffs (`ecutrho = 4 * ecutwfc`),
+    validates spin-multiplicity parity against total valence electrons,
+    and trims excess empty conduction bands (`nbnd`) and Davidson subspace size.
     """
     cell = atoms.get_cell()
     pos = atoms.positions
@@ -49,12 +102,62 @@ def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calcula
 
     # Fortran namelist parser requires forward slashes
     clean_pseudo_dir = config.pseudo_dir.replace("\\", "/") if config.pseudo_dir else "./pseudo"
-    
+
+    # Inspect UPF files for Norm-Conserving status and valence electron counts
+    meta_by_sym: Dict[str, Dict[str, Any]] = {}
+    for s in unique_symbols:
+        upf_rel = config.pseudopotentials.get(s, "")
+        full_upf = upf_rel if os.path.isabs(upf_rel) else os.path.join(config.pseudo_dir or ".", upf_rel)
+        meta_by_sym[s] = inspect_upf_metadata(full_upf)
+
+    all_nc = bool(unique_symbols) and all(meta_by_sym[s]["is_norm_conserving"] is True for s in unique_symbols)
+    all_z = bool(unique_symbols) and all(meta_by_sym[s]["z_valence"] is not None for s in unique_symbols)
+
+    eff_ecutrho = float(config.ecutrho)
+    if all_nc and config.ecutrho == 320.0 and (4.0 * config.ecutwfc) < config.ecutrho:
+        eff_ecutrho = 4.0 * float(config.ecutwfc)
+
+    tot_mag = int(config.spin_multiplicity - 1) if config.spin_polarized else 0
+    eff_nbnd: Optional[int] = int(config.nbnd) if getattr(config, "nbnd", None) is not None else None
+
+    if all_z:
+        total_nelec = sum(float(meta_by_sym[s]["z_valence"]) for s in symbols) - float(config.tot_charge)
+        nelec_int = int(round(total_nelec))
+        if config.spin_polarized and abs(total_nelec - nelec_int) < 1e-4:
+            if (nelec_int - tot_mag) % 2 != 0:
+                warn_key = (nelec_int, tot_mag, getattr(config, "auto_spin_parity", True))
+                if getattr(config, "auto_spin_parity", True):
+                    new_mag = tot_mag + 1 if tot_mag >= 1 else 0
+                    if warn_key not in _PARITY_WARNED_KEYS:
+                        _PARITY_WARNED_KEYS.add(warn_key)
+                        logger.warning(
+                            f"    [Spin Parity] Total valence electrons ({nelec_int}) and tot_magnetization ({tot_mag}) "
+                            f"have opposite parity, which forces fractional spin occupations "
+                            f"({0.5*(nelec_int+tot_mag):.1f} up, {0.5*(nelec_int-tot_mag):.1f} down). "
+                            f"Auto-adjusting tot_magnetization -> {new_mag} (spin_multiplicity={new_mag+1})."
+                        )
+                    tot_mag = new_mag
+                else:
+                    if warn_key not in _PARITY_WARNED_KEYS:
+                        _PARITY_WARNED_KEYS.add(warn_key)
+                        logger.warning(
+                            f"    [Spin Parity] WARNING: Total valence electrons ({nelec_int}) and tot_magnetization ({tot_mag}) "
+                            f"have opposite parity! QE will use fractional spin occupations."
+                        )
+
+        if eff_nbnd is None and abs(total_nelec - nelec_int) < 1e-4 and nelec_int > 0:
+            n_occ_max = (nelec_int + abs(tot_mag)) // 2 if config.spin_polarized else (nelec_int + 1) // 2
+            buffer_bands = max(6, min(16, int(np.ceil(0.05 * n_occ_max))))
+            eff_nbnd = n_occ_max + buffer_bands
+
     conv_thr = config.conv_thr
     diagonalization = config.diagonalization
     mixing_ndim = config.mixing_ndim
     base_mixing_beta = config.mixing_beta
     mixing_beta = 0.2 if retry else base_mixing_beta
+    david_ndim = getattr(config, "diago_david_ndim", 2)
+    david_line = f"\n  diago_david_ndim = {int(david_ndim)}," if (diagonalization.startswith("david") and david_ndim) else ""
+    nbnd_line = f"\n  nbnd = {eff_nbnd}," if eff_nbnd is not None else ""
     retry_lines = "\n  mixing_mode = 'local-TF',\n  electron_maxstep = 150," if retry else ""
 
     header = f"""&CONTROL
@@ -70,11 +173,11 @@ def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calcula
 &SYSTEM
   ibrav = 0,
   nat = {len(atoms)},
-  ntyp = {len(unique_symbols)},
+  ntyp = {len(unique_symbols)},{nbnd_line}
   ecutwfc = {config.ecutwfc},
-  ecutrho = {config.ecutrho},
+  ecutrho = {eff_ecutrho},
   nspin = {2 if config.spin_polarized else 1},
-  tot_magnetization = {config.spin_multiplicity - 1 if config.spin_polarized else 0},
+  tot_magnetization = {tot_mag},
   tot_charge = {config.tot_charge},
   occupations = 'smearing',
   smearing = 'gaussian',
@@ -84,7 +187,7 @@ def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calcula
   conv_thr = {conv_thr},
   mixing_beta = {mixing_beta},
   mixing_ndim = {mixing_ndim},
-  diagonalization = '{diagonalization}',{retry_lines}
+  diagonalization = '{diagonalization}',{david_line}{retry_lines}
 /
 ATOMIC_SPECIES
 """
@@ -366,6 +469,15 @@ class QERunner:
         self.timeout_s = timeout_s if timeout_s is not None else config.qe_timeout_s
         self.last_failed_entries: List[Dict[str, Any]] = []
 
+    def _resolve_omp_threads(self, n_workers_override: Optional[int] = None) -> int:
+        """Determines OpenMP threads per MPI rank so all CPU cores are utilized without oversubscription."""
+        if getattr(self.config, "omp_num_threads", None) is not None:
+            return max(1, int(self.config.omp_num_threads))
+        total_cores = os.cpu_count() or 1
+        eff_workers = max(1, int(n_workers_override if n_workers_override is not None else self.n_workers))
+        active_ranks = max(1, self.n_procs * eff_workers)
+        return max(1, total_cores // active_ranks)
+
     def label_single_frame(
         self, atoms: Atoms, calc_dir: str, retry: bool = False, timeout_s: Optional[float] = None
     ) -> Atoms:
@@ -418,12 +530,12 @@ class QERunner:
         )
 
         env = os.environ.copy()
-        # Prevent thread oversubscription when multiple MPI workers run
+        omp_threads = str(self._resolve_omp_threads())
         env.update({
-            "OMP_NUM_THREADS": "1",
-            "MKL_NUM_THREADS": "1",
-            "OPENBLAS_NUM_THREADS": "1",
-            "VECLIB_MAXIMUM_THREADS": "1",
+            "OMP_NUM_THREADS": omp_threads,
+            "MKL_NUM_THREADS": omp_threads,
+            "OPENBLAS_NUM_THREADS": omp_threads,
+            "VECLIB_MAXIMUM_THREADS": omp_threads,
             "NUMEXPR_NUM_THREADS": "1",
         })
         if os.path.isabs(self.pw_exe):
@@ -589,7 +701,10 @@ class QERunner:
 
         next_cand_idx = max_cand_idx + 1
 
-        logger.info(f"\n[-] High-Fidelity DFT Labeling (Quantum ESPRESSO, np={self.n_procs}, workers={eff_workers})...")
+        omp_threads = self._resolve_omp_threads(eff_workers)
+        logger.info(
+            f"\n[-] High-Fidelity DFT Labeling (Quantum ESPRESSO, np={self.n_procs}, omp={omp_threads}, workers={eff_workers})..."
+        )
         logger.info(f"    Total candidate pool: {len(frames)} frames")
 
         type_completed = {}
