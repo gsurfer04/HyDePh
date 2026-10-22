@@ -5,6 +5,11 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Supercell Size & Convergence Guidelines**: Added comprehensive guidelines, theoretical background, and a host platform sizing table in README.md and docs/THEORY_WALKTHROUGH.md, detailing why supercells with  \ge 10\text{--}12\ \text{\AA}$ ($\ge 140\text{--}215$ atoms) are required in stiff crystals (diamond, SiC) to avoid discrete multi-phonon comb artifacts.
+- **Supercell Dimension Logging**: DefectBuilder.build_supercell_and_defect() logs cell dimensions and warns when supercells are too small ( < 9\ \text{\AA}$) for reliable phonon dispersion.
 ## [0.5.0] - 2026-10-20
 
 ### Added

@@ -135,6 +135,7 @@ summary = run_pipeline(config)
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `supercell_repeat` | `tuple of int` | `(2, 2, 2)` | Supercell expansion multipliers `(nx, ny, nz)`. For stiff crystals, `(3, 3, 3)` ($\ge 140\text{--}200$ atoms) is recommended (see guidelines below). |
 | `charge` / `tot_charge` | `float` | `0.0` | Net supercell charge in units of $e$ (`&SYSTEM tot_charge` in QE). |
 | `spin_polarized` | `bool` | `True` | Spin-unrestricted calculation (`nspin=2` in QE). |
 | `spin_multiplicity` | `int` | `2` | Spin multiplicity $2S+1$ ($1$: singlet, $2$: doublet, $3$: triplet). |
@@ -200,6 +201,46 @@ summary = run_pipeline(config)
 <p align="center">
   <img src="assets/diamond_nv_cc_diagram.png" width="96%" alt="Diamond NV- 1D Configuration Coordinate Diagram and Derived Stokes Shift">
 </p>
+
+---
+
+## Supercell Size & Convergence Guidelines
+
+Choosing an adequate supercell size (`supercell_repeat`) is critical for obtaining physical photoluminescence lineshapes and avoiding unphysical finite-size discretization artifacts.
+
+### 1. The Physics of Finite-Size Discretization
+Under periodic boundary conditions:
+1. **Phonon Momentum Sampling**: A finite supercell of edge length $L$ samples phonon momentum space on a discrete grid with spacing:
+   $$\Delta q = \frac{2\pi}{L}$$
+   In small supercells ($L < 10\ \text{\AA}$), $\Delta q$ is large. Acoustic phonon branches cannot disperse, and long-wavelength elastic strain fields are unphysically cut off.
+2. **Defect-Host Mode Hybridization**: Optical excitation couples to localized defect breathing modes as well as propagating bulk acoustic and optical phonons. In small cells, the quasi-local mode cannot hybridize into the lattice continuum; instead, electron-phonon coupling is artificially concentrated into a single, isolated discrete vibrational mode.
+3. **Periodic Image Interactions**: Periodic defect replicas interact via elastic strain ($E_{\mathrm{elastic}} \propto L^{-3}$) and Coulomb repulsion ($E_{\mathrm{Coulomb}} \propto L^{-1}$ for charged centers like $\text{NV}^-$), artificially constraining host relaxation.
+
+### 2. Case Study: Diamond $\text{NV}^-$ Center ($2\times 2\times 2$ vs. $3\times 3\times 3$)
+A direct comparison between supercell sizes for the diamond $\text{NV}^-$ center illustrates this finite-size effect (first documented by [Alkauskas et al., *New J. Phys.* 16, 073026 (2014)](https://doi.org/10.1088/1367-2630/16/7/073026)):
+
+* **$2\times 2\times 2$ Supercell (63 atoms, $L = 7.15\ \text{\AA}$, 186 modes)**:
+  - $\Delta q \approx 0.88\ \text{\AA}^{-1}$ (halfway to the diamond Brillouin zone edge).
+  - **$\sim 85\%$ of the total Huang-Rhys factor ($S_k = 2.64$ out of $S = 3.11$)** is compressed into a single discrete mode at $72.6\ \text{meV}$.
+  - In the optical lineshape, this single delta-mode generates an unphysical harmonic comb of sharp Poissonian spikes spaced by $72.6\ \text{meV}$ (at $-73, -145, -217, -290\ \text{meV}$). At $77\ \text{K}$, the 2-phonon replica at $-145\ \text{meV}$ artificially towers over the Zero-Phonon Line (ZPL).
+* **$3\times 3\times 3$ Supercell (215 atoms, $L = 10.72\ \text{\AA}$, 642 modes)**:
+  - Phonon mode density increases by $3.4\times$.
+  - The localized breathing mode properly hybridizes with diamond bulk phonon branches, dispersing the spectral density $S(\hbar\omega)$ continuously across $57\text{--}140\ \text{meV}$ with the true experimental quasi-local resonance at $\sim 64\text{--}65\ \text{meV}$.
+  - Multi-phonon auto-convolutions $[S * S]$ and $[S * S * S]$ spread out into a smooth, continuous phonon wing, correctly preserving the sharp ZPL as the dominant spectral feature across all temperatures.
+
+### 3. Recommended Supercell Dimensions by Host Material
+
+| Host Material Platform | Crystal Type | Recommended Supercell | Atom Count | Minimum Dimension $L$ | Guidelines & Expected Features |
+|---|---|---|---|---|---|
+| **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Stiff covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 10.7\ \text{\AA}$ | Use $\ge 215$ atoms. $2\times 2\times 2$ (63 atoms) produces artificial $73\ \text{meV}$ multi-phonon spike combs. |
+| **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` or `(4, 4, 2)` | $142\text{--}254$ atoms | $\ge 9.2\text{--}12.3\ \text{\AA}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
+| **3C-SiC** | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 13.1\ \text{\AA}$ | Captures smooth quasi-local breathing mode dispersion. |
+| **Alkali Halides** (LiCl, NaCl) | Soft rocksalt ($\Theta_D \approx 300\text{--}420\ \mathrm{K}$) | `(2, 2, 2)` or `(3, 3, 3)` | $63\text{--}215$ atoms | $\ge 10.3\text{--}15.4\ \text{\AA}$ | Optical relaxation is large ($\Delta Q > 1.5\ \text{amu}^{1/2}\text{\AA}$); finite-$T$ anharmonic MD is essential for mode softening. |
+| **Fluorites** (LiF, $\mathrm{CaF}_2$) | Fluorite ($\Theta_D \approx 730\ \mathrm{K}$) | `(2, 2, 2)` or `(3, 3, 3)` | $95\text{--}323$ atoms | $\ge 8.0\text{--}12.1\ \text{\AA}$ | Strong coupling ($S > 10$); Marcus Gaussian envelope dominates. |
+
+> [!TIP]
+> **Why HyDePh Makes Large Supercells Tractable**
+> In conventional DFT lineshape methods, computing normal modes for a 215-atom cell requires hundreds of costly DFT displacement runs. In HyDePh, high-fidelity DFT labeling is performed on only **$\sim 30\text{--}40$ candidate frames**. The localized $\Delta$-NEP potential is trained in seconds on GPU, and the 215-atom normal modes and anharmonic Langevin MD trajectories are subsequently evaluated with sub-millisecond per-step speed.
 
 ---
 

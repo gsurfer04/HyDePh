@@ -147,6 +147,18 @@ class DefectBuilder:
                 raise NotImplementedError(f"Defect type '{self.config.defect_type}' not supported.")
 
         defect_sc.info["defect_center"] = np.asarray(self.vac_pos, dtype=float)
+        cell_lens = defect_sc.cell.lengths()
+        min_dim = float(np.min(cell_lens))
+        nat = len(defect_sc)
+        logger.info(
+            f"[+] Supercell geometry: {nat} atoms, dimensions: {cell_lens[0]:.2f} x {cell_lens[1]:.2f} x {cell_lens[2]:.2f} A (min L = {min_dim:.2f} A)"
+        )
+        if nat < 100 or min_dim < 9.0:
+            logger.info(
+                "    [i] Note: For stiff covalent crystals (e.g. Diamond, SiC), supercells with L >= 10 A (>= 140-200 atoms) "
+                "are recommended to avoid discrete phonon comb artifacts."
+            )
+
         defect_init_path = os.path.join(self.config.workspace_dir, "defect_unrelaxed.xyz")
         ase.io.write(defect_init_path, defect_sc)
         return pristine_sc, defect_sc

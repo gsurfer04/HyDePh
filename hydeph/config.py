@@ -38,6 +38,8 @@ class ToolkitConfig:
         Explicit 0-based atom index in the supercell for defect creation.
     supercell_repeat : tuple of int
         Supercell expansion multipliers (nx, ny, nz). Default is (2, 2, 2).
+        For stiff covalent hosts (e.g. Diamond, SiC), (3, 3, 3) or >= 140-200 atoms
+        is strongly recommended for converged, continuous phonon sidebands.
 
     foundation_potential_path : str
         Path to the pre-trained foundation NEP model (e.g. nep89_20250409.txt).
