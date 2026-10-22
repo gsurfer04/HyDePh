@@ -393,4 +393,62 @@ def test_configuration_coordinate_engine(tmp_path):
     assert "figure_path" in func_res
     assert os.path.isfile(func_res["figure_path"])
 
+    # 7. Test automatic ZPL derivation from Kohn-Sham band gap
+    cfg_auto = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "pristine.xyz"),
+        workspace_dir=str(tmp_path),
+        zpl_energy_eV=None,
+    )
+    at_gs_auto = at_gs.copy()
+    at_gs_auto.info["dft_gap_eV"] = 2.50
+    engine_auto = ConfigurationCoordinateEngine(cfg_auto, mock_calc)
+    res_auto = engine_auto.calculate_cc_curve(at_gs_auto, at_es)
+    assert res_auto["zpl_source"] == "kohn_sham_eigenvalues"
+    expected_auto_zpl = 2.50 - expected_erel
+    assert pytest.approx(res_auto["e_zpl_eV"], rel=1e-3) == expected_auto_zpl
+    assert pytest.approx(res_auto["e_abs_eV"], rel=1e-3) == 2.50
+
+
+def test_parse_qe_band_gap(tmp_path):
+    """Verifies parsing of Kohn-Sham band gaps from Quantum ESPRESSO outputs."""
+    from hydeph.qe_runner import parse_qe_band_gap
+
+    # 1. Spin-polarized output sample
+    sample_spin = """
+     Parallel version (MPI), running on 1 processors
+ ------ SPIN UP ------------
+          k = 0.0000 0.0000 0.0000 (  100 PWs)   bands (ev):
+   -10.5000  -5.2000   1.2000   3.5000
+ ------ SPIN DOWN ----------
+          k = 0.0000 0.0000 0.0000 (  100 PWs)   bands (ev):
+   -10.4500  -5.1500   0.9000   3.2000
+     the spin up/dw Fermi energies are     1.5000    1.0000 ev
+    """
+    spin_file = tmp_path / "spin.out"
+    spin_file.write_text(sample_spin)
+    res_spin = parse_qe_band_gap(str(spin_file))
+    assert res_spin is not None
+    # Up: occ=[-10.5, -5.2, 1.2], unocc=[3.5], gap = 3.5 - 1.2 = 2.3 eV
+    # Down: occ=[-10.45, -5.15, 0.9], unocc=[3.2], gap = 3.2 - 0.9 = 2.3 eV
+    assert pytest.approx(res_spin["gap_eV"], rel=1e-3) == 2.30
+    assert pytest.approx(res_spin["homo_eV"], rel=1e-3) == 1.20 or pytest.approx(res_spin["homo_eV"], rel=1e-3) == 0.90
+
+    # 2. Non-spin polarized sample
+    sample_single = """
+ End of self-consistent calculation
+          k = 0.0000 0.0000 0.0000 (  100 PWs)   bands (ev):
+   -12.0000  -4.5000   1.0000   2.8000
+     the Fermi energy is     1.2000 ev
+    """
+    single_file = tmp_path / "single.out"
+    single_file.write_text(sample_single)
+    res_single = parse_qe_band_gap(str(single_file))
+    assert res_single is not None
+    # occ=[-12.0, -4.5, 1.0], unocc=[2.8], gap = 2.8 - 1.0 = 1.8 eV
+    assert pytest.approx(res_single["gap_eV"], rel=1e-3) == 1.80
+    assert pytest.approx(res_single["homo_eV"], rel=1e-3) == 1.00
+    assert pytest.approx(res_single["lumo_eV"], rel=1e-3) == 2.80
+
+
+
 

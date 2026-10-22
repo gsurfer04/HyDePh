@@ -258,6 +258,74 @@ def parse_qe_output(pw_out_path: str) -> Tuple[Optional[float], Optional[np.ndar
     if not_converged:
         return None, None
 
+    f_arr = np.array(forces_list, dtype=float) if forces_list else None
+    return energy_ev, f_arr
+
+
+def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, float]]:
+    """Parses Kohn-Sham defect eigenvalue gap (eV), HOMO, LUMO, and Fermi level from `pw.x` output.
+    
+    Extracts the fundamental optical transition gap across spin channels without additional DFT cost.
+    """
+    if not os.path.isfile(pw_out_path):
+        return None
+    try:
+        with open(pw_out_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except Exception:
+        return None
+
+    # 1. Direct explicit HOMO-LUMO string if reported by QE
+    homo_lumo = re.findall(
+        r"highest occupied,\s+lowest unoccupied level\s*\(ev\):\s*([-\d\.]+)\s+([-\d\.]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if homo_lumo:
+        h, l = float(homo_lumo[-1][0]), float(homo_lumo[-1][1])
+        if l > h:
+            return {"gap_eV": l - h, "homo_eV": h, "lumo_eV": l, "fermi_eV": (h + l) / 2.0}
+
+    # 2. Spin-polarized bands (nspin = 2)
+    spin_up = re.search(r"------ SPIN UP ------------.*?bands \(ev\):\s*(.*?)\n\s*------ SPIN DOWN", text, re.DOTALL)
+    spin_dw = re.search(r"------ SPIN DOWN ----------.*?bands \(ev\):\s*(.*?)\n\s*the spin", text, re.DOTALL)
+    fermi_spin = re.findall(r"the spin up/dw Fermi energies are\s+([-\d\.]+)\s+([-\d\.]+)\s+ev", text, re.IGNORECASE)
+
+    if fermi_spin and spin_up and spin_dw:
+        ef_up, ef_dw = float(fermi_spin[-1][0]), float(fermi_spin[-1][1])
+        u_bands = [float(x) for x in spin_up.group(1).split()]
+        d_bands = [float(x) for x in spin_dw.group(1).split()]
+
+        gaps = []
+        for bands, ef, spin_name in [(u_bands, ef_up, "up"), (d_bands, ef_dw, "down")]:
+            occ = [b for b in bands if b <= ef + 1e-3]
+            unocc = [b for b in bands if b > ef + 1e-3]
+            if occ and unocc:
+                gap = unocc[0] - occ[-1]
+                if gap > 0.05:
+                    gaps.append({"gap_eV": gap, "homo_eV": occ[-1], "lumo_eV": unocc[0], "fermi_eV": ef, "spin": spin_name})
+
+        if gaps:
+            gaps.sort(key=lambda x: x["gap_eV"])
+            return gaps[0]
+
+    # 3. Non-spin-polarized bands (nspin = 1)
+    single_bands = re.search(
+        r"(?:End of self-consistent calculation|End of band structure calculation).*?bands \(ev\):\s*(.*?)\n\s*(?:the Fermi|highest)",
+        text,
+        re.DOTALL,
+    )
+    single_fermi = re.findall(r"the Fermi energy is\s+([-\d\.]+)\s+ev", text, re.IGNORECASE)
+    if single_bands and single_fermi:
+        ef = float(single_fermi[-1])
+        bands = [float(x) for x in single_bands.group(1).split()]
+        occ = [b for b in bands if b <= ef + 1e-3]
+        unocc = [b for b in bands if b > ef + 1e-3]
+        if occ and unocc and (unocc[0] - occ[-1]) > 0.05:
+            return {"gap_eV": unocc[0] - occ[-1], "homo_eV": occ[-1], "lumo_eV": unocc[0], "fermi_eV": ef}
+
+    return None
+
     forces_ev_a = np.array(forces_list) if forces_list else None
     return energy_ev, forces_ev_a
 
@@ -501,6 +569,10 @@ class QERunner:
                         at_labeled = atoms.copy()
                         at_labeled.info["energy"] = e_ev
                         at_labeled.arrays["forces"] = f_ev_a
+                        gap_info = parse_qe_band_gap(pw_out)
+                        if gap_info:
+                            for k, v in gap_info.items():
+                                at_labeled.info[f"dft_{k}"] = v
                         return at_labeled
                 else:
                     logger.info(f"      [Cache mismatch] Atomic positions in {pw_in} differ from frame. Recomputing...")
@@ -618,6 +690,10 @@ class QERunner:
         at_labeled = atoms.copy()
         at_labeled.info["energy"] = e_ev
         at_labeled.arrays["forces"] = f_ev_a
+        gap_info = parse_qe_band_gap(pw_out)
+        if gap_info:
+            for k, v in gap_info.items():
+                at_labeled.info[f"dft_{k}"] = v
         return at_labeled
 
     def _obtain_replacement_entry(

@@ -74,6 +74,27 @@ def run_pipeline(
         n_workers=eff_n_workers,
     )
 
+    # Attach DFT ground-state energy and Kohn-Sham optical transition properties to at_gs and at_es
+    gs_cand = next(
+        (f for f in labeled_frames if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4),
+        None,
+    )
+    if gs_cand is None and labeled_frames:
+        gs_cand = labeled_frames[0]
+    if gs_cand is not None:
+        if "energy" in gs_cand.info:
+            at_gs.info["energy"] = float(gs_cand.info["energy"])
+        for k in ("dft_gap_eV", "dft_homo_eV", "dft_lumo_eV", "dft_fermi_eV"):
+            if k in gs_cand.info:
+                at_gs.info[k] = float(gs_cand.info[k])
+
+    es_cand = next(
+        (f for f in labeled_frames if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 0.0) - 1.0) < 1e-4),
+        None,
+    )
+    if es_cand is not None and "energy" in es_cand.info:
+        at_es.info["energy"] = float(es_cand.info["energy"])
+
     logger.info("\n[STEP 4/6] Delta Baseline Extraction & GPU GPUMD Training...")
     trainer = DeltaTrainer(config, calc_foundation=shared_foundation)
     delta_frames = trainer.compute_delta_dataset(labeled_frames)

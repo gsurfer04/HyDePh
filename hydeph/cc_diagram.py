@@ -38,13 +38,29 @@ class ConfigurationCoordinateEngine:
         self.calc = calculator
         self.last_results: Optional[Dict[str, Any]] = None
 
-    def _derive_zpl(self, at_gs: Atoms, at_es: Atoms) -> Optional[float]:
-        """Derives ZPL energy from atoms info (e.g. DFT energies) or stored CC results if available."""
+    def _derive_zpl(
+        self, at_gs: Atoms, at_es: Atoms, e_rel_es_eV: float = 0.0
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """Derives ZPL energy from Kohn-Sham defect band gap, Delta-SCF energies, or stored CC results."""
+        # 1. Kohn-Sham defect eigenvalue transition gap from DFT
+        if "dft_gap_eV" in at_gs.info and at_gs.info["dft_gap_eV"] is not None:
+            gap_val = float(at_gs.info["dft_gap_eV"])
+            # ZPL = vertical transition energy - excited state relaxation energy
+            e_zpl = max(0.05, gap_val - float(e_rel_es_eV))
+            return e_zpl, "kohn_sham_eigenvalues"
+
+        # 2. Delta-SCF excited-state energy difference
         if "energy" in at_es.info and "energy" in at_gs.info:
-            return float(at_es.info["energy"] - at_gs.info["energy"])
+            diff = float(at_es.info["energy"] - at_gs.info["energy"])
+            # If difference significantly exceeds ground-state relaxation, treat as electronic Delta-SCF
+            if diff > float(e_rel_es_eV) * 1.5 and diff > 0.1:
+                return diff, "delta_scf"
+
+        # 3. Stored CC results cache
         if self.last_results is not None and "e_zpl_eV" in self.last_results:
-            return float(self.last_results["e_zpl_eV"])
-        return None
+            return float(self.last_results["e_zpl_eV"]), "stored_cc_results"
+
+        return None, None
 
     def calculate_cc_curve(
         self,
@@ -90,12 +106,19 @@ class ConfigurationCoordinateEngine:
             e_zpl = float(user_zpl)
             zpl_source = "user_configured"
         else:
-            derived = self._derive_zpl(at_gs, at_es)
+            derived, src = self._derive_zpl(at_gs, at_es, e_rel_es_eV=e_rel_gs_eV)
             if derived is not None and derived > 0:
                 e_zpl = derived
-                zpl_source = "derived_from_dft"
+                zpl_source = src
+                if src == "kohn_sham_eigenvalues":
+                    logger.info(
+                        f"      [+] Auto-derived Zero-Phonon Line E_ZPL: {e_zpl:.4f} eV from Kohn-Sham defect gap "
+                        f"({at_gs.info['dft_gap_eV']:.4f} eV vertical minus {e_rel_gs_eV:.4f} eV relaxation)"
+                    )
+                else:
+                    logger.info(f"      [+] Auto-derived Zero-Phonon Line E_ZPL: {e_zpl:.4f} eV ({src})")
                 warnings.warn(
-                    f"Auto-derived ZPL energy: {e_zpl:.4f} eV from GS and ES ground/excited state energies.",
+                    f"Auto-derived ZPL energy: {e_zpl:.4f} eV from {src}.",
                     UserWarning,
                     stacklevel=2,
                 )
@@ -153,6 +176,7 @@ class ConfigurationCoordinateEngine:
             "hbar_omega_meV": hbar_omega_meV,
             "s_factor_1d": s_factor_1d,
             "k_curvature_gs": k_fit_eV_amu_A2,
+            "dft_gap_eV": at_gs.info.get("dft_gap_eV"),
         }
 
         self.last_results = results
