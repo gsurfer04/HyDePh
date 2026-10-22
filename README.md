@@ -235,8 +235,19 @@ A direct comparison between supercell sizes for the diamond $\text{NV}^-$ center
 | **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Stiff covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 10.7\ \text{\AA}$ | Use $\ge 215$ atoms. $2\times 2\times 2$ (63 atoms) produces artificial $73\ \text{meV}$ multi-phonon spike combs. |
 | **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` or `(4, 4, 2)` | $142\text{--}254$ atoms | $\ge 9.2\text{--}12.3\ \text{\AA}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
 | **3C-SiC** | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 13.1\ \text{\AA}$ | Captures smooth quasi-local breathing mode dispersion. |
-| **Alkali Halides** (LiCl, NaCl) | Soft rocksalt ($\Theta_D \approx 300\text{--}420\ \mathrm{K}$) | `(2, 2, 2)` or `(3, 3, 3)` | $63\text{--}215$ atoms | $\ge 10.3\text{--}15.4\ \text{\AA}$ | Optical relaxation is large ($\Delta Q > 1.5\ \text{amu}^{1/2}\text{\AA}$); finite-$T$ anharmonic MD is essential for mode softening. |
-| **Fluorites** (LiF, $\mathrm{CaF}_2$) | Fluorite ($\Theta_D \approx 730\ \mathrm{K}$) | `(2, 2, 2)` or `(3, 3, 3)` | $95\text{--}323$ atoms | $\ge 8.0\text{--}12.1\ \text{\AA}$ | Strong coupling ($S > 10$); Marcus Gaussian envelope dominates. |
+| **Alkali Halides** (LiCl, NaCl) | Soft rocksalt ($\Theta_D \approx 300\text{--}420\ \mathrm{K}$) | `(2, 2, 2)` *(recommended)* | $63$ atoms | $\ge 11.4\ \text{\AA}$ | Large lattice constant ($a \approx 5.69\ \text{\AA}$) means `(2, 2, 2)` already exceeds $L \ge 10\ \text{\AA}$ ($L = 11.4\ \text{\AA}$) and fully converges in $q$-space with $< 1\ \text{GB}$ VRAM. `(3, 3, 3)` expands to $17.1\ \text{\AA}$ with 1,721 electrons ($Z_{\mathrm{val}}=9$ for Na), requiring $> 9\ \text{GB}$ RAM. |
+| **Fluorites** (LiF, $\mathrm{CaF}_2$) | Fluorite ($\Theta_D \approx 730\ \mathrm{K}$) | `(2, 2, 2)` | $95\text{--}189$ atoms | $\ge 8.0\text{--}10.9\ \text{\AA}$ | Strong coupling ($S > 10$); Marcus Gaussian envelope dominates. |
+
+> [!IMPORTANT]
+> **Physical Cell Length $L$, Not Integer Repeat Count, Determines Convergence**
+> The physical criterion for converging the vibrational continuum and avoiding sharp finite-size combs is the supercell edge length **$L \ge 10\text{--}11\ \text{\AA}$**, **not** a fixed integer repeat tuple like `(3, 3, 3)`:
+> - For **compact covalent hosts** (diamond, $a = 3.57\ \text{\AA}$), a $2\times 2\times 2$ cell has $L = 7.15\ \text{\AA}$ (under-converged), so `(3, 3, 3)` ($L = 10.72\ \text{\AA}$, 215 atoms) is required.
+> - For **large-lattice hosts** (rocksalt halides like NaCl with $a = 5.69\ \text{\AA}$), a **$2\times 2\times 2$ cell is already $L = 11.38\ \text{\AA}$**—physically larger than the 215-atom diamond cell! A $2\times 2\times 2$ cell of NaCl is already fully converged in $q$-space.
+>
+> **GPU VRAM & Semi-Core Pseudopotentials**:
+> If a $3\times 3\times 3$ cell is used for NaCl ($L = 17.08\ \text{\AA}$), the system contains 215 atoms and 1,721 valence electrons because the standard Na pseudopotential treats semi-core $2s, 2p$ states as valence ($Z_{\mathrm{val}} = 9$). With 877 Kohn-Sham bands and 144k plane waves, Quantum ESPRESSO's default Davidson algorithm requires **$> 9.2\ \text{GB}$ of dynamical memory**, exceeding the 8 GB VRAM of consumer GPUs and triggering a CUDA Out-Of-Memory termination.
+> - **Recommended**: Use `(2, 2, 2)` for rocksalt halides ($L = 11.4\ \text{\AA}$, 505 electrons, $< 1\ \text{GB}$ peak memory).
+> - If supercells with $L > 15\ \text{\AA}$ are strictly required, set `diagonalization = 'cg'` in `ToolkitConfig` (reducing peak memory by $> 50\%$) or run on multi-core CPU where system RAM ($\ge 16\text{--}32\ \text{GB}$) accommodates the memory load.
 
 > [!TIP]
 > **Why HyDePh Makes Large Supercells Tractable**
