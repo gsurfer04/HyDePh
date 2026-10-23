@@ -86,6 +86,22 @@ class ConfigurationCoordinateEngine:
 
         at_eval = at_gs.copy()
         at_eval.calc = self.calc
+
+        # Check for residual force along CC displacement vector dr
+        try:
+            f0 = at_eval.get_forces()
+            proj_grad = -float(np.sum(f0 * dr))  # dE/dlambda at lambda=0
+            if proj_grad < -0.01:
+                from ase.optimize import BFGS
+                opt = BFGS(at_eval, logfile=None)
+                opt.run(fmax=0.01, steps=30)
+                pos_gs = at_eval.positions.copy()
+                dr = mic_displacement(at_es.positions, pos_gs, at_gs.cell)
+                dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
+                q_grid = lambdas * dq_total
+        except Exception:
+            pass
+
         v_ref = float(at_eval.get_potential_energy())
 
         e_gs_list = []
@@ -102,7 +118,7 @@ class ConfigurationCoordinateEngine:
         e_rel_gs_meV = e_rel_gs_eV * 1000.0
 
         user_zpl = zpl_energy_eV if zpl_energy_eV is not None else self.config.zpl_energy_eV
-        if user_zpl is not None:
+        if user_zpl is not None and user_zpl > 0:
             e_zpl = float(user_zpl)
             zpl_source = "user_configured"
         else:
@@ -284,13 +300,15 @@ class ConfigurationCoordinateEngine:
                 r'$E_{\mathrm{em}} = ' + f'{e_em:.3f}' + r'\ \mathrm{eV}$' + '\n(Emission)',
                 color='#990000', fontsize=9.5, fontweight='bold', ha='left', va='center')
 
-        ax.annotate('', xy=(dq_total * 0.82, e_zpl + e_rel_es_eV * 0.16), xytext=(0.06 * dq_total, e_abs_val - 0.03),
+        dy_es = min(0.03, 0.15 * max(0.005, e_rel_es_eV))
+        dy_gs = min(0.03, 0.15 * max(0.005, e_rel_gs_eV))
+        ax.annotate('', xy=(dq_total * 0.82, e_zpl + e_rel_es_eV * 0.16), xytext=(0.06 * dq_total, e_abs_val - dy_es),
                     arrowprops=dict(arrowstyle="->", color='#b2182b', lw=1.8, linestyle='--'))
         ax.text(dq_total * 0.42, e_zpl + e_rel_es_eV * 0.80,
                 r'$\Delta E_{\mathrm{rel,ES}} = ' + f'{e_rel_es_meV:.0f}' + r'\ \mathrm{meV}$',
                 color='#b2182b', fontsize=9.5, ha='center', va='bottom')
 
-        ax.annotate('', xy=(dq_total * 0.18, e_rel_gs_eV * 0.16), xytext=(dq_total * 0.94, e_rel_gs_eV - 0.03),
+        ax.annotate('', xy=(dq_total * 0.18, e_rel_gs_eV * 0.16), xytext=(dq_total * 0.94, e_rel_gs_eV - dy_gs),
                     arrowprops=dict(arrowstyle="->", color='#0b559f', lw=1.8, linestyle='--'))
         ax.text(dq_total * 0.58, e_rel_gs_eV * 0.70,
                 r'$\Delta E_{\mathrm{rel,GS}} = ' + f'{e_rel_gs_meV:.0f}' + r'\ \mathrm{meV}$',

@@ -109,7 +109,26 @@ def run_pipeline(
     at_test.calc = hybrid_calc
     e_hybrid = at_test.get_potential_energy()
     f_hybrid = at_test.get_forces()
-    logger.info(f"[+] Hybrid Potential verified on relaxed GS: E = {e_hybrid:.4f} eV, Max F = {np.abs(f_hybrid).max():.4f} eV/A")
+    max_f = float(np.abs(f_hybrid).max())
+    logger.info(f"[+] Hybrid Potential verified on relaxed GS: E = {e_hybrid:.4f} eV, Max F = {max_f:.4f} eV/A")
+
+    if max_f > 0.015:
+        logger.info("[-] Refining Ground State equilibrium on Hybrid Potential...")
+        from ase.optimize import BFGS
+        at_gs_hybrid = at_gs.copy()
+        at_gs_hybrid.calc = hybrid_calc
+        opt = BFGS(at_gs_hybrid, logfile=None)
+        opt.run(fmax=0.01, steps=50)
+        at_gs_hybrid.info = dict(at_gs.info)
+        dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
+        at_es_hybrid = at_gs_hybrid.copy()
+        at_es_hybrid.positions = at_gs_hybrid.positions + dr_fc
+        at_es_hybrid.info = dict(at_es.info)
+        e_opt = at_gs_hybrid.get_potential_energy()
+        f_opt = float(np.abs(at_gs_hybrid.get_forces()).max())
+        logger.info(f"[+] Refined GS equilibrium on Hybrid Potential: E = {e_opt:.4f} eV, Max F = {f_opt:.4f} eV/A")
+        at_gs = at_gs_hybrid
+        at_es = at_es_hybrid
 
     logger.info("\n[STEP 6/6] Normal Modes & Multi-Temperature Optical Lineshapes...")
     engine = LineshapeEngine(config, hybrid_calc)

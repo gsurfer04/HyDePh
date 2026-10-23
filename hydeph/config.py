@@ -275,6 +275,12 @@ class ToolkitConfig:
         else:
             self.tot_magnetization = max(0, int(self.spin_multiplicity) - 1)
 
+        if self.zpl_energy_eV is not None and self.zpl_energy_eV <= 0:
+            logger.info(
+                f"[i] zpl_energy_eV={self.zpl_energy_eV} is non-positive; treating as None for automatic derivation."
+            )
+            self.zpl_energy_eV = None
+
     def __repr__(self) -> str:
         """Returns a readable representation highlighting only non-default fields."""
         defaults = ToolkitConfig(pristine_cell_path="")

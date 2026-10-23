@@ -408,6 +408,18 @@ def test_configuration_coordinate_engine(tmp_path):
     assert pytest.approx(res_auto["e_zpl_eV"], rel=1e-3) == expected_auto_zpl
     assert pytest.approx(res_auto["e_abs_eV"], rel=1e-3) == 2.50
 
+    # 8. Test that zpl_energy_eV=0 is treated as auto-derive rather than collapsing to 0 eV
+    cfg_zero = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "pristine.xyz"),
+        workspace_dir=str(tmp_path),
+        zpl_energy_eV=0,
+    )
+    assert cfg_zero.zpl_energy_eV is None
+    engine_zero = ConfigurationCoordinateEngine(cfg_zero, mock_calc)
+    res_zero = engine_zero.calculate_cc_curve(at_gs_auto, at_es, zpl_energy_eV=0)
+    assert res_zero["zpl_source"] == "kohn_sham_eigenvalues"
+    assert pytest.approx(res_zero["e_zpl_eV"], rel=1e-3) == expected_auto_zpl
+
 
 def test_parse_qe_band_gap(tmp_path):
     """Verifies parsing of Kohn-Sham band gaps from Quantum ESPRESSO outputs."""
