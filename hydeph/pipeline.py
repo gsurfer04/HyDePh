@@ -12,7 +12,7 @@ import numpy as np
 import ase.io
 
 from .config import ToolkitConfig
-from .defect_builder import DefectBuilder
+from .defect_builder import DefectBuilder, mic_displacement
 from .frame_sampler import FrameSampler
 from .qe_runner import QERunner
 from .delta_trainer import DeltaTrainer

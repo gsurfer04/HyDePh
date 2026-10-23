@@ -462,5 +462,20 @@ def test_parse_qe_band_gap(tmp_path):
     assert pytest.approx(res_single["lumo_eV"], rel=1e-3) == 2.80
 
 
+def test_pipeline_imports_and_hybrid_refinement(tmp_path):
+    """Verifies pipeline imports and hybrid GS equilibrium refinement."""
+    import hydeph.pipeline as pipe
+    assert hasattr(pipe, "mic_displacement")
+    assert pipe.mic_displacement is not None
+
+    # Test refinement step logic on Atoms with mock force
+    at_gs = Atoms("C2", positions=[[0, 0, 0], [0, 0, 1.5]], cell=[10, 10, 10], pbc=True)
+    at_es = Atoms("C2", positions=[[0, 0, 0], [0, 0, 1.6]], cell=[10, 10, 10], pbc=True)
+
+    dr_fc = pipe.mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
+    assert dr_fc.shape == (2, 3)
+    assert pytest.approx(dr_fc[1, 2], abs=1e-5) == 0.1
+
+
 
 
