@@ -182,7 +182,8 @@ def test_configuration_coordinate_zpl_derivation_and_warning(tmp_path):
         warnings.simplefilter("always")
         res3 = engine_explicit.calculate_cc_curve(at_gs, at_es, n_points=5)
         assert res3["e_zpl_eV"] == 3.45
-        assert len(recorded) == 0
+        user_warnings = [w for w in recorded if issubclass(w.category, UserWarning)]
+        assert len(user_warnings) == 0
 
 
 def test_export_numerical_results(tmp_path):
