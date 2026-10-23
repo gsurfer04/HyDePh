@@ -63,24 +63,34 @@ class DefectBuilder:
             self.calc_foundation = None
         self.vac_pos: Optional[np.ndarray] = None
 
-    def _detect_supercell_defect_pos(self, pristine_sc: Atoms, defect_sc: Atoms) -> np.ndarray:
-        """Detects the defect coordinate in a pre-built defect supercell relative to `pristine_sc`."""
+    def _detect_supercell_defect_pos(self, pristine_sc: Atoms, defect_sc: Atoms) -> Tuple[np.ndarray, list]:
+        """Detects the defect coordinate(s) in a pre-built defect supercell relative to `pristine_sc`."""
         cell = pristine_sc.cell
+        defect_positions = []
         if len(defect_sc) < len(pristine_sc):
             for at in pristine_sc:
                 dists = mic_distances(defect_sc.positions, at.position, cell)
                 if len(dists) == 0 or np.min(dists) > 0.5:
-                    return at.position.copy()
+                    defect_positions.append(at.position.copy())
         elif len(defect_sc) == len(pristine_sc):
             for at_p, at_d in zip(pristine_sc, defect_sc):
                 if at_p.symbol != at_d.symbol:
-                    return at_d.position.copy()
+                    defect_positions.append(at_d.position.copy())
         else:
             for at in defect_sc:
                 dists = mic_distances(pristine_sc.positions, at.position, cell)
                 if len(dists) == 0 or np.min(dists) > 0.5:
-                    return at.position.copy()
-        return np.asarray(defect_sc.get_cell().sum(axis=0) / 2.0, dtype=float)
+                    defect_positions.append(at.position.copy())
+
+        if not defect_positions:
+            centroid = np.asarray(defect_sc.get_cell().sum(axis=0) / 2.0, dtype=float)
+            return centroid, [centroid]
+        if len(defect_positions) == 1:
+            return defect_positions[0], defect_positions
+        ref_p = defect_positions[0]
+        rel_vecs = mic_displacement(defect_positions, ref_p, cell)
+        centroid = ref_p + np.mean(rel_vecs, axis=0)
+        return centroid, defect_positions
 
     def build_supercell_and_defect(self) -> Tuple[Atoms, Atoms]:
         """Builds pristine and defect supercells, persisting `defect_center` in `Atoms.info`."""
@@ -105,8 +115,10 @@ class DefectBuilder:
                 logger.info(f"[+] Defect embedded at {self.vac_pos}; resulting supercell has {len(defect_sc)} atoms.")
             else:
                 defect_sc = defect_input
-                self.vac_pos = self._detect_supercell_defect_pos(pristine_sc, defect_sc)
-                logger.info(f"[+] Loaded existing defect supercell ({len(defect_sc)} atoms, defect center = {self.vac_pos})")
+                centroid, defect_positions = self._detect_supercell_defect_pos(pristine_sc, defect_sc)
+                self.vac_pos = centroid
+                defect_sc.info["defect_positions"] = [p.tolist() if hasattr(p, 'tolist') else list(p) for p in defect_positions]
+                logger.info(f"[+] Loaded existing defect supercell ({len(defect_sc)} atoms, defect center = {self.vac_pos}, {len(defect_positions)} sites)")
         else:
             defect_sc = pristine_sc.copy()
             dtype = self.config.defect_type.lower()
@@ -114,35 +126,76 @@ class DefectBuilder:
             elem = self.config.defect_site_element
             sub_elem = self.config.substitutional_element
 
-            if elem and "->" in elem and sub_elem is None:
-                parts = [p.strip() for p in elem.split("->")]
-                elem, sub_elem = parts[0], parts[1]
+            if dtype == "substitutional":
+                sub_pairs = []
+                if elem and "->" in elem:
+                    # Support multiple comma-separated substitutions, e.g. "B->C, N->C"
+                    for part in elem.split(","):
+                        if "->" in part:
+                            p = [s.strip() for s in part.split("->")]
+                            sub_pairs.append((p[0], p[1]))
+                elif elem and sub_elem:
+                    sub_pairs.append((elem, sub_elem))
 
-            if site_idx is not None:
-                target_idx = int(site_idx)
-                if target_idx < 0 or target_idx >= len(defect_sc):
-                    raise ValueError(f"defect_site_index={target_idx} out of bounds for supercell of {len(defect_sc)} atoms.")
-            else:
-                symbols = defect_sc.get_chemical_symbols()
-                cand_indices = [i for i, s in enumerate(symbols) if (elem is None or s == elem)]
-                if not cand_indices:
-                    raise ValueError(f"Element {elem} not found in pristine supercell for defect creation.")
+                if not sub_pairs:
+                    raise ValueError("Substitutional defect requires `substitutional_element` (or 'Host->Sub' in `defect_site_element`).")
+
+                defect_positions = []
                 center = defect_sc.get_cell().sum(axis=0) / 2.0
-                cand_dists = mic_distances(defect_sc.positions[cand_indices], center, defect_sc.cell)
-                target_idx = cand_indices[int(np.argmin(cand_dists))]
+                last_pos = center
 
-            self.vac_pos = defect_sc.positions[target_idx].copy()
+                if site_idx is not None:
+                    target_idx = int(site_idx)
+                    if target_idx < 0 or target_idx >= len(defect_sc):
+                        raise ValueError(f"defect_site_index={target_idx} out of bounds for supercell of {len(defect_sc)} atoms.")
+                    old_sym = defect_sc[target_idx].symbol
+                    target_s = sub_pairs[0][1] if sub_pairs else sub_elem
+                    defect_sc[target_idx].symbol = target_s
+                    pos = defect_sc.positions[target_idx].copy()
+                    defect_positions.append(pos)
+                    logger.info(f"[+] Created substitution {old_sym} -> {target_s} at site {target_idx}, coordinate = {pos}")
+                else:
+                    for host_s, target_s in sub_pairs:
+                        symbols = defect_sc.get_chemical_symbols()
+                        cand_indices = [i for i, s in enumerate(symbols) if s == host_s]
+                        if not cand_indices:
+                            raise ValueError(f"Host element {host_s} not found in pristine supercell for substitution.")
+                        cand_dists = mic_distances(defect_sc.positions[cand_indices], last_pos, defect_sc.cell)
+                        t_idx = cand_indices[int(np.argmin(cand_dists))]
+                        old_sym = defect_sc[t_idx].symbol
+                        defect_sc[t_idx].symbol = target_s
+                        pos = defect_sc.positions[t_idx].copy()
+                        defect_positions.append(pos)
+                        last_pos = pos
+                        logger.info(f"[+] Created substitution {old_sym} -> {target_s} at site {t_idx}, coordinate = {pos}")
 
-            if dtype == "vacancy":
+                if len(defect_positions) == 1:
+                    self.vac_pos = defect_positions[0]
+                else:
+                    ref_p = defect_positions[0]
+                    rel_vecs = mic_displacement(defect_positions, ref_p, defect_sc.cell)
+                    self.vac_pos = ref_p + np.mean(rel_vecs, axis=0)
+                    logger.info(f"[+] Defect complex centroid ({len(defect_positions)} sites): {self.vac_pos}")
+                defect_sc.info["defect_positions"] = [p.tolist() if hasattr(p, 'tolist') else list(p) for p in defect_positions]
+            elif dtype == "vacancy":
+                if site_idx is not None:
+                    target_idx = int(site_idx)
+                    if target_idx < 0 or target_idx >= len(defect_sc):
+                        raise ValueError(f"defect_site_index={target_idx} out of bounds for supercell of {len(defect_sc)} atoms.")
+                else:
+                    symbols = defect_sc.get_chemical_symbols()
+                    cand_indices = [i for i, s in enumerate(symbols) if (elem is None or s == elem)]
+                    if not cand_indices:
+                        raise ValueError(f"Element {elem} not found in pristine supercell for defect creation.")
+                    center = defect_sc.get_cell().sum(axis=0) / 2.0
+                    cand_dists = mic_distances(defect_sc.positions[cand_indices], center, defect_sc.cell)
+                    target_idx = cand_indices[int(np.argmin(cand_dists))]
+
+                self.vac_pos = defect_sc.positions[target_idx].copy()
                 removed_sym = defect_sc[target_idx].symbol
                 del defect_sc[target_idx]
+                defect_sc.info["defect_positions"] = [self.vac_pos.tolist()]
                 logger.info(f"[+] Created {removed_sym} vacancy at site {target_idx}, coordinate = {self.vac_pos}")
-            elif dtype == "substitutional":
-                if not sub_elem:
-                    raise ValueError("Substitutional defect requires `substitutional_element` (or 'Host->Sub' in `defect_site_element`).")
-                old_sym = defect_sc[target_idx].symbol
-                defect_sc[target_idx].symbol = sub_elem
-                logger.info(f"[+] Created substitution {old_sym} -> {sub_elem} at site {target_idx}, coordinate = {self.vac_pos}")
             else:
                 raise NotImplementedError(f"Defect type '{self.config.defect_type}' not supported.")
 
@@ -172,27 +225,37 @@ class DefectBuilder:
         ic, jc, kc = rep[0] // 2, rep[1] // 2, rep[2] // 2
         shift_center = ic * a1 + jc * a2 + kc * a3
 
-        defect_pos = shift_center
+        defect_positions = []
         if len(defect_uc) < len(pristine_uc):
             for at in pristine_uc:
                 dists = mic_distances(defect_uc.positions, at.position, pristine_uc.cell)
                 if len(dists) == 0 or np.min(dists) > 0.5:
-                    defect_pos = at.position + shift_center
-                    logger.info(f"    [i] Auto-detected vacancy of {at.symbol} at {defect_pos}")
-                    break
+                    pos = at.position + shift_center
+                    defect_positions.append(pos)
+                    logger.info(f"    [i] Auto-detected vacancy of {at.symbol} at {pos}")
         elif len(defect_uc) == len(pristine_uc):
             for at_p, at_d in zip(pristine_uc, defect_uc):
                 if at_p.symbol != at_d.symbol:
-                    defect_pos = at_d.position + shift_center
-                    logger.info(f"    [i] Auto-detected substitution {at_p.symbol} -> {at_d.symbol} at {defect_pos}")
-                    break
+                    pos = at_d.position + shift_center
+                    defect_positions.append(pos)
+                    logger.info(f"    [i] Auto-detected substitution {at_p.symbol} -> {at_d.symbol} at {pos}")
         else:
             for at in defect_uc:
                 dists = mic_distances(pristine_uc.positions, at.position, pristine_uc.cell)
                 if np.min(dists) > 0.5:
-                    defect_pos = at.position + shift_center
-                    logger.info(f"    [i] Auto-detected interstitial of {at.symbol} at {defect_pos}")
-                    break
+                    pos = at.position + shift_center
+                    defect_positions.append(pos)
+                    logger.info(f"    [i] Auto-detected interstitial of {at.symbol} at {pos}")
+
+        if not defect_positions:
+            defect_pos = shift_center
+        elif len(defect_positions) == 1:
+            defect_pos = defect_positions[0]
+        else:
+            ref_p = defect_positions[0]
+            rel_vecs = mic_displacement(defect_positions, ref_p, pristine_uc.cell)
+            defect_pos = ref_p + np.mean(rel_vecs, axis=0)
+            logger.info(f"    [i] Defect complex centroid ({len(defect_positions)} sites): {defect_pos}")
 
         offsets = np.array([[i, j, k] for i in range(rep[0]) for j in range(rep[1]) for k in range(rep[2])], dtype=float)
         center_idx = ic * (rep[1] * rep[2]) + jc * rep[2] + kc
@@ -221,6 +284,7 @@ class DefectBuilder:
         cell = np.array([rep[0] * a1, rep[1] * a2, rep[2] * a3])
         supercell = Atoms(symbols=sym_parts, positions=all_positions, cell=cell, pbc=True)
         supercell.info["defect_center"] = np.asarray(defect_pos, dtype=float)
+        supercell.info["defect_positions"] = [p.tolist() if hasattr(p, 'tolist') else list(p) for p in defect_positions]
         return supercell, defect_pos
 
     def relax_ground_state(self, defect_sc: Atoms, force_relax: bool = False) -> Atoms:
@@ -301,15 +365,47 @@ class DefectBuilder:
         at_es = at_gs.copy()
         disp_vecs = mic_displacement(at_es.positions, center, at_es.cell)
         dists = np.linalg.norm(disp_vecs, axis=1)
-        valid_mask = dists > 0.05
-        if not np.any(valid_mask):
-            raise ValueError("No valid atoms found around defect center for excited state relaxation.")
 
-        d_min = float(np.min(dists[valid_mask]))
-        coord_indices = [i for i, d in enumerate(dists) if 0.05 < d <= 1.25 * d_min]
+        defect_pos_list = at_gs.info.get("defect_positions")
+        if not defect_pos_list:
+            defect_pos_list = [center]
+
+        # Identify which atoms in at_gs belong to the defect core (within 0.35 A of any defect site)
+        defect_atom_indices = set()
+        for dp in defect_pos_list:
+            d_to_dp = mic_distances(at_gs.positions, dp, at_gs.cell)
+            for idx, d in enumerate(d_to_dp):
+                if d < 0.35:
+                    defect_atom_indices.add(idx)
+
+        # Host atoms are all atoms not in the defect core
+        host_mask = np.ones(len(at_gs), dtype=bool)
+        for idx in defect_atom_indices:
+            host_mask[idx] = False
+
+        # Find coordinating host shell: nearest host atoms to ANY defect site
+        coord_set = set()
+        for dp in defect_pos_list:
+            d_to_dp = mic_distances(at_gs.positions, dp, at_gs.cell)
+            valid_dists = d_to_dp[host_mask]
+            if len(valid_dists) > 0:
+                d_min_dp = float(np.min(valid_dists))
+                shell_candidates = [
+                    i for i in range(len(at_gs))
+                    if host_mask[i] and d_to_dp[i] <= 1.25 * d_min_dp
+                ]
+                coord_set.update(shell_candidates)
+
+        coord_indices = sorted(list(coord_set))
         if len(coord_indices) < 2:
-            valid_idx = np.where(valid_mask)[0]
-            coord_indices = list(valid_idx[np.argsort(dists[valid_idx])[:6]])
+            host_indices = np.where(host_mask)[0]
+            if len(host_indices) > 0:
+                order = np.argsort(dists[host_indices])
+                coord_indices = list(host_indices[order[:6]])
+            else:
+                coord_indices = [i for i, d in enumerate(dists) if d > 0.05][:6]
+
+        d_min = float(np.min(dists[coord_indices])) if len(coord_indices) > 0 else 2.0
 
         if self.config.excited_state_displacement is not None:
             disp_mag = float(self.config.excited_state_displacement)

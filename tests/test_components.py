@@ -477,5 +477,74 @@ def test_pipeline_imports_and_hybrid_refinement(tmp_path):
     assert pytest.approx(dr_fc[1, 2], abs=1e-5) == 0.1
 
 
+def test_multi_atom_defect_complex_handling(tmp_path):
+    """Verifies multi-substitutional defect complexes (e.g. CBCN in h-BN)."""
+    # 1. Pristine h-BN unit cell (4 atoms: 2 B, 2 N)
+    pristine_uc = Atoms(
+        "B2N2",
+        positions=[
+            [0.0, 0.0, 1.81],
+            [0.0, 0.0, 5.44],
+            [0.0, 1.45, 5.44],
+            [1.26, 0.73, 1.81],
+        ],
+        cell=[2.52, 2.18, 7.26],
+        pbc=True,
+    )
+    p_file = tmp_path / "pristine.xyz"
+    import ase.io
+    ase.io.write(str(p_file), pristine_uc)
+
+    # 2. Defect unit cell with CBCN pair: B0 -> C and N3 -> C (in-plane pair at z=1.81)
+    defect_uc = pristine_uc.copy()
+    defect_uc[0].symbol = "C"
+    defect_uc[3].symbol = "C"
+    d_file = tmp_path / "defect.xyz"
+    ase.io.write(str(d_file), defect_uc)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        defect_cell_path=str(d_file),
+        supercell_repeat=(2, 2, 1),
+        workspace_dir=str(tmp_path / "ws_cbcn"),
+    )
+
+    builder = DefectBuilder(cfg)
+    p_sc, d_sc = builder.build_supercell_and_defect()
+
+    # Check that both C substitutions are in the supercell
+    symbols = d_sc.get_chemical_symbols()
+    c_indices = [i for i, s in enumerate(symbols) if s == "C"]
+    assert len(c_indices) == 2
+    assert "defect_positions" in d_sc.info
+    assert len(d_sc.info["defect_positions"]) == 2
+
+    # Centroid should be midpoint between the two C atoms
+    c_pos = d_sc.positions[c_indices]
+    expected_centroid = (c_pos[0] + c_pos[1]) / 2.0
+    actual_centroid = d_sc.info["defect_center"]
+    assert pytest.approx(actual_centroid[2], abs=0.1) == expected_centroid[2]
+
+    # 3. Test programmatic syntax: defect_site_element="B->C, N->C"
+    cfg_prog = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        supercell_repeat=(2, 2, 1),
+        defect_type="substitutional",
+        defect_site_element="B->C, N->C",
+        workspace_dir=str(tmp_path / "ws_prog"),
+    )
+    builder_prog = DefectBuilder(cfg_prog)
+    _, d_prog = builder_prog.build_supercell_and_defect()
+    prog_c_indices = [i for i, s in enumerate(d_prog.get_chemical_symbols()) if s == "C"]
+    assert len(prog_c_indices) == 2
+    assert "defect_positions" in d_prog.info
+    assert len(d_prog.info["defect_positions"]) == 2
+
+    # Verify that the two C atoms are adjacent nearest neighbors
+    from hydeph.defect_builder import mic_distances
+    c_bond = mic_distances([d_prog.positions[prog_c_indices[0]]], d_prog.positions[prog_c_indices[1]], d_prog.cell)[0]
+    assert 0.5 < c_bond < 2.0
+
+
 
 
