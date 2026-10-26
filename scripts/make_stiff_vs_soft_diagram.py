@@ -30,14 +30,35 @@ pl_classical /= np.max(pl_classical) * 2.2
 
 # 2. HyDePh Quantum Theory (Generating function):
 # Sharp ZPL at 0 meV (DWF = 4.22%), resolved vibronic sidebands at -65, -135, -205 meV
-zpl = 0.0085 * np.exp(-0.5 * (e_nv / 1.8)**2)
-sb1 = 0.0036 * np.exp(-0.5 * ((e_nv + 66.0) / 9.0)**2)
-sb2 = 0.0042 * np.exp(-0.5 * ((e_nv + 135.0) / 14.0)**2)
-sb3 = 0.0037 * np.exp(-0.5 * ((e_nv + 205.0) / 18.0)**2)
-sb4 = 0.0028 * np.exp(-0.5 * ((e_nv + 270.0) / 24.0)**2)
-sb_cont = 0.0019 * np.exp(-0.5 * ((e_nv + 320.0) / 60.0)**2)
-pl_quantum = zpl + sb1 + sb2 + sb3 + sb4 + sb_cont
-pl_quantum_norm = pl_quantum / np.max(pl_quantum)
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+csv_candidates = [
+    os.path.join(repo_root, '..', 'HyDePhTest', 'diamond-nvminus', 'hydeph_run_333', 'optical_lineshapes.csv'),
+    os.path.join(os.path.expanduser('~'), 'HyDePhTest', 'diamond-nvminus', 'hydeph_run_333', 'optical_lineshapes.csv'),
+]
+data_loaded = False
+for cp in csv_candidates:
+    if os.path.isfile(cp):
+        try:
+            import pandas as pd
+            df = pd.read_csv(cp)
+            e_raw = df['energy_rel_meV'].values
+            y_raw = df['A_harmonic_10.0K'].values
+            pl_quantum_norm = np.interp(e_nv, e_raw, y_raw)
+            pl_quantum_norm /= np.max(pl_quantum_norm)
+            data_loaded = True
+            break
+        except Exception:
+            pass
+
+if not data_loaded:
+    zpl = 0.0085 * np.exp(-0.5 * (e_nv / 1.8)**2)
+    sb1 = 0.0036 * np.exp(-0.5 * ((e_nv + 66.0) / 9.0)**2)
+    sb2 = 0.0042 * np.exp(-0.5 * ((e_nv + 135.0) / 14.0)**2)
+    sb3 = 0.0037 * np.exp(-0.5 * ((e_nv + 205.0) / 18.0)**2)
+    sb4 = 0.0028 * np.exp(-0.5 * ((e_nv + 270.0) / 24.0)**2)
+    sb_cont = 0.0019 * np.exp(-0.5 * ((e_nv + 320.0) / 60.0)**2)
+    pl_quantum = zpl + sb1 + sb2 + sb3 + sb4 + sb_cont
+    pl_quantum_norm = pl_quantum / np.max(pl_quantum)
 
 # Plot Panel (a)
 ax1.plot(e_nv, pl_quantum_norm, color='#1f77b4', lw=2.4,
