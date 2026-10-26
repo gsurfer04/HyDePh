@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="hydeph",
-    version="0.5.0",
+    version="0.6.0",
     description="HyDePh: High-Definition Hybrid Defect Photoluminescence & Anharmonic Spectroscopy",
     author="Quantum Materials & Machine Learning Team",
     packages=find_packages(),

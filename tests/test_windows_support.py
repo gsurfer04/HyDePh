@@ -23,7 +23,7 @@ from hydeph.delta_trainer import resolve_nep_executable, write_delta_nep_in
 
 def test_version_bump():
     """Verify package version."""
-    assert __version__ == "0.5.0"
+    assert __version__ == "0.6.0"
 
 
 def test_is_windows():
