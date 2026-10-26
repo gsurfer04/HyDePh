@@ -141,6 +141,11 @@ summary = run_pipeline(config)
 | `spin_multiplicity` | `int` | `2` | Spin multiplicity $2S+1$ ($1$: singlet, $2$: doublet, $3$: triplet). |
 | `tot_magnetization` | `int` | `None` | Unpaired electrons $2S$; synchronized with `spin_multiplicity`. |
 | `excited_cell_path` | `str` | `None` | Path to explicit excited-state cell or supercell; falls back to coordination-shell breathing when omitted. |
+| `excited_state_method` | `str` | `"synthetic"` | Method for excited-state geometry: `"synthetic"` (coordination breathing), `"spin_proxy"` (automated DFT relaxation), or `"file"`. |
+| `excited_state_tot_magnetization` | `int` | `None` | Target spin magnetization $2S$ for `"spin_proxy"` mode; defaults to ground state $M_0 + 2$. |
+| `ground_state_relax_method` | `str` | `"auto"` | Ground-state optimization: `"auto"` (selects `"dft"` if `excited_state_method="spin_proxy"`, else `"foundation"`), `"foundation"`, or `"dft"`. |
+| `relax_forc_conv_thr` | `float` | `1.0e-3` | Force convergence threshold ($\mathrm{Ry/Bohr}$) for Quantum ESPRESSO BFGS relaxations. |
+| `relax_nstep` | `int` | `100` | Maximum ionic optimization steps for Quantum ESPRESSO BFGS relaxations. |
 | `excited_state_displacement` | `float` | `None` | Radial breathing displacement (Å) for procedural excited states ($0.08\ \text{\AA}$ for covalent hosts, $0.15\ \text{\AA}$ for ionic hosts). |
 | `substitutional_element` | `str` | `None` | Replacement species symbol when `defect_type="substitutional"` (or specify `"Host->Sub"` in `defect_site_element`). |
 | `conv_thr` | `str` | `"1.0d-5"` | SCF convergence threshold in Quantum ESPRESSO. |

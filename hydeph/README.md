@@ -23,9 +23,9 @@ See the root [`README.md`](../README.md) for full configuration tables and [`doc
 ## Modules
 
 - `config.py`: `ToolkitConfig` dataclass and input validation.
-- `defect_builder.py`: Supercell tiling, defect site detection, and GS/ES relaxation.
+- `defect_builder.py`: Supercell tiling, defect site detection, and ground/excited-state relaxation (foundation potential or spin-proxy DFT).
 - `frame_sampler.py`: 4-phase frame sampling (Franck-Condon scan, core rattling, foundation MD + FPS, interleaved queue).
-- `qe_runner.py`: Quantum ESPRESSO (`pw.x` / `pw.exe`) runner with caching and type-balanced resumption.
+- `qe_runner.py`: Quantum ESPRESSO (`pw.x` / `pw.exe`) runner with single-point labeling, BFGS relaxation, caching, and type-balanced resumption.
 - `delta_trainer.py`: Residual extraction ($\Delta E$, $\Delta \mathbf{F}$) and GPUMD `nep` training.
 - `calculator.py`: `HybridDefectCalculator` combining $V_{\mathrm{base}}$ and $\Delta V_{\mathrm{NEP}}$.
 - `lineshape.py`: Normal modes, Huang-Rhys factors, quantum generating functions, and anharmonic Langevin MD.

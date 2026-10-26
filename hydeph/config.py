@@ -25,7 +25,23 @@ class ToolkitConfig:
     defect_cell_path : str, optional
         Path to pre-constructed defect cell or unit cell.
     excited_cell_path : str, optional
-        Path to pre-constructed or DFT-relaxed excited state geometry.
+        Path to pre-constructed or DFT-relaxed excited-state geometry.
+    excited_state_method : str
+        Method for constructing the optical excited-state geometry: "synthetic" (isotropic breathing mode),
+        "spin_proxy" (DFT relaxation using an automated spin-proxy state), or "file".
+        Default is "synthetic".
+    excited_state_tot_magnetization : int, optional
+        Target spin magnetization (2S) for excited-state relaxation in "spin_proxy" mode.
+        Defaults to ground state tot_magnetization + 2.
+    excited_state_spin_multiplicity : int, optional
+        Target spin multiplicity (2S+1) for excited state. Derived from excited_state_tot_magnetization + 1 if omitted.
+    ground_state_relax_method : str
+        Ground-state geometry optimization method: "auto", "foundation", or "dft".
+        In "auto" (default), selects "dft" when excited_state_method is "spin_proxy" and "foundation" otherwise.
+    relax_forc_conv_thr : float
+        Force convergence threshold (Ry/Bohr) for Quantum ESPRESSO BFGS relaxations. Default is 1.0e-3.
+    relax_nstep : int
+        Maximum ionic optimization steps for Quantum ESPRESSO BFGS relaxations. Default is 100.
     excited_state_displacement : float, optional
         Breathing displacement magnitude (Angstrom) for synthetic excited state generation.
     defect_type : str
@@ -163,6 +179,12 @@ class ToolkitConfig:
     pristine_cell_path: str
     defect_cell_path: Optional[str] = None
     excited_cell_path: Optional[str] = None
+    excited_state_method: str = "synthetic"  # "synthetic", "spin_proxy", or "file"
+    excited_state_tot_magnetization: Optional[int] = None
+    excited_state_spin_multiplicity: Optional[int] = None
+    ground_state_relax_method: str = "auto"  # "auto", "foundation", or "dft"
+    relax_forc_conv_thr: float = 1.0e-3
+    relax_nstep: int = 100
     excited_state_displacement: Optional[float] = None  # Angstrom
     defect_type: str = "vacancy"  # "vacancy", "substitutional", or "file"
     defect_site_element: Optional[str] = None
@@ -275,9 +297,14 @@ class ToolkitConfig:
         else:
             self.tot_magnetization = max(0, int(self.spin_multiplicity) - 1)
 
+        if self.excited_state_tot_magnetization is not None:
+            self.excited_state_spin_multiplicity = int(self.excited_state_tot_magnetization) + 1
+        elif self.excited_state_spin_multiplicity is not None:
+            self.excited_state_tot_magnetization = max(0, int(self.excited_state_spin_multiplicity) - 1)
+
         if self.zpl_energy_eV is not None and self.zpl_energy_eV <= 0:
             logger.info(
-                f"[i] zpl_energy_eV={self.zpl_energy_eV} is non-positive; treating as None for automatic derivation."
+                f"[i] zpl_energy_eV={self.zpl_energy_eV} <= 0; auto-deriving ZPL from potential surfaces."
             )
             self.zpl_energy_eV = None
 
@@ -395,6 +422,24 @@ class ToolkitConfig:
                 f"Invalid temperature_plot_mode: '{self.temperature_plot_mode}'. "
                 "Must be 'combined', 'individual', or 'both'."
             )
+
+        if self.excited_state_method.lower() not in ("synthetic", "spin_proxy", "file"):
+            raise ValueError(
+                f"Invalid excited_state_method: '{self.excited_state_method}'. "
+                "Must be 'synthetic', 'spin_proxy', or 'file'."
+            )
+
+        if self.ground_state_relax_method.lower() not in ("auto", "foundation", "dft"):
+            raise ValueError(
+                f"Invalid ground_state_relax_method: '{self.ground_state_relax_method}'. "
+                "Must be 'auto', 'foundation', or 'dft'."
+            )
+
+        if float(self.relax_forc_conv_thr) <= 0.0:
+            raise ValueError(f"Invalid relax_forc_conv_thr: {self.relax_forc_conv_thr}. Must be > 0.")
+
+        if int(self.relax_nstep) < 1:
+            raise ValueError(f"Invalid relax_nstep: {self.relax_nstep}. Must be >= 1.")
 
         if self.lineshape_y_scale.lower() not in ("linear", "log"):
             raise ValueError(

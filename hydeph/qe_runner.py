@@ -87,12 +87,22 @@ def inspect_upf_metadata(upf_path: str) -> Dict[str, Any]:
 _PARITY_WARNED_KEYS = set()
 
 
-def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calculation: str = "scf", retry: bool = False):
+def write_qe_input(
+    atoms: Atoms,
+    pw_in_path: str,
+    config: ToolkitConfig,
+    calculation: str = "scf",
+    retry: bool = False,
+    tot_magnetization: Optional[int] = None,
+    nspin: Optional[int] = None,
+):
     """Writes a Quantum ESPRESSO `pw.x` input card.
     
     Uses universal ASE atomic masses, sets `K_POINTS gamma` for (1, 1, 1),
     auto-detects Norm-Conserving UPF cutoffs (`ecutrho = 4 * ecutwfc`),
     validates spin-multiplicity parity against total valence electrons,
+    disables symmetry reduction via `nosym = .true.` for distorted defect supercells,
+    supports `calculation = 'relax'` with `&IONS` BFGS dynamics,
     and trims excess empty conduction bands (`nbnd`) and Davidson subspace size.
     """
     cell = atoms.get_cell()
@@ -117,13 +127,17 @@ def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calcula
     if all_nc and config.ecutrho == 320.0 and (4.0 * config.ecutwfc) < config.ecutrho:
         eff_ecutrho = 4.0 * float(config.ecutwfc)
 
-    tot_mag = int(config.spin_multiplicity - 1) if config.spin_polarized else 0
+    if tot_magnetization is not None:
+        tot_mag = int(tot_magnetization)
+    else:
+        tot_mag = int(config.spin_multiplicity - 1) if config.spin_polarized else 0
+    eff_nspin = nspin if nspin is not None else (2 if (config.spin_polarized or tot_mag > 0) else 1)
     eff_nbnd: Optional[int] = int(config.nbnd) if getattr(config, "nbnd", None) is not None else None
 
     if all_z:
         total_nelec = sum(float(meta_by_sym[s]["z_valence"]) for s in symbols) - float(config.tot_charge)
         nelec_int = int(round(total_nelec))
-        if config.spin_polarized and abs(total_nelec - nelec_int) < 1e-4:
+        if eff_nspin == 2 and abs(total_nelec - nelec_int) < 1e-4:
             if (nelec_int - tot_mag) % 2 != 0:
                 warn_key = (nelec_int, tot_mag, getattr(config, "auto_spin_parity", True))
                 if getattr(config, "auto_spin_parity", True):
@@ -146,7 +160,7 @@ def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calcula
                         )
 
         if eff_nbnd is None and abs(total_nelec - nelec_int) < 1e-4 and nelec_int > 0:
-            n_occ_max = (nelec_int + abs(tot_mag)) // 2 if config.spin_polarized else (nelec_int + 1) // 2
+            n_occ_max = (nelec_int + abs(tot_mag)) // 2 if eff_nspin == 2 else (nelec_int + 1) // 2
             buffer_bands = max(6, min(16, int(np.ceil(0.05 * n_occ_max))))
             eff_nbnd = n_occ_max + buffer_bands
 
@@ -159,6 +173,8 @@ def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calcula
     david_line = f"\n  diago_david_ndim = {int(david_ndim)}," if (diagonalization.startswith("david") and david_ndim) else ""
     nbnd_line = f"\n  nbnd = {eff_nbnd}," if eff_nbnd is not None else ""
     retry_lines = "\n  mixing_mode = 'local-TF',\n  electron_maxstep = 150," if retry else ""
+    forc_conv_line = f"\n  forc_conv_thr = {float(getattr(config, 'relax_forc_conv_thr', 1.0e-3))}," if calculation == "relax" else ""
+    nstep_line = f"\n  nstep = {int(getattr(config, 'relax_nstep', 100))}," if calculation == "relax" else ""
 
     header = f"""&CONTROL
   calculation = '{calculation}',
@@ -167,7 +183,7 @@ def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calcula
   outdir = './tmp',
   prefix = 'calc',
   tprnfor = .true.,
-  tstress = .false.,
+  tstress = .false.,{forc_conv_line}{nstep_line}
   disk_io = 'none'
 /
 &SYSTEM
@@ -176,7 +192,8 @@ def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calcula
   ntyp = {len(unique_symbols)},{nbnd_line}
   ecutwfc = {config.ecutwfc},
   ecutrho = {eff_ecutrho},
-  nspin = {2 if config.spin_polarized else 1},
+  nosym = .true.,
+  nspin = {eff_nspin},
   tot_magnetization = {tot_mag},
   tot_charge = {config.tot_charge},
   occupations = 'smearing',
@@ -189,7 +206,14 @@ def write_qe_input(atoms: Atoms, pw_in_path: str, config: ToolkitConfig, calcula
   mixing_ndim = {mixing_ndim},
   diagonalization = '{diagonalization}',{david_line}{retry_lines}
 /
-ATOMIC_SPECIES
+"""
+    if calculation == "relax":
+        header += """&IONS
+  ion_dynamics = 'bfgs'
+/
+"""
+
+    header += """ATOMIC_SPECIES
 """
     for s in unique_symbols:
         upf_name = os.path.basename(config.pseudopotentials[s])
@@ -260,6 +284,109 @@ def parse_qe_output(pw_out_path: str) -> Tuple[Optional[float], Optional[np.ndar
 
     f_arr = np.array(forces_list, dtype=float) if forces_list else None
     return energy_ev, f_arr
+
+
+def parse_qe_relaxation_output(pw_out_path: str, template_atoms: Atoms) -> Tuple[Optional[Atoms], Optional[float]]:
+    """Parses the final relaxed geometry and total energy from a Quantum ESPRESSO `pw.x` relaxation output.
+    
+    Parameters
+    ----------
+    pw_out_path : str
+        Path to `pw.out`.
+    template_atoms : Atoms
+        Reference Atoms object containing cell, symbols, and pbc.
+        
+    Returns
+    -------
+    Tuple[Optional[Atoms], Optional[float]]
+        `(relaxed_atoms, energy_eV)`, or `(None, None)` if relaxation failed or output is missing.
+    """
+    if not os.path.isfile(pw_out_path):
+        return None, None
+
+    final_positions: List[List[float]] = []
+    energy_ev: Optional[float] = None
+    in_final_coords = False
+    in_atomic_positions = False
+
+    try:
+        with open(pw_out_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except Exception:
+        return None, None
+
+    # Pass 1: Check for "Begin final coordinates" block (standard upon BFGS completion)
+    for line in lines:
+        if "Final energy" in line or "!    total energy" in line:
+            parts = line.split("=")
+            if len(parts) > 1:
+                try:
+                    e_ry = float(parts[1].replace("Ry", "").strip())
+                    energy_ev = e_ry * RY_TO_EV
+                except ValueError:
+                    pass
+        if "Begin final coordinates" in line:
+            in_final_coords = True
+            final_positions = []
+            continue
+        if in_final_coords:
+            if "End final coordinates" in line:
+                in_final_coords = False
+                break
+            if "ATOMIC_POSITIONS" in line:
+                in_atomic_positions = True
+                continue
+            if in_atomic_positions:
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    try:
+                        x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                        final_positions.append([x, y, z])
+                    except ValueError:
+                        pass
+
+    # Pass 2 fallback: If "Begin final coordinates" was omitted, retrieve the final ATOMIC_POSITIONS block
+    if len(final_positions) != len(template_atoms):
+        blocks: List[List[List[float]]] = []
+        cur_block: List[List[float]] = []
+        capturing = False
+        for line in lines:
+            if "ATOMIC_POSITIONS" in line:
+                if cur_block:
+                    blocks.append(cur_block)
+                cur_block = []
+                capturing = True
+                continue
+            if capturing:
+                if line.startswith("/") or line.startswith("&") or "End final" in line or "Writing" in line:
+                    capturing = False
+                    if cur_block:
+                        blocks.append(cur_block)
+                    cur_block = []
+                    continue
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    try:
+                        x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                        cur_block.append([x, y, z])
+                    except ValueError:
+                        pass
+        if cur_block:
+            blocks.append(cur_block)
+        for b in reversed(blocks):
+            if len(b) == len(template_atoms):
+                final_positions = b
+                break
+
+    if len(final_positions) != len(template_atoms):
+        return None, None
+
+    at_relaxed = template_atoms.copy()
+    at_relaxed.positions = np.array(final_positions, dtype=float)
+    if energy_ev is not None:
+        at_relaxed.info["energy"] = energy_ev
+
+    return at_relaxed, energy_ev
 
 
 def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, float]]:
@@ -695,6 +822,165 @@ class QERunner:
             for k, v in gap_info.items():
                 at_labeled.info[f"dft_{k}"] = v
         return at_labeled
+
+    def run_relaxation(
+        self,
+        atoms: Atoms,
+        calc_dir: str,
+        tot_magnetization: Optional[int] = None,
+        nspin: Optional[int] = None,
+        timeout_s: Optional[float] = None,
+        force_rerun: bool = False,
+    ) -> Atoms:
+        """Executes or reuses a Quantum ESPRESSO BFGS geometry relaxation calculation.
+        
+        Parameters
+        ----------
+        atoms : Atoms
+            Initial geometry to optimize.
+        calc_dir : str
+            Working directory for the QE relaxation.
+        tot_magnetization : int, optional
+            Target spin magnetization (2S).
+        nspin : int, optional
+            1 for unpolarized, 2 for spin-polarized.
+        timeout_s : float, optional
+            Calculation timeout in seconds.
+        force_rerun : bool
+            If True, re-runs relaxation even if converged `pw.out` exists.
+            
+        Returns
+        -------
+        Atoms
+            Relaxed geometry with `energy` in `info`.
+        """
+        os.makedirs(calc_dir, exist_ok=True)
+        pw_in = os.path.join(calc_dir, "pw.in")
+        pw_out = os.path.join(calc_dir, "pw.out")
+        eff_timeout = timeout_s if timeout_s is not None else self.timeout_s
+
+        if not force_rerun and os.path.isfile(pw_out):
+            at_rel, e_ev = parse_qe_relaxation_output(pw_out, atoms)
+            if at_rel is not None:
+                logger.info(f"      [Cache hit] Reusing converged QE relaxation in {calc_dir}")
+                return at_rel
+
+        # Clean scratch tmp/
+        tmp_dir = os.path.join(calc_dir, "tmp")
+        if os.path.isdir(tmp_dir):
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        write_qe_input(
+            atoms,
+            pw_in,
+            self.config,
+            calculation="relax",
+            tot_magnetization=tot_magnetization,
+            nspin=nspin,
+        )
+
+        cmd_args = build_qe_command(
+            self.pw_exe,
+            pw_in="pw.in",
+            n_procs=self.n_procs,
+            mpi_command=self.mpi_command,
+            mpi_args=self.mpi_args,
+        )
+
+        env = os.environ.copy()
+        omp_threads = str(self._resolve_omp_threads())
+        env.update({
+            "OMP_NUM_THREADS": omp_threads,
+            "MKL_NUM_THREADS": omp_threads,
+            "OPENBLAS_NUM_THREADS": omp_threads,
+            "VECLIB_MAXIMUM_THREADS": omp_threads,
+            "NUMEXPR_NUM_THREADS": "1",
+        })
+        if os.path.isabs(self.pw_exe):
+            pw_dir = os.path.dirname(self.pw_exe)
+            if pw_dir:
+                env["PATH"] = pw_dir + os.pathsep + env.get("PATH", "")
+
+        logger.info(f"      [pw relax] Starting QE BFGS relaxation in {calc_dir} (tot_magnetization={tot_magnetization})...")
+        t_start = time.time()
+        last_step = 0
+        last_iter = 0
+
+        try:
+            with open(pw_out, "wb") as f_out:
+                proc = subprocess.Popen(
+                    cmd_args,
+                    stdout=f_out,
+                    stderr=subprocess.STDOUT,
+                    cwd=calc_dir,
+                    env=env,
+                )
+
+                sleep_interval = min(0.5, max(0.05, float(eff_timeout) / 5.0 if eff_timeout else 0.5))
+                while proc.poll() is None:
+                    now = time.time()
+                    if eff_timeout is not None and (now - t_start) > float(eff_timeout):
+                        try:
+                            proc.kill()
+                            proc.wait()
+                        except Exception:
+                            pass
+                        at_partial, e_part = parse_qe_relaxation_output(pw_out, atoms)
+                        if at_partial is not None:
+                            logger.warning(
+                                f"      [pw relax] Relaxation reached timeout ({float(eff_timeout):.1f}s) but successfully "
+                                f"recovered latest BFGS geometry ({at_partial.info.get('energy', 0.0):.4f} eV)."
+                            )
+                            return at_partial
+                        raise RuntimeError(f"QE relaxation timed out after {float(eff_timeout):.1f}s in {calc_dir}")
+                    time.sleep(sleep_interval)
+                    if os.path.isfile(pw_out):
+                        try:
+                            with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
+                                lines = f.readlines()
+                            for line in reversed(lines[-30:]):
+                                if "number of scf cycles" in line or "iteration #" in line:
+                                    m = re.search(r"iteration #\s+(\d+)", line)
+                                    if m and int(m.group(1)) != last_iter:
+                                        last_iter = int(m.group(1))
+                                elif "step" in line and ("search" in line or "new bfgs" in line):
+                                    m = re.search(r"step\s+(\d+)", line)
+                                    if m and int(m.group(1)) != last_step:
+                                        last_step = int(m.group(1))
+                                        logger.info(f"      [pw relax] BFGS Step {last_step}...")
+                        except Exception:
+                            pass
+                proc.wait()
+        except OSError as exc:
+            raise RuntimeError(f"QE relaxation failed in {calc_dir}: {exc}") from exc
+
+        at_rel, e_ev = parse_qe_relaxation_output(pw_out, atoms)
+        if at_rel is None:
+            tail_msg = ""
+            if os.path.isfile(pw_out):
+                try:
+                    with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
+                        tail_msg = "".join(f.readlines()[-25:])
+                except Exception:
+                    pass
+            win_msg = ""
+            if is_windows():
+                win_msg = (
+                    "\n[Windows Notice] If Quantum ESPRESSO failed to run, please verify:"
+                    "\n  1. Precompiled Windows QE binaries are unzipped and pw_exe / bin/ is specified or on PATH."
+                    "\n  2. Microsoft MPI is installed (provides mpiexec.exe)."
+                    f"\n  3. Resolved pw_exe: '{self.pw_exe}'"
+                    f"\n  4. Execution command was: {' '.join(str(c) for c in cmd_args)}"
+                )
+            raise RuntimeError(f"QE relaxation failed in {calc_dir}.\n{tail_msg}{win_msg}")
+
+        dur = time.time() - t_start
+        logger.info(f"      [pw relax] Completed in {dur:.1f}s | Energy = {e_ev:.4f} eV" if e_ev else f"      [pw relax] Completed in {dur:.1f}s")
+        return at_rel
 
     def _obtain_replacement_entry(
         self, stype, unused_by_type, frames, dft_dir, sampler, at_gs, type_total_counts, next_cand_idx

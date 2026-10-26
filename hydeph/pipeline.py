@@ -46,7 +46,16 @@ def run_pipeline(
     config.validate()
 
     logger.info("\n[STEP 1/6] Defect Construction & Geometry Optimization...")
-    builder = DefectBuilder(config)
+    qe = QERunner(
+        config,
+        n_procs=eff_n_procs,
+        pw_exe=config.pw_exe,
+        mpi_command=config.mpi_command,
+        mpi_args=config.mpi_args,
+        n_workers=eff_n_workers,
+        timeout_s=config.qe_timeout_s,
+    )
+    builder = DefectBuilder(config, calc_qe=qe)
     shared_foundation = builder.calc_foundation
     pristine_sc, defect_sc = builder.build_supercell_and_defect()
     at_gs = builder.relax_ground_state(defect_sc)
@@ -57,15 +66,6 @@ def run_pipeline(
     candidate_frames = sampler.assemble_candidate_dataset(at_gs, at_es)
 
     logger.info("\n[STEP 3/6] High-Fidelity DFT Labeling (Quantum ESPRESSO)...")
-    qe = QERunner(
-        config,
-        n_procs=eff_n_procs,
-        pw_exe=config.pw_exe,
-        mpi_command=config.mpi_command,
-        mpi_args=config.mpi_args,
-        n_workers=eff_n_workers,
-        timeout_s=config.qe_timeout_s,
-    )
     labeled_frames = qe.label_all_frames(
         candidate_frames,
         max_frames=eff_max_dft,

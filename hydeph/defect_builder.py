@@ -1,4 +1,4 @@
-"""Supercell tiling, defect site detection, and foundation-potential geometry relaxation."""
+"""Supercell construction, defect embedding, and ground- and excited-state geometry optimization."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def get_defect_center(atoms: Atoms) -> np.ndarray:
 class DefectBuilder:
     """Constructs pristine and defect supercells, embeds unit cells, and optimizes geometries."""
 
-    def __init__(self, config: ToolkitConfig, calc_foundation=None):
+    def __init__(self, config: ToolkitConfig, calc_foundation=None, calc_qe=None):
         self.config = config
         os.makedirs(self.config.workspace_dir, exist_ok=True)
         if calc_foundation is not None:
@@ -61,7 +61,15 @@ class DefectBuilder:
                 self.calc_foundation = None
         else:
             self.calc_foundation = None
+        self.calc_qe = calc_qe
         self.vac_pos: Optional[np.ndarray] = None
+
+    def _get_qe_runner(self):
+        """Initializes or retrieves the Quantum ESPRESSO runner."""
+        if self.calc_qe is None:
+            from .qe_runner import QERunner
+            self.calc_qe = QERunner(self.config)
+        return self.calc_qe
 
     def _detect_supercell_defect_pos(self, pristine_sc: Atoms, defect_sc: Atoms) -> Tuple[np.ndarray, list]:
         """Detects the defect coordinate(s) in a pre-built defect supercell relative to `pristine_sc`."""
@@ -288,7 +296,7 @@ class DefectBuilder:
         return supercell, defect_pos
 
     def relax_ground_state(self, defect_sc: Atoms, force_relax: bool = False) -> Atoms:
-        """Relaxes ground-state geometry using the foundation potential, or reuses cached `relaxed_gs.xyz`."""
+        """Relaxes ground-state geometry using DFT or foundation potential, or reuses cached `relaxed_gs.xyz`."""
         gs_path = os.path.join(self.config.workspace_dir, "relaxed_gs.xyz")
         force = force_relax or self.config.force_resample
         center = self.vac_pos if self.vac_pos is not None else get_defect_center(defect_sc)
@@ -306,15 +314,45 @@ class DefectBuilder:
             except Exception:
                 pass
 
-        logger.info(f"\n[-] Optimizing Ground State geometry using foundation potential...")
+        gs_method = getattr(self.config, "ground_state_relax_method", "auto").lower()
+        es_method = getattr(self.config, "excited_state_method", "synthetic").lower()
+        use_dft = (gs_method == "dft") or (gs_method == "auto" and es_method == "spin_proxy")
+
+        if use_dft:
+            logger.info("\n[-] Optimizing Ground State geometry using Quantum ESPRESSO...")
+            try:
+                qe_runner = self._get_qe_runner()
+                gs_calc_dir = os.path.join(self.config.workspace_dir, "qe_gs_relax")
+                tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
+                at_gs = qe_runner.run_relaxation(
+                    defect_sc,
+                    calc_dir=gs_calc_dir,
+                    tot_magnetization=tot_mag,
+                    nspin=2 if (self.config.spin_polarized or tot_mag > 0) else 1,
+                    force_rerun=force,
+                )
+                at_gs.info["defect_center"] = np.asarray(center, dtype=float)
+                ase.io.write(gs_path, at_gs)
+                logger.info(f"[+] Ground State DFT relaxation completed -> {gs_path}")
+                return at_gs
+            except Exception as e:
+                logger.warning(f"[!] Ground State DFT relaxation failed or unavailable: {e}")
+                if self.calc_foundation is None:
+                    raise
+                logger.warning("    Falling back to foundation potential for Ground State relaxation...")
+
+        logger.info("\n[-] Optimizing Ground State geometry using foundation potential...")
         at_gs = defect_sc.copy()
         at_gs.calc = self.calc_foundation
         opt = BFGS(at_gs, logfile=None)
         opt.run(fmax=0.01, steps=200)
 
+        energy_val = float(at_gs.get_potential_energy())
         at_gs.info["defect_center"] = np.asarray(center, dtype=float)
+        at_gs.info["energy"] = energy_val
+        at_gs.calc = None
         ase.io.write(gs_path, at_gs)
-        logger.info(f"[+] Ground State relaxation completed: E = {at_gs.get_potential_energy():.4f} eV")
+        logger.info(f"[+] Ground State relaxation completed: E = {energy_val:.4f} eV")
         return at_gs
 
     def generate_excited_state_geometry(self, at_gs: Atoms, force_relax: bool = False) -> Tuple[Atoms, float]:
@@ -361,6 +399,47 @@ class DefectBuilder:
                         return cached_es, dq_fc
             except Exception:
                 pass
+
+        es_method = getattr(self.config, "excited_state_method", "synthetic").lower()
+
+        if es_method == "spin_proxy":
+            logger.info("\n[-] Optimizing Optical Excited State geometry using Quantum ESPRESSO spin-proxy method...")
+            try:
+                qe_runner = self._get_qe_runner()
+                es_calc_dir = os.path.join(self.config.workspace_dir, "qe_es_relax")
+
+                # Target spin magnetization: explicit or proxy M_es = M_0 + 2
+                if getattr(self.config, "excited_state_tot_magnetization", None) is not None:
+                    target_mag = int(self.config.excited_state_tot_magnetization)
+                else:
+                    gs_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
+                    target_mag = gs_mag + 2
+
+                logger.info(
+                    f"    [Spin Proxy] Auto-selected excited state tot_magnetization = {target_mag} "
+                    f"(proxy spin multiplicity = {target_mag + 1})"
+                )
+
+                at_es = qe_runner.run_relaxation(
+                    at_gs,
+                    calc_dir=es_calc_dir,
+                    tot_magnetization=target_mag,
+                    nspin=2,
+                    force_rerun=force,
+                )
+
+                dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
+                at_es.positions = at_gs.positions + dr_fc
+                at_es.info["defect_center"] = np.asarray(center, dtype=float)
+                ase.io.write(es_path, at_es)
+
+                m = at_gs.get_masses()
+                dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
+                logger.info(f"[+] Optical Excited State DFT relaxation completed (Franck-Condon Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
+                return at_es, dq_fc
+            except Exception as e:
+                logger.warning(f"[!] Spin-proxy DFT relaxation failed or unavailable: {e}")
+                logger.warning("    Falling back to synthetic breathing displacement...")
 
         at_es = at_gs.copy()
         disp_vecs = mic_displacement(at_es.positions, center, at_es.cell)
@@ -433,6 +512,7 @@ class DefectBuilder:
         dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
         at_es.positions = at_gs.positions + dr_fc
         at_es.info["defect_center"] = np.asarray(center, dtype=float)
+        at_es.calc = None
         ase.io.write(es_path, at_es)
 
         m = at_gs.get_masses()
