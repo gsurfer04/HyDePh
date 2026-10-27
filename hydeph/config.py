@@ -5,10 +5,79 @@ from __future__ import annotations
 import os
 import json
 import logging
+import re
 from dataclasses import dataclass, field, fields
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, Iterable, Set
 
 logger = logging.getLogger(__name__)
+
+
+def discover_pseudopotential(element: str, pseudo_dir: str) -> Optional[str]:
+    """Auto-discovers the best matching UPF pseudopotential for an element in pseudo_dir.
+
+    Prioritizes scalar-relativistic pseudopotentials over fully-relativistic (FR)
+    variants (as collinear spin-polarized DFT calculations require scalar-relativistic
+    potentials) and selects the latest version available.
+
+    Parameters
+    ----------
+    element : str
+        Chemical element symbol (e.g. 'Cs', 'I', 'C', 'Si').
+    pseudo_dir : str
+        Directory path to search for UPF files.
+
+    Returns
+    -------
+    str or None
+        Filename of the best matching UPF file, or None if not found.
+    """
+    if not pseudo_dir or not os.path.isdir(pseudo_dir):
+        return None
+
+    clean_elem = element.strip()
+    if not clean_elem:
+        return None
+
+    # Matches filenames like 'C.upf', 'C_ONCV_PBE-1.2.upf', 'Cs_ONCV_PBE-1.2.upf'
+    # but ensures element boundary: 'C' will NOT match 'Cs', 'Cl', 'Ca', etc.
+    pattern = re.compile(rf"^{re.escape(clean_elem)}([_\.\-].*)?\.upf$", re.IGNORECASE)
+    candidates: List[str] = []
+
+    try:
+        filenames = os.listdir(pseudo_dir)
+        for fname in filenames:
+            if pattern.match(fname):
+                full_path = os.path.join(pseudo_dir, fname)
+                if os.path.isfile(full_path):
+                    candidates.append(fname)
+    except OSError:
+        pass
+
+    # If not found directly in pseudo_dir, search subdirectories (e.g., SSSP, ONCVPSP)
+    if not candidates:
+        try:
+            for root, _dirs, files in os.walk(pseudo_dir):
+                for fname in files:
+                    if pattern.match(fname):
+                        rel = os.path.relpath(os.path.join(root, fname), pseudo_dir)
+                        candidates.append(rel)
+        except OSError:
+            pass
+
+    if not candidates:
+        return None
+
+    def is_fr(f: str) -> bool:
+        base = os.path.basename(f)
+        return bool(re.search(r"([_\.\-]fr([_\.\-]|$))", base, re.IGNORECASE))
+
+    def natural_sort_key(s: str):
+        return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", s)]
+
+    non_fr = [c for c in candidates if not is_fr(c)]
+    pool = non_fr if non_fr else candidates
+    pool.sort(key=natural_sort_key)
+    return pool[-1]
 
 
 @dataclass
@@ -383,6 +452,71 @@ class ToolkitConfig:
 
         return cls.from_dict(data)
 
+    def get_system_elements(self) -> List[str]:
+        """Detect all unique chemical elements present in configured structures and defect settings."""
+        elements: Set[str] = set()
+
+        for path in (self.pristine_cell_path, self.defect_cell_path, self.excited_cell_path):
+            if path and os.path.isfile(path):
+                try:
+                    import ase.io
+                    atoms = ase.io.read(path)
+                    elements.update(atoms.get_chemical_symbols())
+                except Exception as e:
+                    logger.debug(f"Could not read structure from '{path}' for element discovery: {e}")
+
+        if self.substitutional_element:
+            elements.add(self.substitutional_element.strip())
+
+        if self.defect_site_element:
+            cleaned = self.defect_site_element.replace("->", " ").replace(":", " ").replace("-", " ")
+            for part in cleaned.split():
+                if part.isalpha():
+                    elements.add(part.strip())
+
+        elements.update(self.pseudopotentials.keys())
+        return sorted(list(elements))
+
+    def auto_discover_pseudopotentials(
+        self, elements: Optional[Iterable[str]] = None
+    ) -> Dict[str, str]:
+        """Auto-discovers UPF pseudopotentials for elements from pseudo_dir.
+
+        Parameters
+        ----------
+        elements : iterable of str, optional
+            List of element symbols to discover. If None, auto-detects elements
+            from pristine/defect structures and defect specifications.
+
+        Returns
+        -------
+        dict of str to str
+            Mapping of newly discovered element symbols to pseudopotential paths.
+        """
+        if not self.pseudo_dir or not os.path.isdir(self.pseudo_dir):
+            return {}
+
+        targets = list(elements) if elements is not None else self.get_system_elements()
+        discovered: Dict[str, str] = {}
+        for elem in targets:
+            if not elem:
+                continue
+            # Do not overwrite user-specified pseudopotentials
+            if elem in self.pseudopotentials and self.pseudopotentials[elem]:
+                continue
+            upf_file = discover_pseudopotential(elem, self.pseudo_dir)
+            if upf_file:
+                full_upf = (
+                    upf_file
+                    if os.path.isabs(upf_file)
+                    else os.path.join(self.pseudo_dir, upf_file)
+                )
+                self.pseudopotentials[elem] = full_upf
+                discovered[elem] = full_upf
+                logger.info(f"[+] Auto-discovered pseudopotential for '{elem}': {os.path.basename(full_upf)}")
+
+        return discovered
+
     def validate(self):
         """Validate input files and configuration options."""
         if not os.path.isfile(self.pristine_cell_path):
@@ -399,6 +533,9 @@ class ToolkitConfig:
                 f"Foundation potential not found: {self.foundation_potential_path}. "
                 "Provide a valid path to a GPUMD foundation NEP model file (e.g. nep89_20250409.txt)."
             )
+
+        # Auto-discover any missing pseudopotentials for system elements
+        self.auto_discover_pseudopotentials()
         
         for elem, upf in self.pseudopotentials.items():
             full_upf = upf if os.path.isabs(upf) else os.path.join(self.pseudo_dir, upf)

@@ -34,6 +34,8 @@ def run_pipeline(
     eff_n_procs = n_procs_qe if n_procs_qe is not None else config.n_procs_qe
     eff_n_workers = n_workers_qe if n_workers_qe is not None else config.n_workers_qe
 
+    config.validate()
+
     logger.info("=" * 78)
     logger.info("      AUTOMATED COLOR-CENTER DELTA-NEP WORKFLOW PIPELINE")
     logger.info("=" * 78)
@@ -42,8 +44,6 @@ def run_pipeline(
     logger.info(f"Temperatures of interest: {config.temperatures} K")
     logger.info(f"Pseudopotentials: {config.pseudopotentials}")
     logger.info("=" * 78)
-
-    config.validate()
 
     logger.info("\n[STEP 1/6] Defect Construction & Geometry Optimization...")
     qe = QERunner(

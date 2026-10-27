@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 # Configure root hydeph package logger
 logger = logging.getLogger("hydeph")
@@ -18,7 +18,7 @@ if not logger.handlers:
     logger.addHandler(_default_handler)
     logger.setLevel(logging.INFO)
 
-from .config import ToolkitConfig
+from .config import ToolkitConfig, discover_pseudopotential
 from .defect_builder import DefectBuilder
 from .frame_sampler import FrameSampler
 from .qe_runner import QERunner
@@ -30,6 +30,7 @@ from .pipeline import run_pipeline
 
 __all__ = [
     "ToolkitConfig",
+    "discover_pseudopotential",
     "DefectBuilder",
     "FrameSampler",
     "QERunner",

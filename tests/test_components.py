@@ -642,5 +642,115 @@ def test_assemble_candidate_dataset_handles_stale_calculator_and_energy(tmp_path
         assert "energy" not in fr.info
 
 
+def test_discover_pseudopotential(tmp_path):
+    """Tests UPF pseudopotential discovery, version sorting, and FR filtering."""
+    from hydeph.config import discover_pseudopotential
+
+    pseudo_dir = tmp_path / "pseudo"
+    pseudo_dir.mkdir()
+
+    # Create dummy UPF files
+    (pseudo_dir / "Cs_ONCV_PBE-1.0.upf").write_text("<UPF>")
+    (pseudo_dir / "Cs_ONCV_PBE-1.1.upf").write_text("<UPF>")
+    (pseudo_dir / "Cs_ONCV_PBE-1.2.upf").write_text("<UPF>")
+    (pseudo_dir / "Cs_ONCV_PBE_FR-1.0.upf").write_text("<UPF>")
+    (pseudo_dir / "C_ONCV_PBE-1.2.upf").write_text("<UPF>")
+    (pseudo_dir / "I_ONCV_PBE-1.2.upf").write_text("<UPF>")
+    (pseudo_dir / "Bi_ONCV_PBE_FR-1.0.upf").write_text("<UPF>")
+
+    # Cs should pick scalar-relativistic highest version 1.2, ignoring 1.0, 1.1, and FR
+    assert discover_pseudopotential("Cs", str(pseudo_dir)) == "Cs_ONCV_PBE-1.2.upf"
+
+    # 'C' should NOT match 'Cs_ONCV_PBE-1.2.upf'
+    assert discover_pseudopotential("C", str(pseudo_dir)) == "C_ONCV_PBE-1.2.upf"
+
+    # 'Bi' has only an FR file, so it falls back to the FR file
+    assert discover_pseudopotential("Bi", str(pseudo_dir)) == "Bi_ONCV_PBE_FR-1.0.upf"
+
+    # Non-existent element returns None
+    assert discover_pseudopotential("Fe", str(pseudo_dir)) is None
+
+    # Subdirectory discovery
+    sub_dir = pseudo_dir / "sssp"
+    sub_dir.mkdir()
+    (sub_dir / "Si.pbe-n-rrkjus_psl.1.0.0.UPF").write_text("<UPF>")
+    disc_si = discover_pseudopotential("Si", str(pseudo_dir))
+    assert disc_si is not None
+    assert "Si.pbe-n-rrkjus_psl.1.0.0.UPF" in disc_si
+
+
+def test_toolkit_config_auto_discover_pseudopotentials(tmp_path):
+    """Tests ToolkitConfig auto-discovery of pseudopotentials during validate()."""
+    import ase.io
+
+    pseudo_dir = tmp_path / "pseudo"
+    pseudo_dir.mkdir()
+    (pseudo_dir / "Cs_ONCV_PBE-1.2.upf").write_text("<UPF>")
+    (pseudo_dir / "I_ONCV_PBE-1.2.upf").write_text("<UPF>")
+    (pseudo_dir / "Cs_custom.upf").write_text("<UPF>")
+
+    pristine_file = tmp_path / "pristine.xyz"
+    at_pristine = Atoms("CsI", positions=[[0, 0, 0], [2, 2, 2]], cell=[5, 5, 5], pbc=True)
+    ase.io.write(str(pristine_file), at_pristine)
+
+    pot_file = tmp_path / "nep.txt"
+    pot_file.write_text("nep")
+
+    # Config without explicit pseudopotentials
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(pot_file),
+        pseudo_dir=str(pseudo_dir),
+    )
+    assert cfg.pseudopotentials == {}
+    cfg.validate()
+
+    # validate() should have auto-discovered Cs and I
+    assert "Cs" in cfg.pseudopotentials
+    assert "I" in cfg.pseudopotentials
+    assert os.path.basename(cfg.pseudopotentials["Cs"]) == "Cs_ONCV_PBE-1.2.upf"
+    assert os.path.basename(cfg.pseudopotentials["I"]) == "I_ONCV_PBE-1.2.upf"
+
+    # Config with partial custom pseudopotential preserved
+    cfg2 = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(pot_file),
+        pseudo_dir=str(pseudo_dir),
+        pseudopotentials={"Cs": "Cs_custom.upf"},
+    )
+    cfg2.validate()
+    assert os.path.basename(cfg2.pseudopotentials["Cs"]) == "Cs_custom.upf"
+    assert os.path.basename(cfg2.pseudopotentials["I"]) == "I_ONCV_PBE-1.2.upf"
+
+
+def test_write_qe_input_auto_discovery_and_error_handling(tmp_path):
+    """Tests write_qe_input auto-discovering UPFs and raising helpful KeyError when missing."""
+    from hydeph.qe_runner import write_qe_input
+
+    pseudo_dir = tmp_path / "pseudo"
+    pseudo_dir.mkdir()
+    (pseudo_dir / "Cs_ONCV_PBE-1.2.upf").write_text("<UPF>")
+    (pseudo_dir / "I_ONCV_PBE-1.2.upf").write_text("<UPF>")
+
+    atoms = Atoms("CsI", positions=[[0, 0, 0], [2, 2, 2]], cell=[5, 5, 5], pbc=True)
+    cfg = ToolkitConfig(
+        pristine_cell_path="dummy.xyz",
+        pseudo_dir=str(pseudo_dir),
+        pseudopotentials={},
+    )
+
+    out_file = tmp_path / "pw.in"
+    write_qe_input(atoms, str(out_file), cfg)
+    content = out_file.read_text()
+    assert "Cs_ONCV_PBE-1.2.upf" in content
+    assert "I_ONCV_PBE-1.2.upf" in content
+
+    # Test missing element produces informative KeyError
+    atoms_missing = Atoms("He", positions=[[0, 0, 0]], cell=[5, 5, 5], pbc=True)
+    with pytest.raises(KeyError, match="Pseudopotential for element 'He' was not specified"):
+        write_qe_input(atoms_missing, str(out_file), cfg)
+
+
+
 
 

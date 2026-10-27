@@ -18,7 +18,7 @@ from ase import Atoms
 from ase.units import Ry, Bohr
 from ase.data import atomic_masses, atomic_numbers
 
-from .config import ToolkitConfig
+from .config import ToolkitConfig, discover_pseudopotential
 
 try:
     from tqdm import tqdm
@@ -117,6 +117,13 @@ def write_qe_input(
     meta_by_sym: Dict[str, Dict[str, Any]] = {}
     for s in unique_symbols:
         upf_rel = config.pseudopotentials.get(s, "")
+        if not upf_rel and config.pseudo_dir:
+            disc = discover_pseudopotential(s, config.pseudo_dir)
+            if disc:
+                full_disc = disc if os.path.isabs(disc) else os.path.join(config.pseudo_dir, disc)
+                config.pseudopotentials[s] = full_disc
+                upf_rel = full_disc
+                logger.info(f"[+] Auto-discovered pseudopotential for '{s}' during QE input prep: {os.path.basename(disc)}")
         full_upf = upf_rel if os.path.isabs(upf_rel) else os.path.join(config.pseudo_dir or ".", upf_rel)
         meta_by_sym[s] = inspect_upf_metadata(full_upf)
 
@@ -216,6 +223,17 @@ def write_qe_input(
     header += """ATOMIC_SPECIES
 """
     for s in unique_symbols:
+        if s not in config.pseudopotentials or not config.pseudopotentials[s]:
+            disc = discover_pseudopotential(s, config.pseudo_dir) if config.pseudo_dir else None
+            if disc:
+                full_disc = disc if os.path.isabs(disc) else os.path.join(config.pseudo_dir, disc)
+                config.pseudopotentials[s] = full_disc
+            else:
+                raise KeyError(
+                    f"Pseudopotential for element '{s}' was not specified in config.pseudopotentials "
+                    f"and could not be auto-discovered in pseudo_dir='{config.pseudo_dir}'. "
+                    f"Please specify pseudopotentials={{'{s}': '<filename.upf>'}} in ToolkitConfig or place a matching UPF in '{config.pseudo_dir}'."
+                )
         upf_name = os.path.basename(config.pseudopotentials[s])
         mass = float(atomic_masses[atomic_numbers[s]])
         header += f"  {s:<3} {mass:8.4f}  {upf_name}\n"

@@ -5,6 +5,18 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-10-27
+
+### Added
+- **Automated UPF Pseudopotential Auto-Discovery**: Implemented automated pseudopotential discovery (`discover_pseudopotential` and `ToolkitConfig.auto_discover_pseudopotentials()`) from `pseudo_dir`. Users no longer need to explicitly populate the `pseudopotentials` dictionary for every element in the host crystal and defect.
+- **Relativistic Variant Prioritization**: Discovery logic strictly prioritizes scalar-relativistic pseudopotentials over fully-relativistic (`_FR`) variants required by collinear spin-polarized DFT calculations (`nspin=2`), preventing Quantum ESPRESSO crashes while retaining latest version selection (`1.2` > `1.0`).
+- **Subdirectory Discovery Support**: UPF search automatically traverses library subdirectories (e.g., SSSP or ONCVPSP folders) when flat root matches are absent.
+
+### Fixed
+- **Missing Element KeyError**: Resolved `KeyError: '<element>'` during `write_qe_input` in ground-state/excited-state DFT relaxation and step 3 candidate frame labeling when `pseudopotentials` was omitted or empty.
+- **Informative Pseudopotential Diagnostic Errors**: If a pseudopotential cannot be found in `pseudo_dir`, `write_qe_input` now raises an informative `KeyError` specifying the missing element, the directory searched, and explicit remediation steps.
+- **Pipeline Logging Sequence**: `run_pipeline` now executes `config.validate()` prior to printing the pipeline banner, accurately reflecting auto-discovered UPF mappings instead of an empty dictionary.
+
 ## [0.6.1] - 2026-10-27
 
 ### Added / Changed
