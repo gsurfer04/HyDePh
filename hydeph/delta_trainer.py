@@ -213,6 +213,7 @@ class DeltaTrainer:
             delta_f = np.asarray(f_dft - f_base, dtype=float)
 
             fr_delta = fr.copy()
+            fr_delta.calc = None
             fr_delta.info["energy"] = delta_e
             fr_delta.info["e_base"] = e_base
             fr_delta.info["e_dft"] = e_dft

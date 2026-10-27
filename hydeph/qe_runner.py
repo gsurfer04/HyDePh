@@ -694,6 +694,7 @@ class QERunner:
                     if e_ev is not None and f_ev_a is not None and len(f_ev_a) == len(atoms):
                         logger.info(f"      [Cache hit] Reusing converged calculation in {calc_dir}")
                         at_labeled = atoms.copy()
+                        at_labeled.calc = None
                         at_labeled.info["energy"] = e_ev
                         at_labeled.arrays["forces"] = f_ev_a
                         gap_info = parse_qe_band_gap(pw_out)
@@ -815,6 +816,7 @@ class QERunner:
             raise RuntimeError(f"QE calculation failed in {calc_dir}.\n{tail_msg}{win_msg}")
 
         at_labeled = atoms.copy()
+        at_labeled.calc = None
         at_labeled.info["energy"] = e_ev
         at_labeled.arrays["forces"] = f_ev_a
         gap_info = parse_qe_band_gap(pw_out)
@@ -980,6 +982,8 @@ class QERunner:
 
         dur = time.time() - t_start
         logger.info(f"      [pw relax] Completed in {dur:.1f}s | Energy = {e_ev:.4f} eV" if e_ev else f"      [pw relax] Completed in {dur:.1f}s")
+        if at_rel is not None:
+            at_rel.calc = None
         return at_rel
 
     def _obtain_replacement_entry(
@@ -1003,11 +1007,16 @@ class QERunner:
         new_fr = sampler.generate_replacement_frame(
             stype, base_atoms, type_index=type_idx, candidate_index=cand_idx
         )
+        new_fr.calc = None
         frames.append(new_fr)
         cand_xyz = os.path.join(self.config.workspace_dir, "candidate_frames.xyz")
         if os.path.isfile(cand_xyz):
             try:
-                ase.io.write(cand_xyz, frames, format="extxyz")
+                for f in frames:
+                    f.calc = None
+                tmp_cand = cand_xyz + ".tmp"
+                ase.io.write(tmp_cand, frames, format="extxyz")
+                os.replace(tmp_cand, cand_xyz)
             except Exception:
                 pass
 
@@ -1158,7 +1167,11 @@ class QERunner:
                     labeled_dict[idx] = labeled_fr
                     type_completed[stype] = type_completed.get(stype, 0) + 1
                     current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
-                    ase.io.write(out_xyz, current_frames, format="extxyz")
+                    for f in current_frames:
+                        f.calc = None
+                    tmp_xyz = out_xyz + ".tmp"
+                    ase.io.write(tmp_xyz, current_frames, format="extxyz")
+                    os.replace(tmp_xyz, out_xyz)
                 logger.info(f"    [+] {label} labeled | E = {labeled_fr.info['energy']:.4f} eV | Max F = {np.abs(labeled_fr.arrays['forces']).max():.4f} eV/A ({dt:.1f} s)")
             except RuntimeError as err:
                 with state_lock:
@@ -1213,7 +1226,11 @@ class QERunner:
                     logger.info(f"    [+] {label} converged on retry | E = {labeled_fr.info['energy']:.4f} eV | Max F = {np.abs(labeled_fr.arrays['forces']).max():.4f} eV/A ({dt:.1f} s)")
                     type_completed[stype] = type_completed.get(stype, 0) + 1
                     current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
-                    ase.io.write(out_xyz, current_frames, format="extxyz")
+                    for f in current_frames:
+                        f.calc = None
+                    tmp_xyz = out_xyz + ".tmp"
+                    ase.io.write(tmp_xyz, current_frames, format="extxyz")
+                    os.replace(tmp_xyz, out_xyz)
                 except RuntimeError as err:
                     fr.info["qe_status"] = "failed"
                     entry["status"] = "failed"
@@ -1241,7 +1258,11 @@ class QERunner:
                             labeled_dict[r_idx] = r_labeled
                             type_completed[stype] = type_completed.get(stype, 0) + 1
                             current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
-                            ase.io.write(out_xyz, current_frames, format="extxyz")
+                            for f in current_frames:
+                                f.calc = None
+                            tmp_xyz = out_xyz + ".tmp"
+                            ase.io.write(tmp_xyz, current_frames, format="extxyz")
+                            os.replace(tmp_xyz, out_xyz)
                             logger.info(f"    [+] Replacement {r_label} ({stype}) converged | E = {r_labeled.info['energy']:.4f} eV")
                         except RuntimeError as repl_err:
                             r_fr.info["qe_status"] = "failed"
@@ -1255,7 +1276,11 @@ class QERunner:
         self.last_failed_entries = failed_entries
         final_labeled = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
         if final_labeled:
-            ase.io.write(out_xyz, final_labeled, format="extxyz")
+            for f in final_labeled:
+                f.calc = None
+            tmp_xyz = out_xyz + ".tmp"
+            ase.io.write(tmp_xyz, final_labeled, format="extxyz")
+            os.replace(tmp_xyz, out_xyz)
 
         if failed_entries:
             fail_str = ", ".join(f"{e['frame_id']} ({e['sample_type']})" for e in failed_entries)

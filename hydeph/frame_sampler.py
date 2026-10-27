@@ -48,6 +48,22 @@ def farthest_point_sampling(descriptor_matrix: np.ndarray, n_select: int) -> Lis
     return selected
 
 
+def clean_candidate_atoms(atoms: Atoms) -> Atoms:
+    """Detaches any attached calculator and strips evaluation properties (energy, forces, stress) from info and arrays.
+    
+    Candidate frames represent unlabelled candidate geometries destined for DFT single-point
+    calculations. Stripping calculator results prevents ASE `save_calc_results` KeyError conflicts
+    during extended XYZ serialization.
+    """
+    at = atoms.copy()
+    at.calc = None
+    for k in ("energy", "forces", "stress", "magmom", "free_energy"):
+        at.info.pop(k, None)
+    for k in ("forces", "stress", "magmoms"):
+        at.arrays.pop(k, None)
+    return at
+
+
 class FrameSampler:
     """Samples candidate defect supercells across Franck-Condon, rattling, and MD spaces."""
 
@@ -108,7 +124,7 @@ class FrameSampler:
 
         fc_frames = []
         for i, lam in enumerate(lambdas[:n_points]):
-            at = at_gs.copy()
+            at = clean_candidate_atoms(at_gs)
             at.positions = at_gs.positions + lam * dr
             label = f"fc_{i:02d}"
             at.info["sample_type"] = "franck_condon"
@@ -130,7 +146,7 @@ class FrameSampler:
 
         rattle_frames = []
         for i in range(n_frames):
-            at = at_gs.copy()
+            at = clean_candidate_atoms(at_gs)
             sigma = 0.08 if i % 2 == 0 else 0.14
             displacements = rng.normal(0.0, sigma, at.positions.shape)
             displacements[~core_mask] *= 0.15
@@ -157,7 +173,7 @@ class FrameSampler:
         from ase import units
 
         seed = self.config.random_seed + 101
-        at = at_gs.copy()
+        at = clean_candidate_atoms(at_gs)
         at.calc = self.calc_foundation
         temp_k = self.config.md_temp_exploration
         MaxwellBoltzmannDistribution(at, temperature_K=temp_k, rng=np.random.RandomState(seed))
@@ -189,7 +205,7 @@ class FrameSampler:
         selected_indices = farthest_point_sampling(feature_matrix, n_select)
         selected_frames = []
         for i, idx in enumerate(selected_indices):
-            fr = trajectory[idx]
+            fr = clean_candidate_atoms(trajectory[idx])
             label = f"md_fps_{i:02d}"
             fr.info["sample_type"] = "foundation_md_fps"
             fr.info["frame_id"] = label
@@ -208,17 +224,20 @@ class FrameSampler:
             try:
                 cached_candidates = ase.io.read(out_path, ":")
                 if len(cached_candidates) > 0:
+                    cleaned_cached = []
                     for idx, fr in enumerate(cached_candidates):
-                        if "frame_id" not in fr.info:
-                            stype = fr.info.get("sample_type", "frame")
-                            fr.info["frame_id"] = f"{stype}_{idx:02d}"
-                        if "label" not in fr.info:
-                            fr.info["label"] = fr.info["frame_id"]
-                        fr.info["candidate_index"] = idx
-                        fr.info["frame_name"] = f"frame_{idx:03d}_{fr.info['frame_id']}"
-                    logger.info(f"[i] Found existing candidate dataset ({len(cached_candidates)} frames) in {out_path}.")
+                        clean_fr = clean_candidate_atoms(fr)
+                        if "frame_id" not in clean_fr.info:
+                            stype = clean_fr.info.get("sample_type", "frame")
+                            clean_fr.info["frame_id"] = f"{stype}_{idx:02d}"
+                        if "label" not in clean_fr.info:
+                            clean_fr.info["label"] = clean_fr.info["frame_id"]
+                        clean_fr.info["candidate_index"] = idx
+                        clean_fr.info["frame_name"] = f"frame_{idx:03d}_{clean_fr.info['frame_id']}"
+                        cleaned_cached.append(clean_fr)
+                    logger.info(f"[i] Found existing candidate dataset ({len(cleaned_cached)} frames) in {out_path}.")
                     logger.info("    Reusing candidate pool to preserve geometry and labels across runs.")
-                    return cached_candidates
+                    return cleaned_cached
             except Exception as e:
                 logger.warning(f"    [!] Could not read existing candidate_frames.xyz ({e}). Generating fresh pool.")
 
@@ -227,16 +246,21 @@ class FrameSampler:
         md_frames = self.sample_foundation_md_with_fps(at_gs, self.config.n_md_frames)
 
         # Interleave using zip_longest
-        all_candidates = [
+        raw_candidates = [
             fr for group in zip_longest(fc_frames, rattle_frames, md_frames)
             for fr in group if fr is not None
         ]
 
-        for idx, fr in enumerate(all_candidates):
-            fr.info["candidate_index"] = idx
-            fr.info["frame_name"] = f"frame_{idx:03d}_{fr.info['frame_id']}"
+        all_candidates = []
+        for idx, fr in enumerate(raw_candidates):
+            cfr = clean_candidate_atoms(fr)
+            cfr.info["candidate_index"] = idx
+            cfr.info["frame_name"] = f"frame_{idx:03d}_{cfr.info['frame_id']}"
+            all_candidates.append(cfr)
 
-        ase.io.write(out_path, all_candidates, format="extxyz")
+        tmp_out = out_path + ".tmp"
+        ase.io.write(tmp_out, all_candidates, format="extxyz")
+        os.replace(tmp_out, out_path)
         logger.info(f"[+] Total candidate pool assembled: {len(all_candidates)} frames (written to {out_path})")
         return all_candidates
 
@@ -250,9 +274,7 @@ class FrameSampler:
     ) -> Atoms:
         """Generates a replacement `core_rattle` or `foundation_md_fps` frame when a candidate fails twice."""
         base_seed = self.config.random_seed
-        at = at_gs.copy()
-        at.arrays.pop("forces", None)
-        at.info.pop("energy", None)
+        at = clean_candidate_atoms(at_gs)
 
         if sample_type == "core_rattle":
             rng = np.random.RandomState(base_seed + 1000 + int(type_index))
@@ -278,7 +300,7 @@ class FrameSampler:
                 MaxwellBoltzmannDistribution(at, temperature_K=temp_k, rng=rng)
                 dyn = Langevin(at, 1.0 * units.fs, temperature_K=temp_k, friction=0.01 / units.fs, logfile=None)
                 dyn.run(100)
-                at = at.copy()
+                at = clean_candidate_atoms(at)
             else:
                 displacements = rng.normal(0.0, 0.10, at.positions.shape)
                 at.positions += displacements
@@ -287,6 +309,7 @@ class FrameSampler:
         else:
             raise ValueError(f"Replacement generation unsupported for sample_type='{sample_type}'.")
 
+        at = clean_candidate_atoms(at)
         at.info["frame_id"] = label
         at.info["label"] = label
         if candidate_index is not None:

@@ -546,5 +546,101 @@ def test_multi_atom_defect_complex_handling(tmp_path):
     assert 0.5 < c_bond < 2.0
 
 
+def test_clean_candidate_atoms_detaches_calculator_and_strips_eval_keys(tmp_path):
+    """Verify clean_candidate_atoms strips SinglePointCalculator, energy, and forces preventing extxyz KeyError."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+    import ase.io
+    from hydeph.frame_sampler import clean_candidate_atoms
+
+    at = Atoms("CsI", positions=[[0.0, 0.0, 0.0], [2.0, 2.0, 2.0]], cell=[5, 5, 5], pbc=True)
+    at.info["energy"] = -1050.25
+    at.info["defect_center"] = [2.0, 2.0, 2.0]
+    at.arrays["forces"] = np.array([[0.05, 0.0, 0.0], [-0.05, 0.0, 0.0]])
+    at.calc = SinglePointCalculator(at, energy=-1050.25, forces=np.array([[0.05, 0.0, 0.0], [-0.05, 0.0, 0.0]]))
+
+    # Directly writing the Atoms with both calc and info['energy'] reproduces ASE KeyError
+    out_crash = tmp_path / "crash.xyz"
+    with pytest.raises(KeyError, match="key from calculator already exists in atoms.info"):
+        ase.io.write(str(out_crash), [at], format="extxyz")
+
+    # Cleaned atoms detach calculator and strip energy/forces while preserving defect metadata
+    cleaned = clean_candidate_atoms(at)
+    assert cleaned.calc is None
+    assert "energy" not in cleaned.info
+    assert "forces" not in cleaned.info
+    assert "forces" not in cleaned.arrays
+    assert "defect_center" in cleaned.info
+
+    # Cleaned write succeeds without error
+    out_clean = tmp_path / "clean.xyz"
+    ase.io.write(str(out_clean), [cleaned], format="extxyz")
+    assert out_clean.is_file()
+    read_back = ase.io.read(str(out_clean))
+    assert read_back.calc is None
+    assert "energy" not in read_back.info
+
+
+def test_assemble_candidate_dataset_handles_stale_calculator_and_energy(tmp_path):
+    """Verify assemble_candidate_dataset safely writes candidate_frames.xyz when frames have calculators."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+    import ase.io
+    from hydeph.frame_sampler import FrameSampler
+
+    ws = tmp_path / "ws_cand_clean"
+    ws.mkdir(parents=True)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "dummy_pristine.xyz"),
+        workspace_dir=str(ws),
+        n_fc_frames=3,
+        n_phonon_frames=3,
+        n_md_frames=4,
+    )
+    sampler = FrameSampler(cfg)
+
+    at_gs = Atoms("Cs2I2", positions=[[0, 0, 0], [2, 0, 0], [0, 2, 0], [2, 2, 0]], cell=[6, 6, 6], pbc=True)
+    at_gs.info["energy"] = -420.0
+    at_gs.arrays["forces"] = np.zeros((4, 3))
+    at_gs.calc = SinglePointCalculator(at_gs, energy=-420.0, forces=np.zeros((4, 3)))
+
+    at_es = at_gs.copy()
+    at_es.positions[0] += [0.1, 0.1, 0.1]
+    at_es.calc = SinglePointCalculator(at_es, energy=-418.5, forces=np.zeros((4, 3)))
+
+    # Mock sample_foundation_md_with_fps to simulate trajectory frames read with SinglePointCalculator
+    mock_md_frames = []
+    for i in range(4):
+        fr = at_gs.copy()
+        fr.positions += 0.05 * i
+        fr.info["sample_type"] = "foundation_md_fps"
+        fr.info["frame_id"] = f"md_fps_{i:02d}"
+        fr.info["label"] = f"md_fps_{i:02d}"
+        fr.info["energy"] = -419.0  # Retained from at_gs
+        fr.calc = SinglePointCalculator(fr, energy=-419.0, forces=np.zeros((4, 3)))
+        mock_md_frames.append(fr)
+
+    sampler.sample_foundation_md_with_fps = MagicMock(return_value=mock_md_frames)
+
+    # assemble_candidate_dataset must clean all frames and write candidate_frames.xyz without KeyError
+    candidates = sampler.assemble_candidate_dataset(at_gs, at_es, force_resample=True)
+
+    assert len(candidates) == 3 + 3 + 4  # 10 frames
+    cand_xyz = ws / "candidate_frames.xyz"
+    assert cand_xyz.is_file()
+
+    for fr in candidates:
+        assert fr.calc is None
+        assert "energy" not in fr.info
+        assert "forces" not in fr.arrays
+        assert "candidate_index" in fr.info
+        assert "frame_name" in fr.info
+
+    # Read back candidate_frames.xyz to ensure file integrity
+    read_cands = ase.io.read(str(cand_xyz), ":")
+    assert len(read_cands) == 10
+    for fr in read_cands:
+        assert "energy" not in fr.info
+
+
 
 

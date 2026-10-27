@@ -331,8 +331,11 @@ class DefectBuilder:
                     nspin=2 if (self.config.spin_polarized or tot_mag > 0) else 1,
                     force_rerun=force,
                 )
+                at_gs.calc = None
                 at_gs.info["defect_center"] = np.asarray(center, dtype=float)
-                ase.io.write(gs_path, at_gs)
+                tmp_gs = gs_path + ".tmp"
+                ase.io.write(tmp_gs, at_gs)
+                os.replace(tmp_gs, gs_path)
                 logger.info(f"[+] Ground State DFT relaxation completed -> {gs_path}")
                 return at_gs
             except Exception as e:
@@ -431,7 +434,10 @@ class DefectBuilder:
                 dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
                 at_es.positions = at_gs.positions + dr_fc
                 at_es.info["defect_center"] = np.asarray(center, dtype=float)
-                ase.io.write(es_path, at_es)
+                at_es.calc = None
+                tmp_es = es_path + ".tmp"
+                ase.io.write(tmp_es, at_es)
+                os.replace(tmp_es, es_path)
 
                 m = at_gs.get_masses()
                 dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))

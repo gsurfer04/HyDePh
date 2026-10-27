@@ -5,6 +5,13 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-27
+
+### Fixed
+- **Candidate Frame Serialization**: Fixed `KeyError: 'key from calculator already exists in atoms.info'` occurring during `candidate_frames.xyz` extended XYZ serialization. Candidate frames generated from Franck-Condon path, core rattling, and foundation MD with Farthest Point Sampling (FPS) now explicitly detach calculators and strip stale evaluation properties (`energy`, `forces`, `stress`) prior to writing.
+- **Atomic File Writing**: Added atomic writes (`.tmp` temporary files followed by `os.replace`) for `candidate_frames.xyz` and DFT training frames (`dft_training_frames.xyz`) to prevent corrupted or truncated files if interrupted mid-run.
+- **Calculator Results Isolation**: Ensured labeled DFT frames and Delta-NEP training frames explicitly clear active calculator attachments before saving energies and forces into `.info` and `.arrays`.
+
 ## [0.6.0] - 2026-10-26
 
 ### Added
