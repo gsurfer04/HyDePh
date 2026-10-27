@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.1] - 2026-10-27
 
+### Added / Changed
+- **Default Spin-Proxy Relaxation**: Changed default `excited_state_method` to `"spin_proxy"` in `ToolkitConfig` and `DefectBuilder`, providing ab initio excited-state geometries with Jahn-Teller distortions out-of-the-box.
+- **Example Config Structure**: Aligned all example configuration scripts (`run_licl_fcenter.py`, `README.md`, `hydeph/README.md`) to follow the 5-stage Configuration Reference section order.
+- **Documentation KaTeX Rendering**: Replaced non-standard `\AA` / `\text{\AA}` macros throughout documentation with standard Unicode `Å` and `\text{Å}` to resolve KaTeX rendering errors on GitHub.
+
 ### Fixed
 - **Candidate Frame Serialization**: Fixed `KeyError: 'key from calculator already exists in atoms.info'` occurring during `candidate_frames.xyz` extended XYZ serialization. Candidate frames generated from Franck-Condon path, core rattling, and foundation MD with Farthest Point Sampling (FPS) now explicitly detach calculators and strip stale evaluation properties (`energy`, `forces`, `stress`) prior to writing.
 - **Atomic File Writing**: Added atomic writes (`.tmp` temporary files followed by `os.replace`) for `candidate_frames.xyz` and DFT training frames (`dft_training_frames.xyz`) to prevent corrupted or truncated files if interrupted mid-run.
