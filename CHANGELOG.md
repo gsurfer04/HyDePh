@@ -18,8 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Automated Spin-Proxy Excited-State Relaxation**: Added `excited_state_method="spin_proxy"` in `DefectBuilder` and `ToolkitConfig`, automating DFT BFGS geometry relaxation using a spin-proxy state ($M_{\mathrm{es}} = M_0 + 2$) to capture Jahn-Teller distortions and physical displacements without empirical breathing-sphere assumptions.
 - **DFT Ground-State Relaxation**: Added `ground_state_relax_method` (`"auto"`, `"foundation"`, `"dft"`), coordinating ground- and excited-state relaxations under identical DFT exchange-correlation potential and cell parameters.
 - **Quantum ESPRESSO Relaxation Parser & Runner**: Added `run_relaxation()` and `parse_qe_relaxation_output()` in `QERunner`, supporting BFGS ionic dynamics, convergence threshold control (`relax_forc_conv_thr`), step limits (`relax_nstep`), and geometry recovery upon wall-clock timeouts.
-- **Supercell Size & Convergence Guidelines**: Added comprehensive guidelines, theoretical background, and a host platform sizing table in `README.md` and `docs/THEORY_WALKTHROUGH.md`, detailing why supercells with $L \ge 10\text{--}12\ \text{\AA}$ ($\ge 140\text{--}215$ atoms) are required in stiff crystals (diamond, SiC) to avoid discrete multi-phonon comb artifacts.
-- **Supercell Dimension Logging**: `DefectBuilder.build_supercell_and_defect()` logs cell dimensions and warns when supercells are too small ($L < 9\ \text{\AA}$) for reliable phonon dispersion.
+- **Supercell Size & Convergence Guidelines**: Added comprehensive guidelines, theoretical background, and a host platform sizing table in `README.md` and `docs/THEORY_WALKTHROUGH.md`, detailing why supercells with $L \ge 10\text{--}12\ \text{Å}$ ($\ge 140\text{--}215$ atoms) are required in stiff crystals (diamond, SiC) to avoid discrete multi-phonon comb artifacts.
+- **Supercell Dimension Logging**: `DefectBuilder.build_supercell_and_defect()` logs cell dimensions and warns when supercells are too small ($L < 9\ \text{Å}$) for reliable phonon dispersion.
 ## [0.5.0] - 2026-10-20
 
 ### Added

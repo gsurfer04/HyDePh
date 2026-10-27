@@ -87,15 +87,32 @@ hydeph config.yaml --max-dft 25 --workers 2
 from hydeph import ToolkitConfig, run_pipeline
 
 config = ToolkitConfig(
+    # Core Inputs & Paths
     pristine_cell_path="licl_pristine_unitcell.xyz",
     defect_cell_path="licl_defect_unitcell.xyz",
-    supercell_repeat=(2, 2, 2),
     foundation_potential_path="/path/to/nep89_20250409.txt",
     pseudopotentials={
         "Li": "li_pbe_v1.4.uspp.F.UPF",
         "Cl": "cl_pbe_v1.4.uspp.F.UPF",
     },
     pseudo_dir="/path/to/quantumespresso/pseudo",
+    workspace_dir="./hydeph_run",
+
+    # Electronic Structure & Geometry
+    supercell_repeat=(2, 2, 2),
+    charge=0.0,
+    spin_polarized=True,
+    spin_multiplicity=2,  # S = 1/2 (doublet)
+    excited_state_method="spin_proxy",
+
+    # Sampling & Resumption
+    max_dft_frames=30,
+    n_procs_qe=4,
+
+    # Delta-NEP Architecture Hyperparameters
+    nep_steps=30000,
+
+    # Spectroscopy, Graphing & 1D Configuration Coordinate
     temperatures=[10.0, 77.0, 150.0, 300.0],
     enable_anharmonic=True,
     anharmonic_md_steps=2000,
@@ -110,18 +127,31 @@ summary = run_pipeline(config)
 from hydeph import ToolkitConfig, run_pipeline
 
 config = ToolkitConfig(
+    # Core Inputs & Paths
     pristine_cell_path="diamond_unitcell.xyz",
     defect_cell_path="diamond_nv_unitcell.xyz",
-    supercell_repeat=(3, 3, 3),
     foundation_potential_path="nep89_20250409.txt",
     pseudopotentials={"C": "C.upf", "N": "N.upf"},
     pseudo_dir="./pseudo",
-    charge=-1,
+    workspace_dir="./nv_diamond_run",
+
+    # Electronic Structure & Geometry
+    supercell_repeat=(3, 3, 3),
+    charge=-1.0,
     spin_polarized=True,
     spin_multiplicity=3,  # Triplet (3A2, S=1 -> tot_magnetization=2)
+    excited_state_method="spin_proxy",
+
+    # Sampling & Resumption
+    max_dft_frames=40,
+    n_procs_qe=4,
+
+    # Delta-NEP Architecture Hyperparameters
+    nep_steps=30000,
+
+    # Spectroscopy, Graphing & 1D Configuration Coordinate
     temperatures=[10.0, 77.0, 300.0],
     enable_anharmonic=True,
-    workspace_dir="./nv_diamond_run",
 )
 
 summary = run_pipeline(config)
@@ -130,6 +160,17 @@ summary = run_pipeline(config)
 ---
 
 ## Configuration Reference
+
+### Core Inputs & Paths
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `pristine_cell_path` | `str` | *(required)* | Path to bulk pristine unit cell (`.xyz`, `.cif`, or `POSCAR`). |
+| `defect_cell_path` | `str` | `None` | Path to pre-constructed defect unit cell or supercell. |
+| `foundation_potential_path` | `str` | `"nep89_20250409.txt"` | Path to GPUMD universal foundation potential. |
+| `pseudopotentials` | `dict` | `None` | Element-to-pseudopotential filename map (auto-discovered if omitted). |
+| `pseudo_dir` | `str` | `None` | Directory containing Quantum ESPRESSO UPF pseudopotential files. |
+| `workspace_dir` | `str` | `"./hydeph_run"` | Workspace directory for outputs, caches, and scratch files. |
 
 ### Electronic Structure & Geometry
 
@@ -141,12 +182,12 @@ summary = run_pipeline(config)
 | `spin_multiplicity` | `int` | `2` | Spin multiplicity $2S+1$ ($1$: singlet, $2$: doublet, $3$: triplet). |
 | `tot_magnetization` | `int` | `None` | Unpaired electrons $2S$; synchronized with `spin_multiplicity`. |
 | `excited_cell_path` | `str` | `None` | Path to explicit excited-state cell or supercell; falls back to coordination-shell breathing when omitted. |
-| `excited_state_method` | `str` | `"synthetic"` | Method for excited-state geometry: `"synthetic"` (coordination breathing), `"spin_proxy"` (automated DFT relaxation), or `"file"`. |
+| `excited_state_method` | `str` | `"spin_proxy"` | Method for excited-state geometry: `"spin_proxy"` (automated DFT relaxation), `"synthetic"` (coordination breathing), or `"file"`. |
 | `excited_state_tot_magnetization` | `int` | `None` | Target spin magnetization $2S$ for `"spin_proxy"` mode; defaults to ground state $M_0 + 2$. |
 | `ground_state_relax_method` | `str` | `"auto"` | Ground-state optimization: `"auto"` (selects `"dft"` if `excited_state_method="spin_proxy"`, else `"foundation"`), `"foundation"`, or `"dft"`. |
 | `relax_forc_conv_thr` | `float` | `1.0e-3` | Force convergence threshold ($\mathrm{Ry/Bohr}$) for Quantum ESPRESSO BFGS relaxations. |
 | `relax_nstep` | `int` | `100` | Maximum ionic optimization steps for Quantum ESPRESSO BFGS relaxations. |
-| `excited_state_displacement` | `float` | `None` | Radial breathing displacement (Å) for procedural excited states ($0.08\ \text{\AA}$ for covalent hosts, $0.15\ \text{\AA}$ for ionic hosts). |
+| `excited_state_displacement` | `float` | `None` | Radial breathing displacement (Å) for procedural excited states ($0.08\ \text{Å}$ for covalent hosts, $0.15\ \text{Å}$ for ionic hosts). |
 | `substitutional_element` | `str` | `None` | Replacement species symbol when `defect_type="substitutional"` (or specify `"Host->Sub"` in `defect_site_element`). |
 | `conv_thr` | `str` | `"1.0d-5"` | SCF convergence threshold in Quantum ESPRESSO. |
 | `mixing_beta` | `float` | `0.4` | SCF charge density mixing factor. |
@@ -217,18 +258,18 @@ Choosing an adequate supercell size (`supercell_repeat`) is critical for obtaini
 Under periodic boundary conditions:
 1. **Phonon Momentum Sampling**: A finite supercell of edge length $L$ samples phonon momentum space on a discrete grid with spacing:
    $$\Delta q = \frac{2\pi}{L}$$
-   In small supercells ($L < 10\ \text{\AA}$), $\Delta q$ is large. Acoustic phonon branches cannot disperse, and long-wavelength elastic strain fields are unphysically cut off.
+   In small supercells ($L < 10\ \text{Å}$), $\Delta q$ is large. Acoustic phonon branches cannot disperse, and long-wavelength elastic strain fields are unphysically cut off.
 2. **Defect-Host Mode Hybridization**: Optical excitation couples to localized defect breathing modes as well as propagating bulk acoustic and optical phonons. In small cells, the quasi-local mode cannot hybridize into the lattice continuum; instead, electron-phonon coupling is artificially concentrated into a single, isolated discrete vibrational mode.
 3. **Periodic Image Interactions**: Periodic defect replicas interact via elastic strain ($E_{\mathrm{elastic}} \propto L^{-3}$) and Coulomb repulsion ($E_{\mathrm{Coulomb}} \propto L^{-1}$ for charged centers like $\text{NV}^-$), artificially constraining host relaxation.
 
 ### 2. Case Study: Diamond $\text{NV}^-$ Center ($2\times 2\times 2$ vs. $3\times 3\times 3$)
 A direct comparison between supercell sizes for the diamond $\text{NV}^-$ center illustrates this finite-size effect (first documented by [Alkauskas et al., *New J. Phys.* 16, 073026 (2014)](https://doi.org/10.1088/1367-2630/16/7/073026)):
 
-* **$2\times 2\times 2$ Supercell (63 atoms, $L = 7.15\ \text{\AA}$, 186 modes)**:
-  - $\Delta q \approx 0.88\ \text{\AA}^{-1}$ (halfway to the diamond Brillouin zone edge).
+* **$2\times 2\times 2$ Supercell (63 atoms, $L = 7.15\ \text{Å}$, 186 modes)**:
+  - $\Delta q \approx 0.88\ \text{Å}^{-1}$ (halfway to the diamond Brillouin zone edge).
   - **$\sim 85\%$ of the total Huang-Rhys factor ($S_k = 2.64$ out of $S = 3.11$)** is compressed into a single discrete mode at $72.6\ \text{meV}$.
   - In the optical lineshape, this single delta-mode generates an unphysical harmonic comb of sharp Poissonian spikes spaced by $72.6\ \text{meV}$ (at $-73, -145, -217, -290\ \text{meV}$). At $77\ \text{K}$, the 2-phonon replica at $-145\ \text{meV}$ artificially towers over the Zero-Phonon Line (ZPL).
-* **$3\times 3\times 3$ Supercell (215 atoms, $L = 10.72\ \text{\AA}$, 642 modes)**:
+* **$3\times 3\times 3$ Supercell (215 atoms, $L = 10.72\ \text{Å}$, 642 modes)**:
   - Phonon mode density increases by $3.4\times$.
   - The localized breathing mode properly hybridizes with diamond bulk phonon branches, dispersing the spectral density $S(\hbar\omega)$ continuously across $57\text{--}140\ \text{meV}$ with the true experimental quasi-local resonance at $\sim 64\text{--}65\ \text{meV}$.
   - Multi-phonon auto-convolutions $[S * S]$ and $[S * S * S]$ spread out into a smooth, continuous phonon wing, correctly preserving the sharp ZPL as the dominant spectral feature across all temperatures.
@@ -237,22 +278,22 @@ A direct comparison between supercell sizes for the diamond $\text{NV}^-$ center
 
 | Host Material Platform | Crystal Type | Recommended Supercell | Atom Count | Minimum Dimension $L$ | Guidelines & Expected Features |
 |---|---|---|---|---|---|
-| **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Stiff covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 10.7\ \text{\AA}$ | Use $\ge 215$ atoms. $2\times 2\times 2$ (63 atoms) produces artificial $73\ \text{meV}$ multi-phonon spike combs. |
-| **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` or `(4, 4, 2)` | $142\text{--}254$ atoms | $\ge 9.2\text{--}12.3\ \text{\AA}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
-| **3C-SiC** | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 13.1\ \text{\AA}$ | Captures smooth quasi-local breathing mode dispersion. |
-| **Alkali Halides** (LiCl, NaCl) | Soft rocksalt ($\Theta_D \approx 300\text{--}420\ \mathrm{K}$) | `(2, 2, 2)` *(recommended)* | $63$ atoms | $\ge 11.4\ \text{\AA}$ | Large lattice constant ($a \approx 5.69\ \text{\AA}$) means `(2, 2, 2)` already exceeds $L \ge 10\ \text{\AA}$ ($L = 11.4\ \text{\AA}$) and fully converges in $q$-space with $< 1\ \text{GB}$ VRAM. `(3, 3, 3)` expands to $17.1\ \text{\AA}$ with 1,721 electrons ($Z_{\mathrm{val}}=9$ for Na), requiring $> 9\ \text{GB}$ RAM. |
-| **Fluorites** (LiF, $\mathrm{CaF}_2$) | Fluorite ($\Theta_D \approx 730\ \mathrm{K}$) | `(2, 2, 2)` | $95\text{--}189$ atoms | $\ge 8.0\text{--}10.9\ \text{\AA}$ | Strong coupling ($S > 10$); Marcus Gaussian envelope dominates. |
+| **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Stiff covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 10.7\ \text{Å}$ | Use $\ge 215$ atoms. $2\times 2\times 2$ (63 atoms) produces artificial $73\ \text{meV}$ multi-phonon spike combs. |
+| **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` or `(4, 4, 2)` | $142\text{--}254$ atoms | $\ge 9.2\text{--}12.3\ \text{Å}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
+| **3C-SiC** | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 13.1\ \text{Å}$ | Captures smooth quasi-local breathing mode dispersion. |
+| **Alkali Halides** (LiCl, NaCl) | Soft rocksalt ($\Theta_D \approx 300\text{--}420\ \mathrm{K}$) | `(2, 2, 2)` *(recommended)* | $63$ atoms | $\ge 11.4\ \text{Å}$ | Large lattice constant ($a \approx 5.69\ \text{Å}$) means `(2, 2, 2)` already exceeds $L \ge 10\ \text{Å}$ ($L = 11.4\ \text{Å}$) and fully converges in $q$-space with $< 1\ \text{GB}$ VRAM. `(3, 3, 3)` expands to $17.1\ \text{Å}$ with 1,721 electrons ($Z_{\mathrm{val}}=9$ for Na), requiring $> 9\ \text{GB}$ RAM. |
+| **Fluorites** (LiF, $\mathrm{CaF}_2$) | Fluorite ($\Theta_D \approx 730\ \mathrm{K}$) | `(2, 2, 2)` | $95\text{--}189$ atoms | $\ge 8.0\text{--}10.9\ \text{Å}$ | Strong coupling ($S > 10$); Marcus Gaussian envelope dominates. |
 
 > [!IMPORTANT]
 > **Physical Cell Length $L$, Not Integer Repeat Count, Determines Convergence**
-> The physical criterion for converging the vibrational continuum and avoiding sharp finite-size combs is the supercell edge length **$L \ge 10\text{--}11\ \text{\AA}$**, **not** a fixed integer repeat tuple like `(3, 3, 3)`:
-> - For **compact covalent hosts** (diamond, $a = 3.57\ \text{\AA}$), a $2\times 2\times 2$ cell has $L = 7.15\ \text{\AA}$ (under-converged), so `(3, 3, 3)` ($L = 10.72\ \text{\AA}$, 215 atoms) is required.
-> - For **large-lattice hosts** (rocksalt halides like NaCl with $a = 5.69\ \text{\AA}$), a **$2\times 2\times 2$ cell is already $L = 11.38\ \text{\AA}$**—physically larger than the 215-atom diamond cell! A $2\times 2\times 2$ cell of NaCl is already fully converged in $q$-space.
+> The physical criterion for converging the vibrational continuum and avoiding sharp finite-size combs is the supercell edge length **$L \ge 10\text{--}11\ \text{Å}$**, **not** a fixed integer repeat tuple like `(3, 3, 3)`:
+> - For **compact covalent hosts** (diamond, $a = 3.57\ \text{Å}$), a $2\times 2\times 2$ cell has $L = 7.15\ \text{Å}$ (under-converged), so `(3, 3, 3)` ($L = 10.72\ \text{Å}$, 215 atoms) is required.
+> - For **large-lattice hosts** (rocksalt halides like NaCl with $a = 5.69\ \text{Å}$), a **$2\times 2\times 2$ cell is already $L = 11.38\ \text{Å}$**—physically larger than the 215-atom diamond cell! A $2\times 2\times 2$ cell of NaCl is already fully converged in $q$-space.
 >
 > **GPU VRAM & Semi-Core Pseudopotentials**:
-> If a $3\times 3\times 3$ cell is used for NaCl ($L = 17.08\ \text{\AA}$), the system contains 215 atoms and 1,721 valence electrons because the standard Na pseudopotential treats semi-core $2s, 2p$ states as valence ($Z_{\mathrm{val}} = 9$). With 877 Kohn-Sham bands and 144k plane waves, Quantum ESPRESSO's default Davidson algorithm requires **$> 9.2\ \text{GB}$ of dynamical memory**, exceeding the 8 GB VRAM of consumer GPUs and triggering a CUDA Out-Of-Memory termination.
-> - **Recommended**: Use `(2, 2, 2)` for rocksalt halides ($L = 11.4\ \text{\AA}$, 505 electrons, $< 1\ \text{GB}$ peak memory).
-> - If supercells with $L > 15\ \text{\AA}$ are strictly required, set `diagonalization = 'cg'` in `ToolkitConfig` (reducing peak memory by $> 50\%$) or run on multi-core CPU where system RAM ($\ge 16\text{--}32\ \text{GB}$) accommodates the memory load.
+> If a $3\times 3\times 3$ cell is used for NaCl ($L = 17.08\ \text{Å}$), the system contains 215 atoms and 1,721 valence electrons because the standard Na pseudopotential treats semi-core $2s, 2p$ states as valence ($Z_{\mathrm{val}} = 9$). With 877 Kohn-Sham bands and 144k plane waves, Quantum ESPRESSO's default Davidson algorithm requires **$> 9.2\ \text{GB}$ of dynamical memory**, exceeding the 8 GB VRAM of consumer GPUs and triggering a CUDA Out-Of-Memory termination.
+> - **Recommended**: Use `(2, 2, 2)` for rocksalt halides ($L = 11.4\ \text{Å}$, 505 electrons, $< 1\ \text{GB}$ peak memory).
+> - If supercells with $L > 15\ \text{Å}$ are strictly required, set `diagonalization = 'cg'` in `ToolkitConfig` (reducing peak memory by $> 50\%$) or run on multi-core CPU where system RAM ($\ge 16\text{--}32\ \text{GB}$) accommodates the memory load.
 
 > [!TIP]
 > **Why HyDePh Makes Large Supercells Tractable**
@@ -316,17 +357,29 @@ For environments without an NVIDIA GPU or where WSL2 cannot be used, HyDePh also
 
 ```python
 config = ToolkitConfig(
+    # Core Inputs & Paths
     pristine_cell_path=r"C:\data\licl_pristine.xyz",
     defect_cell_path=r"C:\data\licl_defect.xyz",
     foundation_potential_path=r"C:\potentials\nep89_20250409.txt",
-    pseudo_dir=r"C:\QE\pseudo",
     pseudopotentials={"Li": "li_pbe_v1.4.uspp.F.UPF", "Cl": "cl_pbe_v1.4.uspp.F.UPF"},
+    pseudo_dir=r"C:\QE\pseudo",
+    workspace_dir=r"C:\simulations\licl_run",
+
+    # Electronic Structure & Geometry
+    supercell_repeat=(2, 2, 2),
+    charge=0.0,
+    spin_polarized=True,
+    spin_multiplicity=2,
+    excited_state_method="spin_proxy",
+
+    # Windows & Execution Engines
     pw_exe=r"C:\QE\bin\pw.exe",
     mpi_command="mpiexec",
     mpi_args=["-env", "OMP_NUM_THREADS", "2"],
     nep_exe=r"C:\GPUMD\bin\nep.exe",
+
+    # Spectroscopy, Graphing & 1D Configuration Coordinate
     temperatures=[10.0, 77.0, 150.0, 300.0],
-    workspace_dir=r"C:\simulations\licl_run",
 )
 ```
 
@@ -356,7 +409,7 @@ flowchart TD
 | **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3.166$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 4.22\%$), resolved sidebands at $-65, -135, -205\ \mathrm{meV}$. |
 | **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $4.766$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 0.85\%$), quasi-local modes at $-38, -76\ \mathrm{meV}$; $\mathbf{u}_{\mathrm{opt}}$ filters $90\text{--}115\ \mathrm{meV}$ bulk modes. |
 | **LiCl F-Center** | Rocksalt ($420\ \mathrm{K}$) | $3.999$ | Quantum ($S < 10$) | Captures $3.4\times$ bandwidth expansion ($265\ \mathrm{meV}$) and mode softening ($27.8 \to 19.8\ \mathrm{meV}$ vs. $19.7\ \mathrm{meV}$ exp.). |
-| **LiF F-Center** | Fluorite ($730\ \mathrm{K}$) | $23.930$ | Marcus ($S \ge 10$) | Large relaxation ($\Delta Q = 2.39\ \mathrm{amu}^{1/2}\text{\AA}$) suppresses ZPL; reproduces broad Gaussian band ($490\text{--}1101\ \mathrm{meV}$). |
+| **LiF F-Center** | Fluorite ($730\ \mathrm{K}$) | $23.930$ | Marcus ($S \ge 10$) | Large relaxation ($\Delta Q = 2.39\ \mathrm{amu}^{1/2}\text{Å}$) suppresses ZPL; reproduces broad Gaussian band ($490\text{--}1101\ \mathrm{meV}$). |
 
 <p align="center">
   <img src="assets/licl_anharmonic_benchmark.png" width="96%" alt="LiCl F-center Anharmonic Benchmark">

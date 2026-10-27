@@ -31,9 +31,9 @@ def main():
     print(f"[+] Pre-made LiCl defect unit cell created: {defect_unitcell_path} ({len(defect_cell)} atoms)")
 
     config = ToolkitConfig(
+        # Core Inputs & Paths
         pristine_cell_path=pristine_unitcell_path,
         defect_cell_path=defect_unitcell_path,
-        supercell_repeat=(2, 2, 2),
         foundation_potential_path=os.environ.get(
             "NEP_FOUNDATION_PATH",
             os.path.join(workspace, "nep89_20250409.txt")
@@ -43,21 +43,36 @@ def main():
             "Cl": "cl_pbe_v1.4.uspp.F.UPF",
         },
         pseudo_dir=os.environ.get("ESPRESSO_PSEUDO", os.path.join(workspace, "pseudo")),
-        temperatures=[10.0, 77.0, 150.0, 300.0],
+        workspace_dir=workspace,
+
+        # Electronic Structure & Geometry
+        supercell_repeat=(2, 2, 2),
+        charge=0.0,
         spin_polarized=True,
-        spin_multiplicity=2,  # S = 1/2
-        tot_charge=0.0,
+        spin_multiplicity=2,  # S = 1/2 (doublet)
+        excited_state_method="spin_proxy",
         ecutwfc=40.0,
         ecutrho=320.0,
         kpoints=(1, 1, 1),
+
+        # Sampling & Resumption
         n_fc_frames=5,
         n_phonon_frames=6,
         n_md_frames=10,
+        max_dft_frames=4,
+        n_procs_qe=2,
+
+        # Delta-NEP Architecture Hyperparameters
         nep_steps=25000,
-        workspace_dir=workspace,
+
+        # Spectroscopy, Graphing & 1D Configuration Coordinate
+        temperatures=[10.0, 77.0, 150.0, 300.0],
+        enable_anharmonic=True,
+        temperature_plot_mode="both",
+        show_harmonic_in_anharmonic=True,
     )
 
-    summary = run_pipeline(config, max_dft_frames=4, n_procs_qe=2)
+    summary = run_pipeline(config)
     return summary
 
 

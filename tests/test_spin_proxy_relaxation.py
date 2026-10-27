@@ -60,7 +60,7 @@ class MockRelaxationQERunner:
 def test_toolkit_config_spin_proxy_fields():
     """Tests default configuration fields and spin multiplicity derivations."""
     cfg = ToolkitConfig(pristine_cell_path="test.xyz")
-    assert cfg.excited_state_method == "synthetic"
+    assert cfg.excited_state_method == "spin_proxy"
     assert cfg.ground_state_relax_method == "auto"
     assert cfg.relax_forc_conv_thr == 1.0e-3
     assert cfg.relax_nstep == 100

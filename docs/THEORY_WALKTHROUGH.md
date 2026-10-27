@@ -84,7 +84,7 @@ $$
 E_{\mathrm{elastic}}(L) = E_{\mathrm{dilute}} + \frac{\alpha_{\mathrm{el}}}{L^3} + \mathcal{O}(L^{-5})
 $$
 
-where $L$ is the supercell dimension and $\alpha_{\mathrm{el}}$ is the elastic dipole parameter. In addition to elastic ($L^{-3}$) and electrostatic ($L^{-1}$) image interactions, supercell size directly dictates the resolution of the vibrational spectrum. A supercell of linear dimension $L$ samples the phonon Brillouin zone on a discrete grid of spacing $\Delta q = \frac{2\pi}{L}$. When $L < 10\ \text{\AA}$ (such as in a 64-atom diamond cell), the absence of long-wavelength acoustic modes prevents the localized defect breathing mode from hybridizing with the host lattice continuum. This artificially concentrates electron-phonon coupling into an isolated discrete mode and produces an unphysical comb of Poissonian multi-phonon spikes [5]. Converging sideband spectra to the continuous dilute limit requires supercells with physical dimension $L \ge 10\text{--}12\ \text{\AA}$ [5, 6, 9]. Depending on the lattice constant of the host crystal, this corresponds to $2\times 2\times 2$ for large-lattice systems ($a > 5.5\ \text{\AA}$, e.g. rocksalt halides $\ge 63$ atoms, $L \approx 11.4\ \text{\AA}$) or $3\times 3\times 3$ for compact covalent crystals ($a \approx 3.5\text{--}4.5\ \text{\AA}$, e.g. diamond $\ge 215$ atoms, $L \approx 10.7\ \text{\AA}$).
+where $L$ is the supercell dimension and $\alpha_{\mathrm{el}}$ is the elastic dipole parameter. In addition to elastic ($L^{-3}$) and electrostatic ($L^{-1}$) image interactions, supercell size directly dictates the resolution of the vibrational spectrum. A supercell of linear dimension $L$ samples the phonon Brillouin zone on a discrete grid of spacing $\Delta q = \frac{2\pi}{L}$. When $L < 10\ \text{Å}$ (such as in a 64-atom diamond cell), the absence of long-wavelength acoustic modes prevents the localized defect breathing mode from hybridizing with the host lattice continuum. This artificially concentrates electron-phonon coupling into an isolated discrete mode and produces an unphysical comb of Poissonian multi-phonon spikes [5]. Converging sideband spectra to the continuous dilute limit requires supercells with physical dimension $L \ge 10\text{--}12\ \text{Å}$ [5, 6, 9]. Depending on the lattice constant of the host crystal, this corresponds to $2\times 2\times 2$ for large-lattice systems ($a > 5.5\ \text{Å}$, e.g. rocksalt halides $\ge 63$ atoms, $L \approx 11.4\ \text{Å}$) or $3\times 3\times 3$ for compact covalent crystals ($a \approx 3.5\text{--}4.5\ \text{Å}$, e.g. diamond $\ge 215$ atoms, $L \approx 10.7\ \text{Å}$).
 
 [`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around a central defect unit cell, locates the defect site, and relaxes the Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) geometries. These define the Franck-Condon displacement vector and total mass-weighted displacement [5]:
 
@@ -127,10 +127,10 @@ $$
 \mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda \Delta \mathbf{R}, \quad \lambda \in [-0.2, 1.2]
 $$
 
-2. **Defect-Core Rattling**: Gaussian displacements applied within $r_{\mathrm{core}} < 6.0\ \text{\AA}$ of the defect site to sample local harmonic and anharmonic force constants ($k_2, k_3, k_4$) [19]:
+2. **Defect-Core Rattling**: Gaussian displacements applied within $r_{\mathrm{core}} < 6.0\ \text{Å}$ of the defect site to sample local harmonic and anharmonic force constants ($k_2, k_3, k_4$) [19]:
 
 $$
-\mathbf{R}_i' = \mathbf{R}_i + \boldsymbol{\eta}_i, \quad \boldsymbol{\eta}_i \sim \mathcal{N}(0, \sigma_r^2), \quad \sigma_r \in [0.08, 0.14]\ \text{\AA}
+\mathbf{R}_i' = \mathbf{R}_i + \boldsymbol{\eta}_i, \quad \boldsymbol{\eta}_i \sim \mathcal{N}(0, \sigma_r^2), \quad \sigma_r \in [0.08, 0.14]\ \text{Å}
 $$
 
 3. **Foundation MD + Farthest Point Sampling (FPS)**: An NVT trajectory ($T = 500\ \text{K}$) driven by `nep89`, subsampled via FPS in descriptor space $\mathbf{q}_i$ to maximize phase-space coverage [20]:
@@ -289,7 +289,7 @@ $$
 From the harmonic curvature $K = 2 \Delta E_{\mathrm{rel,GS}} / (\Delta Q)^2$, the effective phonon energy and 1D Huang-Rhys factor are:
 
 $$
-\hbar\Omega \text{ (meV)} = 91.4348 \frac{\sqrt{\Delta E_{\mathrm{rel,GS}} \text{ (eV)}}}{\Delta Q \text{ (amu}^{1/2}\text{\AA)}}, \qquad S_{\mathrm{1D}} = \frac{\Delta E_{\mathrm{rel,GS}}}{\hbar\Omega}
+\hbar\Omega \text{ (meV)} = 91.4348 \frac{\sqrt{\Delta E_{\mathrm{rel,GS}} \text{ (eV)}}}{\Delta Q \text{ (amu}^{1/2}\text{Å)}}, \qquad S_{\mathrm{1D}} = \frac{\Delta E_{\mathrm{rel,GS}}}{\hbar\Omega}
 $$
 
 <p align="center">
@@ -305,9 +305,9 @@ $$
 </p>
 
 - **Stiff covalent hosts (Diamond $\mathrm{NV}^-$, 4H-SiC $kk$-$\mathrm{VV}^0$)**: High Debye temperatures ($\Theta_D \approx 1200\text{--}2200\ \mathrm{K}$) mean $\hbar\omega \gg k_B T$ up to $300\ \mathrm{K}$. Classical MD equipartition ($\sigma_{\Delta U} \sim \sqrt{2 k_B T E_{\mathrm{rel}}}$) smears the spectrum into a Gaussian dome; the quantum generating function is required to resolve the sharp ZPL and discrete multi-phonon sidebands.
-- **Soft ionic hosts (LiCl and LiF F-centers)**: Low Debye temperatures ($\Theta_D \approx 420\text{--}730\ \mathrm{K}$) and large displacements ($\Delta Q = 1.63\text{--}2.39\ \mathrm{amu}^{1/2}\text{\AA}$) drive cations into steep anharmonic walls. In LiCl at $77\ \mathrm{K}$, static harmonic theory predicts a $78\ \mathrm{meV}$ FWHM ($5.9\times$ narrower than the $460\ \mathrm{meV}$ experiment [13]), whereas anharmonic MD captures mode softening ($27.8 \to 19.8\ \mathrm{meV}$ vs. $19.7\ \mathrm{meV}$ exp.) and broadens the band $3.4\times$ to $265\ \mathrm{meV}$.
+- **Soft ionic hosts (LiCl and LiF F-centers)**: Low Debye temperatures ($\Theta_D \approx 420\text{--}730\ \mathrm{K}$) and large displacements ($\Delta Q = 1.63\text{--}2.39\ \mathrm{amu}^{1/2}\text{Å}$) drive cations into steep anharmonic walls. In LiCl at $77\ \mathrm{K}$, static harmonic theory predicts a $78\ \mathrm{meV}$ FWHM ($5.9\times$ narrower than the $460\ \mathrm{meV}$ experiment [13]), whereas anharmonic MD captures mode softening ($27.8 \to 19.8\ \mathrm{meV}$ vs. $19.7\ \mathrm{meV}$ exp.) and broadens the band $3.4\times$ to $265\ \mathrm{meV}$.
 
-| System | Host ($\Theta_D$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{\AA}$) | Regime | Key Result |
+| System | Host ($\Theta_D$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | Regime | Key Result |
 |---|---|---|---|---|---|
 | **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3.166$ | $0.627$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 4.22\%$), resolved sidebands at $-65, -135, -205\ \mathrm{meV}$ |
 | **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $4.766$ | $0.812$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 0.85\%$), sidebands at $-38, -76\ \mathrm{meV}$; $\mathbf{u}_{\mathrm{opt}}$ removes $100\ \mathrm{meV}$ bulk artifact |

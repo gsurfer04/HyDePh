@@ -40,20 +40,37 @@ See the root [`README.md`](../README.md) for full configuration tables and [`doc
 from hydeph import ToolkitConfig, run_pipeline
 
 config = ToolkitConfig(
+    # Core Inputs & Paths
     pristine_cell_path="pristine_unitcell.xyz",
     defect_cell_path="defect_unitcell.xyz",
-    supercell_repeat=(2, 2, 2),
     foundation_potential_path="nep89_20250409.txt",
     pseudopotentials={
         "Li": "li_pbe_v1.4.uspp.F.UPF",
         "Cl": "cl_pbe_v1.4.uspp.F.UPF",
     },
     pseudo_dir="./pseudo",
-    temperatures=[10.0, 77.0, 150.0, 300.0],
     workspace_dir="./hydeph_run",
+
+    # Electronic Structure & Geometry
+    supercell_repeat=(2, 2, 2),
+    charge=0.0,
+    spin_polarized=True,
+    spin_multiplicity=2,
+    excited_state_method="spin_proxy",
+
+    # Sampling & Resumption
+    max_dft_frames=30,
+    n_procs_qe=4,
+
+    # Delta-NEP Architecture Hyperparameters
+    nep_steps=30000,
+
+    # Spectroscopy, Graphing & 1D Configuration Coordinate
+    temperatures=[10.0, 77.0, 150.0, 300.0],
+    enable_anharmonic=True,
 )
 
-summary = run_pipeline(config, n_procs_qe=4)
+summary = run_pipeline(config)
 ```
 
 ---

@@ -27,9 +27,9 @@ class ToolkitConfig:
     excited_cell_path : str, optional
         Path to pre-constructed or DFT-relaxed excited-state geometry.
     excited_state_method : str
-        Method for constructing the optical excited-state geometry: "synthetic" (isotropic breathing mode),
-        "spin_proxy" (DFT relaxation using an automated spin-proxy state), or "file".
-        Default is "synthetic".
+        Method for constructing the optical excited-state geometry: "spin_proxy" (automated DFT
+        relaxation using an automated spin-proxy state), "synthetic" (isotropic breathing mode), or "file".
+        Default is "spin_proxy".
     excited_state_tot_magnetization : int, optional
         Target spin magnetization (2S) for excited-state relaxation in "spin_proxy" mode.
         Defaults to ground state tot_magnetization + 2.
@@ -179,7 +179,7 @@ class ToolkitConfig:
     pristine_cell_path: str
     defect_cell_path: Optional[str] = None
     excited_cell_path: Optional[str] = None
-    excited_state_method: str = "synthetic"  # "synthetic", "spin_proxy", or "file"
+    excited_state_method: str = "spin_proxy"  # "spin_proxy", "synthetic", or "file"
     excited_state_tot_magnetization: Optional[int] = None
     excited_state_spin_multiplicity: Optional[int] = None
     ground_state_relax_method: str = "auto"  # "auto", "foundation", or "dft"

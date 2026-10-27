@@ -326,7 +326,7 @@ class ConfigurationCoordinateEngine:
         e_span = max_e_val - min_e_val
         ax.set_ylim(min_e_val - 0.10 * e_span, max_e_val + 0.28 * e_span)
 
-        ax.set_xlabel(r'Mass-Weighted Configuration Coordinate $Q$ ($\mathrm{amu}^{1/2}\mathrm{\AA}$)', fontsize=11)
+        ax.set_xlabel(r'Mass-Weighted Configuration Coordinate $Q$ ($\mathrm{amu}^{1/2}\mathrm{Å}$)', fontsize=11)
         ax.set_ylabel(r'Potential Energy $E$ (eV)', fontsize=11)
         sys_str = f" - {system_name}" if system_name else ""
         ax.set_title(f'(a) 1D Configuration Coordinate Diagram{sys_str}', loc='left', fontweight='bold', fontsize=12)
@@ -335,7 +335,7 @@ class ConfigurationCoordinateEngine:
 
         summary_text = (
             "Stokes & Franck-Condon Parameters:\n"
-            f"  • $\\Delta Q = {dq_total:.4f}\\ \\mathrm{{amu}}^{{1/2}}\\mathrm{{\\AA}}$\n"
+            f"  • $\\Delta Q = {dq_total:.4f}\\ \\mathrm{{amu}}^{{1/2}}\\mathrm{{Å}}$\n"
             f"  • $E_{{\\mathrm{{ZPL}}}} = {e_zpl:.3f}\\ \\mathrm{{eV}}$\n"
             f"  • $\\Delta E_{{\\mathrm{{rel,GS}}}} = {e_rel_gs_meV:.1f}\\ \\mathrm{{meV}}$\n"
             f"  • $\\Delta E_{{\\mathrm{{rel,ES}}}} = {e_rel_es_meV:.1f}\\ \\mathrm{{meV}}$\n"

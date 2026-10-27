@@ -315,7 +315,7 @@ class DefectBuilder:
                 pass
 
         gs_method = getattr(self.config, "ground_state_relax_method", "auto").lower()
-        es_method = getattr(self.config, "excited_state_method", "synthetic").lower()
+        es_method = getattr(self.config, "excited_state_method", "spin_proxy").lower()
         use_dft = (gs_method == "dft") or (gs_method == "auto" and es_method == "spin_proxy")
 
         if use_dft:
@@ -403,7 +403,7 @@ class DefectBuilder:
             except Exception:
                 pass
 
-        es_method = getattr(self.config, "excited_state_method", "synthetic").lower()
+        es_method = getattr(self.config, "excited_state_method", "spin_proxy").lower()
 
         if es_method == "spin_proxy":
             logger.info("\n[-] Optimizing Optical Excited State geometry using Quantum ESPRESSO spin-proxy method...")
