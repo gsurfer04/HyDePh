@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-__version__ = "0.6.2"
+__version__ = "0.6.3"
 
 # Configure root hydeph package logger
 logger = logging.getLogger("hydeph")

@@ -321,3 +321,67 @@ def test_defect_builder_spin_proxy_fallback_to_synthetic(tmp_path):
 
     assert os.path.isfile(os.path.join(ws, "relaxed_es.xyz"))
     assert dq_fc > 0.0
+
+
+def test_defect_builder_atomic_write_extxyz_and_numpy_defect_positions(tmp_path):
+    """Tests that atomic writing uses format='extxyz' (avoiding UnknownFileTypeError) and supports numpy defect_positions."""
+    pristine_path = str(tmp_path / "pristine.xyz")
+    pristine = Atoms("C8", positions=np.eye(8, 3) * 1.5, cell=[6, 6, 6], pbc=True)
+    pristine.write(pristine_path)
+
+    ws = str(tmp_path / "run_nv_test")
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_path,
+        workspace_dir=ws,
+        excited_state_method="spin_proxy",
+        ground_state_relax_method="dft",
+    )
+
+    mock_qe = MockRelaxationQERunner(cfg, delta_d=0.08)
+    builder = DefectBuilder(cfg, calc_foundation=DummyHarmonicCalc(), calc_qe=mock_qe)
+
+    at_gs = pristine.copy()
+    at_gs.info["defect_center"] = np.array([1.5, 1.5, 1.5])
+    # Multi-element numpy array in info simulating NV- or divacancy
+    at_gs.info["defect_positions"] = np.array([[1.5, 1.5, 1.5], [2.0, 2.0, 2.0]])
+
+    # Ground state relaxation should write relaxed_gs.xyz via .tmp.xyz without UnknownFileTypeError
+    relaxed_gs = builder.relax_ground_state(at_gs)
+    assert os.path.isfile(os.path.join(ws, "relaxed_gs.xyz"))
+    assert "defect_positions" in relaxed_gs.info
+
+    # Excited state relaxation should write relaxed_es.xyz via .tmp.xyz without UnknownFileTypeError
+    at_es, dq_fc = builder.generate_excited_state_geometry(relaxed_gs)
+    assert os.path.isfile(os.path.join(ws, "relaxed_es.xyz"))
+    assert "defect_positions" in at_es.info
+    assert dq_fc > 0.0
+
+
+def test_defect_builder_fallback_with_numpy_defect_positions(tmp_path):
+    """Tests synthetic breathing fallback when defect_positions is a multi-element numpy array."""
+    pristine_path = str(tmp_path / "pristine.xyz")
+    pristine = Atoms("C8", positions=np.eye(8, 3) * 1.5, cell=[6, 6, 6], pbc=True)
+    pristine.write(pristine_path)
+
+    ws = str(tmp_path / "run_fallback_numpy")
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_path,
+        workspace_dir=ws,
+        excited_state_method="spin_proxy",
+    )
+
+    class FailingQERunner:
+        def run_relaxation(self, *args, **kwargs):
+            raise RuntimeError("Simulated QE failure")
+
+    builder = DefectBuilder(cfg, calc_foundation=DummyHarmonicCalc(), calc_qe=FailingQERunner())
+
+    at_gs = pristine.copy()
+    at_gs.info["defect_center"] = np.array([1.5, 1.5, 1.5])
+    # Multi-element numpy array: evaluating `if not defect_pos_list:` previously raised ValueError
+    at_gs.info["defect_positions"] = np.array([[1.5, 1.5, 1.5], [2.0, 2.0, 2.0]])
+
+    at_es, dq_fc = builder.generate_excited_state_geometry(at_gs)
+    assert os.path.isfile(os.path.join(ws, "relaxed_es.xyz"))
+    assert dq_fc > 0.0
+

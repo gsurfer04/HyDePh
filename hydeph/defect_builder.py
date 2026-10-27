@@ -107,7 +107,7 @@ class DefectBuilder:
         rep = self.config.supercell_repeat
         pristine_sc = pristine.repeat(rep)
         pristine_sc_path = os.path.join(self.config.workspace_dir, "pristine_supercell.xyz")
-        ase.io.write(pristine_sc_path, pristine_sc)
+        ase.io.write(pristine_sc_path, pristine_sc, format="extxyz")
         logger.info(f"[+] Built pristine supercell ({len(pristine_sc)} atoms, repeat={rep})")
 
         if self.config.defect_cell_path and os.path.isfile(self.config.defect_cell_path):
@@ -221,7 +221,7 @@ class DefectBuilder:
             )
 
         defect_init_path = os.path.join(self.config.workspace_dir, "defect_unrelaxed.xyz")
-        ase.io.write(defect_init_path, defect_sc)
+        ase.io.write(defect_init_path, defect_sc, format="extxyz")
         return pristine_sc, defect_sc
 
     def embed_defect_unitcell(self, pristine_uc: Atoms, defect_uc: Atoms, rep: Tuple[int, int, int]) -> Tuple[Atoms, np.ndarray]:
@@ -333,13 +333,16 @@ class DefectBuilder:
                 )
                 at_gs.calc = None
                 at_gs.info["defect_center"] = np.asarray(center, dtype=float)
-                tmp_gs = gs_path + ".tmp"
-                ase.io.write(tmp_gs, at_gs)
+                if "defect_positions" in defect_sc.info:
+                    at_gs.info["defect_positions"] = defect_sc.info["defect_positions"]
+                tmp_gs = gs_path + ".tmp.xyz"
+                ase.io.write(tmp_gs, at_gs, format="extxyz")
                 os.replace(tmp_gs, gs_path)
                 logger.info(f"[+] Ground State DFT relaxation completed -> {gs_path}")
                 return at_gs
             except Exception as e:
-                logger.warning(f"[!] Ground State DFT relaxation failed or unavailable: {e}")
+                err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                logger.warning(f"[!] Ground State DFT relaxation failed or unavailable: {err_msg}")
                 if self.calc_foundation is None:
                     raise
                 logger.warning("    Falling back to foundation potential for Ground State relaxation...")
@@ -352,9 +355,13 @@ class DefectBuilder:
 
         energy_val = float(at_gs.get_potential_energy())
         at_gs.info["defect_center"] = np.asarray(center, dtype=float)
+        if "defect_positions" in defect_sc.info:
+            at_gs.info["defect_positions"] = defect_sc.info["defect_positions"]
         at_gs.info["energy"] = energy_val
         at_gs.calc = None
-        ase.io.write(gs_path, at_gs)
+        tmp_gs = gs_path + ".tmp.xyz"
+        ase.io.write(tmp_gs, at_gs, format="extxyz")
+        os.replace(tmp_gs, gs_path)
         logger.info(f"[+] Ground State relaxation completed: E = {energy_val:.4f} eV")
         return at_gs
 
@@ -379,7 +386,11 @@ class DefectBuilder:
             dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
             at_es.positions = at_gs.positions + dr_fc
             at_es.info["defect_center"] = np.asarray(center, dtype=float)
-            ase.io.write(es_path, at_es)
+            if "defect_positions" in at_gs.info:
+                at_es.info["defect_positions"] = at_gs.info["defect_positions"]
+            tmp_es = es_path + ".tmp.xyz"
+            ase.io.write(tmp_es, at_es, format="extxyz")
+            os.replace(tmp_es, es_path)
             m = at_gs.get_masses()
             dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
             logger.info(f"[+] Loaded Optical Excited State from file (Franck-Condon Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
@@ -434,9 +445,11 @@ class DefectBuilder:
                 dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
                 at_es.positions = at_gs.positions + dr_fc
                 at_es.info["defect_center"] = np.asarray(center, dtype=float)
+                if "defect_positions" in at_gs.info:
+                    at_es.info["defect_positions"] = at_gs.info["defect_positions"]
                 at_es.calc = None
-                tmp_es = es_path + ".tmp"
-                ase.io.write(tmp_es, at_es)
+                tmp_es = es_path + ".tmp.xyz"
+                ase.io.write(tmp_es, at_es, format="extxyz")
                 os.replace(tmp_es, es_path)
 
                 m = at_gs.get_masses()
@@ -444,7 +457,8 @@ class DefectBuilder:
                 logger.info(f"[+] Optical Excited State DFT relaxation completed (Franck-Condon Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
                 return at_es, dq_fc
             except Exception as e:
-                logger.warning(f"[!] Spin-proxy DFT relaxation failed or unavailable: {e}")
+                err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                logger.warning(f"[!] Spin-proxy DFT relaxation failed or unavailable: {err_msg}")
                 logger.warning("    Falling back to synthetic breathing displacement...")
 
         at_es = at_gs.copy()
@@ -452,7 +466,7 @@ class DefectBuilder:
         dists = np.linalg.norm(disp_vecs, axis=1)
 
         defect_pos_list = at_gs.info.get("defect_positions")
-        if not defect_pos_list:
+        if defect_pos_list is None or len(defect_pos_list) == 0:
             defect_pos_list = [center]
 
         # Identify which atoms in at_gs belong to the defect core (within 0.35 A of any defect site)
@@ -518,8 +532,12 @@ class DefectBuilder:
         dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
         at_es.positions = at_gs.positions + dr_fc
         at_es.info["defect_center"] = np.asarray(center, dtype=float)
+        if "defect_positions" in at_gs.info:
+            at_es.info["defect_positions"] = at_gs.info["defect_positions"]
         at_es.calc = None
-        ase.io.write(es_path, at_es)
+        tmp_es = es_path + ".tmp.xyz"
+        ase.io.write(tmp_es, at_es, format="extxyz")
+        os.replace(tmp_es, es_path)
 
         m = at_gs.get_masses()
         dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))

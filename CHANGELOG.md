@@ -5,6 +5,13 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-10-27
+
+### Fixed
+- **Atomic Writing File Format**: Explicitly specified `format="extxyz"` and standardized on `.tmp.xyz` temporary filenames when writing relaxed ground-state (`relaxed_gs.xyz`) and excited-state (`relaxed_es.xyz`) structures in `DefectBuilder`. Previously, temporary files ending in `.tmp` caused ASE to attempt format inference from the extension, raising `UnknownFileTypeError: tmp` and erroneously triggering fallback to synthetic breathing displacement.
+- **Array Ambiguity in Defect Coordinate Evaluation**: Fixed `ValueError: The truth value of an array with more than one element is ambiguous` in `DefectBuilder.generate_excited_state_geometry()` by safely checking `defect_pos_list is None or len(defect_pos_list) == 0` instead of truthy evaluation on NumPy coordinate arrays.
+- **Scratch Directory Disk Reclamation**: Automatically purged scratch `tmp/` folders (wavefunctions and charge densities) upon successful completion of Quantum ESPRESSO geometry relaxations and frame labeling to avoid disk bloat.
+
 ## [0.6.2] - 2026-10-27
 
 ### Added

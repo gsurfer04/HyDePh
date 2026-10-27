@@ -841,6 +841,12 @@ class QERunner:
         if gap_info:
             for k, v in gap_info.items():
                 at_labeled.info[f"dft_{k}"] = v
+
+        # Clean scratch tmp/ directory to prevent disk bloat
+        tmp_dir = os.path.join(calc_dir, "tmp")
+        if os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
         return at_labeled
 
     def run_relaxation(
@@ -1002,6 +1008,10 @@ class QERunner:
         logger.info(f"      [pw relax] Completed in {dur:.1f}s | Energy = {e_ev:.4f} eV" if e_ev else f"      [pw relax] Completed in {dur:.1f}s")
         if at_rel is not None:
             at_rel.calc = None
+            # Clean scratch tmp/ directory to prevent disk bloat
+            tmp_dir = os.path.join(calc_dir, "tmp")
+            if os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
         return at_rel
 
     def _obtain_replacement_entry(
