@@ -1,0 +1,17 @@
+Program PWSCF v.7.2 starts on 27Oct2026 at 12:00:00
+
+     iteration # 100 ecut=   80.00 Ry     beta= 0.40
+     Davidson diagonalization with overlap
+     ethr =  1.00E-05, avg # of iterations =  3.2
+
+     total cpu time spent up to now is       45.2 secs
+
+     End of self-consistent calculation
+
+     convergence NOT achieved after 100 iterations: stopping
+
+!    total energy              =    -119.87654321 Ry
+     Harris-Foulkes estimate   =    -119.87650000 Ry
+     estimated scf accuracy    <          0.00500000 Ry
+
+     JOB DONE.

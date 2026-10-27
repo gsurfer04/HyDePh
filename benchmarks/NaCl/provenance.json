@@ -1,0 +1,38 @@
+{
+  "system": "NaCl",
+  "timestamp_utc": "2026-10-27T21:30:09.755525+00:00",
+  "hydeph_version": "0.6.3",
+  "python_version": "3.14.6",
+  "ase_version": "3.29.0",
+  "allow_fallbacks": false,
+  "excited_state_method": "spin_proxy",
+  "paired_delta_nep": true,
+  "num_atoms": 63,
+  "chemical_formula": "Cl31Na32",
+  "total_huang_rhys_S": 8.410839571013675,
+  "dwf_zero_temp": 0.00022244302178589705,
+  "zpl_energy_eV": null,
+  "stokes_shift_eV": 0.42960555611352924,
+  "data_files": {
+    "optical_lineshapes.csv": {
+      "bytes": 195841,
+      "sha256": "c7f3fcde58f0c76acd44eac9e256d4d1bd91224daa8f823dc8186dafa289d9b1"
+    },
+    "spectral_density.csv": {
+      "bytes": 38148,
+      "sha256": "dafcd25702644646017d9a6d33dae823ae41a64b2a3f927b4098405ba6c237b0"
+    },
+    "configuration_coordinate_curve.csv": {
+      "bytes": 3074,
+      "sha256": "5d6947b8a5f8c964fce1805f51f47877ccc42c6e6d4f9ac8ad5f005cc0771304"
+    },
+    "relaxed_gs.xyz": {
+      "bytes": 17786,
+      "sha256": "6dcd81a258aed1c35ae63877562e84b26cb6793a9c3453812eff93a539647f20"
+    },
+    "relaxed_es.xyz": {
+      "bytes": 17787,
+      "sha256": "e945bc2a8c8a4a89c943973126bda8c6f6589e4c46e1a952e943c0f647ad51d7"
+    }
+  }
+}

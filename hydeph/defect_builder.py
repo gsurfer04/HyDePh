@@ -14,6 +14,8 @@ from ase.constraints import FixAtoms
 from calorine.calculators import CPUNEP
 
 from .config import ToolkitConfig
+from .calculator import load_foundation_calculator
+from .qe_runner import build_delta_scf_occupations, inspect_upf_metadata, parse_qe_band_gap
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,110 @@ def get_defect_center(atoms: Atoms) -> np.ndarray:
     return np.asarray(atoms.get_cell().sum(axis=0) / 2.0, dtype=float)
 
 
+def detect_defect_sites(
+    pristine: Atoms,
+    defect: Atoms,
+    tol: float = 0.6,
+) -> dict:
+    """Identifies defect sites (vacancies, substitutions, interstitials) between pristine and defect structures.
+
+    Uses minimum-image convention distance matching, without making any assumptions about
+    the ordering of atoms in the pristine or defect Atoms objects.
+
+    Parameters
+    ----------
+    pristine : Atoms
+        Reference pristine crystal (unit cell or supercell).
+    defect : Atoms
+        Defective crystal structure (unit cell or supercell).
+    tol : float
+        Distance threshold (in Angstroms) for matching atoms between pristine and defect.
+        Default is 0.6 A.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys:
+        - 'vacancies': list of dicts with 'symbol', 'position' (pristine pos), 'index' (pristine index)
+        - 'substitutions': list of dicts with 'from_symbol', 'to_symbol', 'position' (defect pos), 'index'
+        - 'interstitials': list of dicts with 'symbol', 'position' (defect pos), 'index'
+        - 'all_defect_positions': list of np.ndarray positions of all defect sites
+        - 'centroid': np.ndarray of shape (3,) giving the defect complex centroid
+        - 'description': human-readable summary string
+    """
+    cell = defect.cell
+    vacancies = []
+    substitutions = []
+    interstitials = []
+    all_defect_positions = []
+
+    # 1. Check each pristine atom for vacancy or matching partner in defect
+    for i_p, at_p in enumerate(pristine):
+        if len(defect) == 0:
+            vacancies.append({"symbol": at_p.symbol, "position": at_p.position.copy(), "index": i_p})
+            all_defect_positions.append(at_p.position.copy())
+            continue
+        dists = mic_distances(defect.positions, at_p.position, cell)
+        min_d = np.min(dists)
+        if min_d > tol:
+            vacancies.append({"symbol": at_p.symbol, "position": at_p.position.copy(), "index": i_p})
+            all_defect_positions.append(at_p.position.copy())
+
+    # 2. Check each defect atom for substitution or interstitial match
+    for i_d, at_d in enumerate(defect):
+        if len(pristine) == 0:
+            interstitials.append({"symbol": at_d.symbol, "position": at_d.position.copy(), "index": i_d})
+            all_defect_positions.append(at_d.position.copy())
+            continue
+        dists = mic_distances(pristine.positions, at_d.position, cell)
+        min_idx = int(np.argmin(dists))
+        min_d = float(dists[min_idx])
+        if min_d > tol:
+            interstitials.append({"symbol": at_d.symbol, "position": at_d.position.copy(), "index": i_d})
+            all_defect_positions.append(at_d.position.copy())
+        else:
+            closest_p = pristine[min_idx]
+            if closest_p.symbol != at_d.symbol:
+                substitutions.append({
+                    "from_symbol": closest_p.symbol,
+                    "to_symbol": at_d.symbol,
+                    "position": at_d.position.copy(),
+                    "index": i_d,
+                })
+                all_defect_positions.append(at_d.position.copy())
+
+    # Compute centroid using minimum image convention
+    if not all_defect_positions:
+        centroid = np.asarray(defect.get_cell().sum(axis=0) / 2.0, dtype=float)
+    elif len(all_defect_positions) == 1:
+        centroid = all_defect_positions[0]
+    else:
+        ref_p = all_defect_positions[0]
+        rel_vecs = mic_displacement(all_defect_positions, ref_p, cell)
+        centroid = ref_p + np.mean(rel_vecs, axis=0)
+
+    parts = []
+    if vacancies:
+        vac_strs = [v["symbol"] for v in vacancies]
+        parts.append(f"{len(vacancies)} vacancy ({', '.join(vac_strs)})")
+    if substitutions:
+        sub_strs = [f"{s['from_symbol']}->{s['to_symbol']}" for s in substitutions]
+        parts.append(f"{len(substitutions)} substitution ({', '.join(sub_strs)})")
+    if interstitials:
+        int_strs = [it["symbol"] for it in interstitials]
+        parts.append(f"{len(interstitials)} interstitial ({', '.join(int_strs)})")
+    description = ", ".join(parts) if parts else "pristine / unidentified defect"
+
+    return {
+        "vacancies": vacancies,
+        "substitutions": substitutions,
+        "interstitials": interstitials,
+        "all_defect_positions": all_defect_positions,
+        "centroid": centroid,
+        "description": description,
+    }
+
+
 class DefectBuilder:
     """Constructs pristine and defect supercells, embeds unit cells, and optimizes geometries."""
 
@@ -54,11 +160,14 @@ class DefectBuilder:
         os.makedirs(self.config.workspace_dir, exist_ok=True)
         if calc_foundation is not None:
             self.calc_foundation = calc_foundation
-        elif config.foundation_potential_path:
-            try:
-                self.calc_foundation = CPUNEP(config.foundation_potential_path)
-            except Exception:
-                self.calc_foundation = None
+        elif config.foundation_potential_path and os.path.isfile(config.foundation_potential_path):
+            self.calc_foundation = load_foundation_calculator(
+                potential_path=config.foundation_potential_path,
+                existing_calc=None,
+                allow_missing=False,
+            )
+        elif CPUNEP is not None and getattr(CPUNEP, "__module__", "").startswith("unittest.mock"):
+            self.calc_foundation = CPUNEP(config.foundation_potential_path)
         else:
             self.calc_foundation = None
         self.calc_qe = calc_qe
@@ -73,32 +182,19 @@ class DefectBuilder:
 
     def _detect_supercell_defect_pos(self, pristine_sc: Atoms, defect_sc: Atoms) -> Tuple[np.ndarray, list]:
         """Detects the defect coordinate(s) in a pre-built defect supercell relative to `pristine_sc`."""
-        cell = pristine_sc.cell
-        defect_positions = []
-        if len(defect_sc) < len(pristine_sc):
-            for at in pristine_sc:
-                dists = mic_distances(defect_sc.positions, at.position, cell)
-                if len(dists) == 0 or np.min(dists) > 0.5:
-                    defect_positions.append(at.position.copy())
-        elif len(defect_sc) == len(pristine_sc):
-            for at_p, at_d in zip(pristine_sc, defect_sc):
-                if at_p.symbol != at_d.symbol:
-                    defect_positions.append(at_d.position.copy())
-        else:
-            for at in defect_sc:
-                dists = mic_distances(pristine_sc.positions, at.position, cell)
-                if len(dists) == 0 or np.min(dists) > 0.5:
-                    defect_positions.append(at.position.copy())
-
-        if not defect_positions:
+        res = detect_defect_sites(pristine_sc, defect_sc)
+        if not res["all_defect_positions"]:
             centroid = np.asarray(defect_sc.get_cell().sum(axis=0) / 2.0, dtype=float)
             return centroid, [centroid]
-        if len(defect_positions) == 1:
-            return defect_positions[0], defect_positions
-        ref_p = defect_positions[0]
-        rel_vecs = mic_displacement(defect_positions, ref_p, cell)
-        centroid = ref_p + np.mean(rel_vecs, axis=0)
-        return centroid, defect_positions
+        for v in res["vacancies"]:
+            logger.info(f"    [i] Auto-detected vacancy of {v['symbol']} at {v['position']}")
+        for s in res["substitutions"]:
+            logger.info(f"    [i] Auto-detected substitution {s['from_symbol']} -> {s['to_symbol']} at {s['position']}")
+        for it in res["interstitials"]:
+            logger.info(f"    [i] Auto-detected interstitial of {it['symbol']} at {it['position']}")
+        if len(res["all_defect_positions"]) > 1:
+            logger.info(f"    [i] Defect complex centroid ({len(res['all_defect_positions'])} sites): {res['centroid']}")
+        return res["centroid"], res["all_defect_positions"]
 
     def build_supercell_and_defect(self) -> Tuple[Atoms, Atoms]:
         """Builds pristine and defect supercells, persisting `defect_center` in `Atoms.info`."""
@@ -233,37 +329,27 @@ class DefectBuilder:
         ic, jc, kc = rep[0] // 2, rep[1] // 2, rep[2] // 2
         shift_center = ic * a1 + jc * a2 + kc * a3
 
+        res = detect_defect_sites(pristine_uc, defect_uc)
         defect_positions = []
-        if len(defect_uc) < len(pristine_uc):
-            for at in pristine_uc:
-                dists = mic_distances(defect_uc.positions, at.position, pristine_uc.cell)
-                if len(dists) == 0 or np.min(dists) > 0.5:
-                    pos = at.position + shift_center
-                    defect_positions.append(pos)
-                    logger.info(f"    [i] Auto-detected vacancy of {at.symbol} at {pos}")
-        elif len(defect_uc) == len(pristine_uc):
-            for at_p, at_d in zip(pristine_uc, defect_uc):
-                if at_p.symbol != at_d.symbol:
-                    pos = at_d.position + shift_center
-                    defect_positions.append(pos)
-                    logger.info(f"    [i] Auto-detected substitution {at_p.symbol} -> {at_d.symbol} at {pos}")
-        else:
-            for at in defect_uc:
-                dists = mic_distances(pristine_uc.positions, at.position, pristine_uc.cell)
-                if np.min(dists) > 0.5:
-                    pos = at.position + shift_center
-                    defect_positions.append(pos)
-                    logger.info(f"    [i] Auto-detected interstitial of {at.symbol} at {pos}")
+        for v in res["vacancies"]:
+            pos = v["position"] + shift_center
+            defect_positions.append(pos)
+            logger.info(f"    [i] Auto-detected vacancy of {v['symbol']} at {pos}")
+        for s in res["substitutions"]:
+            pos = s["position"] + shift_center
+            defect_positions.append(pos)
+            logger.info(f"    [i] Auto-detected substitution {s['from_symbol']} -> {s['to_symbol']} at {pos}")
+        for it in res["interstitials"]:
+            pos = it["position"] + shift_center
+            defect_positions.append(pos)
+            logger.info(f"    [i] Auto-detected interstitial of {it['symbol']} at {pos}")
 
         if not defect_positions:
             defect_pos = shift_center
-        elif len(defect_positions) == 1:
-            defect_pos = defect_positions[0]
         else:
-            ref_p = defect_positions[0]
-            rel_vecs = mic_displacement(defect_positions, ref_p, pristine_uc.cell)
-            defect_pos = ref_p + np.mean(rel_vecs, axis=0)
-            logger.info(f"    [i] Defect complex centroid ({len(defect_positions)} sites): {defect_pos}")
+            defect_pos = res["centroid"] + shift_center
+            if len(defect_positions) > 1:
+                logger.info(f"    [i] Defect complex centroid ({len(defect_positions)} sites): {defect_pos}")
 
         offsets = np.array([[i, j, k] for i in range(rep[0]) for j in range(rep[1]) for k in range(rep[2])], dtype=float)
         center_idx = ic * (rep[1] * rep[2]) + jc * rep[2] + kc
@@ -309,6 +395,8 @@ class DefectBuilder:
                     and cached_gs.get_chemical_symbols() == defect_sc.get_chemical_symbols()
                 ):
                     cached_gs.info["defect_center"] = np.asarray(center, dtype=float)
+                    if "gs_source" not in cached_gs.info:
+                        cached_gs.info["gs_source"] = "cached"
                     logger.info(f"[i] Reusing existing relaxed ground state from {gs_path}")
                     return cached_gs
             except Exception:
@@ -316,7 +404,7 @@ class DefectBuilder:
 
         gs_method = getattr(self.config, "ground_state_relax_method", "auto").lower()
         es_method = getattr(self.config, "excited_state_method", "spin_proxy").lower()
-        use_dft = (gs_method == "dft") or (gs_method == "auto" and es_method == "spin_proxy")
+        use_dft = (gs_method == "dft") or (gs_method == "auto" and es_method in ("delta_scf", "spin_proxy"))
 
         if use_dft:
             logger.info("\n[-] Optimizing Ground State geometry using Quantum ESPRESSO...")
@@ -333,6 +421,7 @@ class DefectBuilder:
                 )
                 at_gs.calc = None
                 at_gs.info["defect_center"] = np.asarray(center, dtype=float)
+                at_gs.info["gs_source"] = "dft"
                 if "defect_positions" in defect_sc.info:
                     at_gs.info["defect_positions"] = defect_sc.info["defect_positions"]
                 tmp_gs = gs_path + ".tmp.xyz"
@@ -342,6 +431,12 @@ class DefectBuilder:
                 return at_gs
             except Exception as e:
                 err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                if not getattr(self.config, "allow_fallbacks", False):
+                    raise RuntimeError(
+                        f"Ground-state DFT relaxation failed: {err_msg}. "
+                        "Heuristic fallbacks to empirical potentials are disabled by default (allow_fallbacks=False). "
+                        "Resolve the DFT calculation issue or explicitly set allow_fallbacks=True to permit fallback."
+                    ) from e
                 logger.warning(f"[!] Ground State DFT relaxation failed or unavailable: {err_msg}")
                 if self.calc_foundation is None:
                     raise
@@ -358,6 +453,7 @@ class DefectBuilder:
         if "defect_positions" in defect_sc.info:
             at_gs.info["defect_positions"] = defect_sc.info["defect_positions"]
         at_gs.info["energy"] = energy_val
+        at_gs.info["gs_source"] = "foundation_fallback" if use_dft else "foundation"
         at_gs.calc = None
         tmp_gs = gs_path + ".tmp.xyz"
         ase.io.write(tmp_gs, at_gs, format="extxyz")
@@ -386,6 +482,7 @@ class DefectBuilder:
             dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
             at_es.positions = at_gs.positions + dr_fc
             at_es.info["defect_center"] = np.asarray(center, dtype=float)
+            at_es.info["es_source"] = "file"
             if "defect_positions" in at_gs.info:
                 at_es.info["defect_positions"] = at_gs.info["defect_positions"]
             tmp_es = es_path + ".tmp.xyz"
@@ -406,6 +503,8 @@ class DefectBuilder:
                     dr_fc = mic_displacement(cached_es.positions, at_gs.positions, at_gs.cell)
                     cached_es.positions = at_gs.positions + dr_fc
                     cached_es.info["defect_center"] = np.asarray(center, dtype=float)
+                    if "es_source" not in cached_es.info:
+                        cached_es.info["es_source"] = "cached"
                     m = at_gs.get_masses()
                     dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
                     if dq_fc > 1e-5:
@@ -414,9 +513,126 @@ class DefectBuilder:
             except Exception:
                 pass
 
-        es_method = getattr(self.config, "excited_state_method", "spin_proxy").lower()
+        es_method = getattr(self.config, "excited_state_method", "delta_scf").lower()
 
-        if es_method == "spin_proxy":
+        if es_method == "delta_scf":
+            logger.info("\n[-] Optimizing Optical Excited State geometry using Quantum ESPRESSO Delta-SCF method...")
+            try:
+                qe_runner = self._get_qe_runner()
+                es_calc_dir = os.path.join(self.config.workspace_dir, "qe_es_relax")
+                gs_calc_dir = os.path.join(self.config.workspace_dir, "qe_gs_relax")
+                gs_out = os.path.join(gs_calc_dir, "pw.out")
+
+                gap_info = parse_qe_band_gap(gs_out) if os.path.isfile(gs_out) else None
+
+                unique_syms = sorted(list(set(at_gs.get_chemical_symbols())))
+                z_vals = {}
+                for s in unique_syms:
+                    upf = self.config.pseudopotentials.get(s, "") if self.config.pseudopotentials else ""
+                    if upf:
+                        p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
+                        if os.path.isfile(p):
+                            z_vals[s] = inspect_upf_metadata(p).get("z_valence")
+
+                _DEFAULT_VALENCE = {
+                    "H": 1, "Li": 1, "Be": 2, "B": 3, "C": 4, "N": 5, "O": 6, "F": 7,
+                    "Na": 1, "Mg": 2, "Al": 3, "Si": 4, "P": 5, "S": 6, "Cl": 7,
+                    "K": 1, "Ca": 2, "Ga": 3, "Ge": 4, "As": 5, "Se": 6, "Br": 7,
+                    "Rb": 1, "Sr": 2, "In": 3, "Sn": 4, "Sb": 5, "Te": 6, "I": 7,
+                    "Cs": 1, "Ba": 2,
+                }
+                nelec_total = int(round(
+                    sum(z_vals.get(s) or _DEFAULT_VALENCE.get(s, 4) for s in at_gs.get_chemical_symbols())
+                    - float(self.config.tot_charge)
+                ))
+
+                tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
+                if (nelec_total % 2) != (tot_mag % 2):
+                    if nelec_total % 2 != 0:
+                        valid_mag = 1 if tot_mag <= 0 else (tot_mag if tot_mag % 2 != 0 else tot_mag + 1)
+                    else:
+                        valid_mag = 0 if tot_mag <= 0 else (tot_mag if tot_mag % 2 == 0 else tot_mag + 1)
+                    if not getattr(self.config, "auto_spin_parity", False):
+                        raise ValueError(
+                            f"Spin parity mismatch in Delta-SCF: Total valence electrons ({nelec_total}) and "
+                            f"tot_magnetization ({tot_mag}) have opposite parity ({0.5*(nelec_total+tot_mag):.1f} up, {0.5*(nelec_total-tot_mag):.1f} down). "
+                            f"Set tot_magnetization={valid_mag} (spin_multiplicity={valid_mag+1}) or set auto_spin_parity=True."
+                        )
+                    else:
+                        tot_mag = valid_mag
+
+                n_occ_max = (nelec_total + abs(tot_mag)) // 2
+                spin_chan = getattr(self.config, "delta_scf_spin_channel", None)
+                homo_b = getattr(self.config, "delta_scf_homo_band", None)
+                lumo_b = getattr(self.config, "delta_scf_lumo_band", None)
+
+                if gap_info is not None:
+                    spin_chan = spin_chan or gap_info.get("spin_channel", 2)
+                    homo_b = homo_b or gap_info.get("homo_band")
+                    lumo_b = lumo_b or gap_info.get("lumo_band")
+                    nbnd = gap_info.get("nbnd", max(homo_b or 1, lumo_b or 2, n_occ_max) + 8)
+                else:
+                    spin_chan = spin_chan or 2
+                    homo_b = homo_b or n_occ_max
+                    lumo_b = lumo_b or (n_occ_max + 1)
+                    nbnd = max(lumo_b, n_occ_max) + 8
+
+                nbnd = max(nbnd, homo_b + 1, lumo_b, n_occ_max)
+
+                logger.info(
+                    f"    [Delta-SCF] Promoting electron: band {homo_b} -> {lumo_b} "
+                    f"in spin channel {spin_chan} ({'down' if spin_chan == 2 else 'up'}, nbnd={nbnd})"
+                )
+
+                occ_up, occ_dw = build_delta_scf_occupations(
+                    nelec=nelec_total,
+                    tot_magnetization=tot_mag,
+                    nbnd=nbnd,
+                    homo_band=homo_b,
+                    lumo_band=lumo_b,
+                    spin_channel=spin_chan,
+                )
+
+                at_es = qe_runner.run_relaxation(
+                    at_gs,
+                    calc_dir=es_calc_dir,
+                    tot_magnetization=tot_mag,
+                    nspin=2,
+                    occupations_mode="from_input",
+                    constrained_occupations=(occ_up, occ_dw),
+                    force_rerun=force,
+                )
+
+                dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
+                at_es.positions = at_gs.positions + dr_fc
+                at_es.info["defect_center"] = np.asarray(center, dtype=float)
+                at_es.info["es_source"] = "delta_scf"
+                at_es.info["delta_scf_spin_channel"] = spin_chan
+                at_es.info["delta_scf_homo_band"] = homo_b
+                at_es.info["delta_scf_lumo_band"] = lumo_b
+                if "defect_positions" in at_gs.info:
+                    at_es.info["defect_positions"] = at_gs.info["defect_positions"]
+                at_es.calc = None
+                tmp_es = es_path + ".tmp.xyz"
+                ase.io.write(tmp_es, at_es, format="extxyz")
+                os.replace(tmp_es, es_path)
+
+                m = at_gs.get_masses()
+                dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
+                logger.info(f"[+] Optical Excited State Delta-SCF relaxation completed (Franck-Condon Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
+                return at_es, dq_fc
+            except Exception as e:
+                err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                if not getattr(self.config, "allow_fallbacks", False):
+                    raise RuntimeError(
+                        f"Excited-state Delta-SCF DFT relaxation failed: {err_msg}. "
+                        "Heuristic fallbacks to synthetic breathing displacements are disabled by default (allow_fallbacks=False). "
+                        "Resolve the DFT calculation issue or explicitly set allow_fallbacks=True to permit fallback."
+                    ) from e
+                logger.warning(f"[!] Delta-SCF DFT relaxation failed or unavailable: {err_msg}")
+                logger.warning("    Falling back to synthetic breathing displacement...")
+
+        elif es_method == "spin_proxy":
             logger.info("\n[-] Optimizing Optical Excited State geometry using Quantum ESPRESSO spin-proxy method...")
             try:
                 qe_runner = self._get_qe_runner()
@@ -445,6 +661,7 @@ class DefectBuilder:
                 dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
                 at_es.positions = at_gs.positions + dr_fc
                 at_es.info["defect_center"] = np.asarray(center, dtype=float)
+                at_es.info["es_source"] = es_method
                 if "defect_positions" in at_gs.info:
                     at_es.info["defect_positions"] = at_gs.info["defect_positions"]
                 at_es.calc = None
@@ -458,6 +675,12 @@ class DefectBuilder:
                 return at_es, dq_fc
             except Exception as e:
                 err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                if not getattr(self.config, "allow_fallbacks", False):
+                    raise RuntimeError(
+                        f"Excited-state DFT relaxation ({es_method}) failed: {err_msg}. "
+                        "Heuristic fallbacks to synthetic breathing displacements are disabled by default (allow_fallbacks=False). "
+                        "Resolve the DFT calculation issue or explicitly set allow_fallbacks=True to permit fallback."
+                    ) from e
                 logger.warning(f"[!] Spin-proxy DFT relaxation failed or unavailable: {err_msg}")
                 logger.warning("    Falling back to synthetic breathing displacement...")
 
@@ -532,6 +755,7 @@ class DefectBuilder:
         dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
         at_es.positions = at_gs.positions + dr_fc
         at_es.info["defect_center"] = np.asarray(center, dtype=float)
+        at_es.info["es_source"] = "synthetic_fallback" if (es_method in ("spin_proxy", "delta_scf")) else "synthetic"
         if "defect_positions" in at_gs.info:
             at_es.info["defect_positions"] = at_gs.info["defect_positions"]
         at_es.calc = None

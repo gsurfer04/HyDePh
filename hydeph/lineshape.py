@@ -8,11 +8,12 @@ import json
 import time
 import hashlib
 import logging
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from ase import Atoms
 from ase.vibrations import Vibrations
 from scipy.signal import fftconvolve, correlate
 
@@ -44,7 +45,8 @@ def compute_quantum_lineshape(
     hw_grid_meV: np.ndarray,
     s_cont_per_eV: np.ndarray,
     temp_k: float,
-    dephasing_gamma_meV: float = 2.0,
+    dephasing_gamma_meV: float = 1.5,
+    time_window_tau_fs: Optional[float] = None,
     e_min_meV: Optional[float] = None,
     e_max_meV: Optional[float] = None,
     n_e: int = 1500,
@@ -89,7 +91,10 @@ def compute_quantum_lineshape(
     g_im = w_im @ np.sin(wt)
 
     gamma_fs_inv = (dephasing_gamma_meV / 1000.0) / HBAR_EV_FS
-    damping = np.exp(-gamma_fs_inv * t_pos - 0.5 * (t_pos / 2000.0) ** 2)
+    if time_window_tau_fs is not None and time_window_tau_fs > 0:
+        damping = np.exp(-gamma_fs_inv * t_pos - 0.5 * (t_pos / time_window_tau_fs) ** 2)
+    else:
+        damping = np.exp(-gamma_fs_inv * t_pos)
     G_pos = np.exp(g_re + 1j * g_im) * damping
 
     # Zero-padded 1D FFT evaluation of 2 * Re \int_0^T dt G(t) exp(i * w_out * t)
@@ -109,6 +114,168 @@ def compute_quantum_lineshape(
     total_area = float(trapz_fn(a_unnorm, energy_grid))
     a_norm = a_unnorm / total_area if total_area > 0 else a_unnorm
     return energy_grid, a_norm
+
+
+def compute_photoluminescence_spectrum(
+    e_rel_meV: np.ndarray,
+    a_norm: np.ndarray,
+    e_zpl_eV: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    r"""Computes normalized photoluminescence spectrum I_PL(hbar omega) \propto (hbar omega)^3 * A(hbar omega - E_ZPL).
+
+    Parameters
+    ----------
+    e_rel_meV : np.ndarray
+        Energy grid relative to ZPL (meV).
+    a_norm : np.ndarray
+        Normalized lineshape A(E - E_ZPL).
+    e_zpl_eV : float
+        Zero-Phonon Line energy in eV.
+
+    Returns
+    -------
+    photon_energy_eV : np.ndarray
+        Absolute photon energy grid (eV).
+    i_pl_norm : np.ndarray
+        Normalized luminescence intensity (1/eV).
+    """
+    trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    photon_energy_eV = e_zpl_eV + (np.asarray(e_rel_meV, dtype=float) / 1000.0)
+    mask = photon_energy_eV > 0.0
+    i_pl = np.zeros_like(photon_energy_eV)
+    if np.any(mask):
+        i_pl[mask] = (photon_energy_eV[mask] ** 3) * a_norm[mask]
+        area = float(trapz_fn(i_pl, photon_energy_eV))
+        if area > 0:
+            i_pl = i_pl / area
+    return photon_energy_eV, i_pl
+
+
+def embed_phonon_supercell(
+    at_gs: Atoms,
+    at_es: Atoms,
+    config: ToolkitConfig,
+    calc_gs,
+    calc_es=None,
+) -> Tuple[Atoms, np.ndarray, Optional[np.ndarray]]:
+    """Embeds a relaxed defect from the DFT supercell into a larger pristine supercell for phonon calculations.
+
+    Parameters
+    ----------
+    at_gs : Atoms
+        Ground-state defect supercell.
+    at_es : Atoms
+        Excited-state defect supercell.
+    config : ToolkitConfig
+        Toolkit configuration containing phonon_supercell_repeat and phonon_embedding_method.
+    calc_gs : Calculator
+        Hybrid defect calculator for ground state.
+    calc_es : Calculator, optional
+        Hybrid defect calculator for excited state.
+
+    Returns
+    -------
+    at_gs_large : Atoms
+        Relaxed ground state in the large supercell.
+    dr_large : np.ndarray
+        Optical displacement field Delta R mapped to the large supercell.
+    f_es_large : Optional[np.ndarray]
+        Excited-state forces evaluated on at_gs_large (if calc_es provided and force method used).
+    """
+    import copy
+    from ase.optimize import BFGS
+    import ase.io
+    from .defect_builder import DefectBuilder, detect_defect_sites
+
+    rep_large = config.phonon_supercell_repeat
+    logger.info(f"\n[-] Embedding defect into large phonon supercell (repeat={rep_large})...")
+
+    pristine_uc = ase.io.read(config.pristine_cell_path)
+    pristine_large = pristine_uc.repeat(rep_large)
+
+    pristine_small = pristine_uc.repeat(config.supercell_repeat)
+    defect_info = detect_defect_sites(pristine_small, at_gs)
+    c_small = defect_info["centroid"]
+
+    if config.defect_cell_path and os.path.isfile(config.defect_cell_path):
+        defect_input = ase.io.read(config.defect_cell_path)
+        v_input = defect_input.get_volume()
+        v_uc = pristine_uc.get_volume()
+        if abs(v_input - v_uc) / v_uc < 0.25:
+            temp_builder = DefectBuilder(config, calc_foundation=calc_gs)
+            at_gs_large, detected_pos = temp_builder.embed_defect_unitcell(pristine_uc, defect_input, rep_large)
+            c_large = np.asarray(detected_pos, dtype=float)
+        else:
+            at_gs_large = pristine_large.copy()
+            c_large = at_gs_large.get_cell().sum(axis=0) / 2.0
+            _apply_defect_sites_to_supercell(pristine_small, at_gs, at_gs_large, c_small, c_large)
+    else:
+        temp_cfg = copy.copy(config)
+        temp_cfg.supercell_repeat = rep_large
+        temp_builder = DefectBuilder(temp_cfg, calc_foundation=calc_gs)
+        _, at_gs_large = temp_builder.build_supercell_and_defect()
+        c_large = np.asarray(
+            at_gs_large.info.get("defect_center", at_gs_large.get_cell().sum(axis=0) / 2.0),
+            dtype=float,
+        )
+
+    logger.info(f"    [-] Relaxing large phonon supercell ({len(at_gs_large)} atoms) on hybrid potential...")
+    at_gs_large.calc = calc_gs
+    opt = BFGS(at_gs_large, logfile=None)
+    fmax_thr = getattr(config, "relax_forc_conv_thr", 0.01)
+    opt.run(fmax=fmax_thr, steps=100)
+    e_large = at_gs_large.get_potential_energy()
+    f_large_max = float(np.abs(at_gs_large.get_forces()).max())
+    logger.info(f"    [+] Large phonon supercell relaxed: E = {e_large:.4f} eV, max |F| = {f_large_max:.4f} eV/A")
+
+    dr_small = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
+    dr_large = np.zeros_like(at_gs_large.positions)
+
+    for j, at_j in enumerate(at_gs_large):
+        rj_rel = mic_displacement([at_j.position], c_large, at_gs_large.cell)[0]
+        ri_rels = mic_displacement(at_gs.positions, c_small, at_gs.cell)
+        dists = np.linalg.norm(ri_rels - rj_rel, axis=1)
+        min_i = int(np.argmin(dists))
+        if dists[min_i] < 0.25 and at_gs[min_i].symbol == at_j.symbol:
+            dr_large[j] = dr_small[min_i]
+
+    dq_fc_large = float(np.sqrt(np.sum(at_gs_large.get_masses()[:, None] * (dr_large ** 2))))
+    logger.info(
+        f"    [+] Embedded optical displacement field: Delta Q = {dq_fc_large:.4f} amu^(1/2)*A "
+        f"({np.count_nonzero(np.linalg.norm(dr_large, axis=1) > 1e-4)} active atoms)"
+    )
+
+    f_es_large = None
+    if calc_es is not None and getattr(config, "phonon_embedding_method", "displacement").lower() == "force":
+        logger.info("    [-] Evaluating excited-state forces on relaxed ground-state large supercell (Alkauskas/Razinkovas)...")
+        at_gs_large.calc = calc_es
+        f_es_large = at_gs_large.get_forces().copy()
+        at_gs_large.calc = calc_gs
+
+    return at_gs_large, dr_large, f_es_large
+
+
+def _apply_defect_sites_to_supercell(pristine_small, at_gs, at_large, c_small, c_large):
+    """Applies vacancies and substitutions from small cell to large supercell."""
+    from .defect_builder import detect_defect_sites, mic_distances
+    res = detect_defect_sites(pristine_small, at_gs)
+    del_indices = []
+    for v in res["vacancies"]:
+        r_rel = mic_displacement([v["position"]], c_small, pristine_small.cell)[0]
+        target_pos = c_large + r_rel
+        dists = mic_distances(at_large.positions, target_pos, at_large.cell)
+        min_idx = int(np.argmin(dists))
+        if dists[min_idx] < 0.3:
+            del_indices.append(min_idx)
+    for idx in sorted(del_indices, reverse=True):
+        del at_large[idx]
+    for s in res["substitutions"]:
+        r_rel = mic_displacement([s["position"]], c_small, pristine_small.cell)[0]
+        target_pos = c_large + r_rel
+        dists = mic_distances(at_large.positions, target_pos, at_large.cell)
+        min_idx = int(np.argmin(dists))
+        if dists[min_idx] < 0.3:
+            at_large[min_idx].symbol = s["to_symbol"]
 
 
 def _compute_hessian_fingerprint(atoms, calc, delta=0.01) -> str:
@@ -139,13 +306,35 @@ class LineshapeEngine:
     def __init__(self, config: ToolkitConfig, hybrid_calc):
         self.config = config
         self.calc = hybrid_calc
+        self.calc_es = None
+        self.paired_calc = None
 
     def calculate_spectral_density_and_lineshapes(self, at_gs: Atoms, at_es: Atoms) -> Dict[str, Any]:
         """Calculates normal modes, spectral density S(hw), and multi-T lineshapes."""
         logger.info("\n[-] Evaluating Vibrational Normal Modes on Hybrid Potential...")
-        dr = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
-        m = at_gs.get_masses()
-        dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
+        phonon_rep = getattr(self.config, "phonon_supercell_repeat", None)
+        supercell_rep = getattr(self.config, "supercell_repeat", (2, 2, 2))
+        f_es_mode = None
+
+        if phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep):
+            calc_es_opt = getattr(self, "calc_es", None)
+            at_gs, dr, f_es_mode = embed_phonon_supercell(
+                at_gs, at_es, self.config, self.calc, calc_es=calc_es_opt
+            )
+            m = at_gs.get_masses()
+            dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
+        else:
+            dr = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
+            m = at_gs.get_masses()
+            dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
+            if (
+                getattr(self.config, "phonon_embedding_method", "displacement").lower() == "force"
+                and hasattr(self, "calc_es")
+                and self.calc_es is not None
+            ):
+                at_probe = at_gs.copy()
+                at_probe.calc = self.calc_es
+                f_es_mode = at_probe.get_forces().copy()
 
         vib_dir = os.path.join(self.config.workspace_dir, "vib")
         os.makedirs(vib_dir, exist_ok=True)
@@ -190,25 +379,124 @@ class LineshapeEngine:
 
         energies_ev = vib.get_energies()
 
+        # 1. Detect imaginary and acoustic modes
+        imaginary_modes = []
+        acoustic_modes = []
+        for i, e in enumerate(energies_ev):
+            e_im = float(np.abs(np.imag(e)) * 1000.0)
+            e_re = float(np.real(e) * 1000.0)
+            if e_im > 1.0:
+                imaginary_modes.append((i, e_im))
+            elif e_re <= 1.0:
+                acoustic_modes.append(i)
+
+        max_imag = getattr(self.config, "max_imaginary_modes", 0)
+        if len(imaginary_modes) > max_imag:
+            mode_desc = ", ".join([f"mode {idx} ({freq:.2f}i meV)" for idx, freq in imaginary_modes])
+            raise RuntimeError(
+                f"Hessian calculation produced {len(imaginary_modes)} imaginary mode(s) "
+                f"(threshold: max_imaginary_modes={max_imag}). "
+                f"The relaxed ground state geometry is not a true local minimum on the potential energy surface. "
+                f"Imaginary modes: {mode_desc}"
+            )
+        elif len(imaginary_modes) > 0:
+            mode_desc = ", ".join([f"mode {idx} ({freq:.2f}i meV)" for idx, freq in imaginary_modes])
+            logger.warning(
+                f"[!] Warning: Detected {len(imaginary_modes)} imaginary mode(s) below threshold ({max_imag}): {mode_desc}"
+            )
+
+        # 2. Collect valid optical modes
         valid_indices = [
             i for i, e in enumerate(energies_ev)
-            if np.real(e) * 1000.0 > 1.0 and abs(np.imag(e)) < 1e-4
+            if float(np.real(e) * 1000.0) > 1.0 and float(np.abs(np.imag(e)) * 1000.0) <= 1.0
         ]
+
+        natoms = len(at_gs)
+        defect_indices = []
+        if "defect_positions" in at_gs.info:
+            from .defect_builder import mic_distances
+            d_pos = np.array(at_gs.info["defect_positions"])
+            for p in d_pos:
+                dists = mic_distances(at_gs.positions, p, at_gs.cell)
+                min_i = int(np.argmin(dists))
+                if dists[min_i] < 0.3:
+                    defect_indices.append(min_i)
+
         hw_modes = []
         sk_list = []
+        dqk_list = []
+        ipr_list = []
+        pr_list = []
+        def_wt_list = []
+
         mass_dr = m[:, None] * dr
+        use_force = (
+            f_es_mode is not None
+            and getattr(self.config, "phonon_embedding_method", "displacement").lower() == "force"
+        )
+        if use_force:
+            logger.info("    [+] Using force-based mode coupling projection Delta Q_k = F_k / omega_k^2 (Alkauskas/Razinkovas)")
+        else:
+            logger.info("    [+] Using displacement mode coupling projection Delta Q_k = sum(m * Delta R * u_k)")
+
         for idx in valid_indices:
             hw_k = float(np.real(energies_ev[idx]) * 1000.0)
             mode_disp = vib.get_mode(idx)
-            dq_k = float(np.sum(mass_dr * mode_disp))
-            s_k = MODE_COUPLING_PREFACTOR * hw_k * (dq_k ** 2)
+
+            if use_force:
+                fq_k = float(np.sum(f_es_mode * mode_disp))
+                dq_k = fq_k / (2.0 * MODE_COUPLING_PREFACTOR * 1.0e-3 * (hw_k ** 2))
+                s_k = float(MODE_COUPLING_PREFACTOR * hw_k * (dq_k ** 2))
+            else:
+                dq_k = float(np.sum(mass_dr * mode_disp))
+                s_k = float(MODE_COUPLING_PREFACTOR * hw_k * (dq_k ** 2))
+
+            weights = m * np.sum(mode_disp ** 2, axis=1)
+            tot_w = float(np.sum(weights))
+            p_i = weights / tot_w if tot_w > 0 else np.ones(natoms) / natoms
+            ipr_k = float(np.sum(p_i ** 2))
+            pr_k = float(1.0 / (natoms * ipr_k)) if ipr_k > 0 else 1.0
+            def_wt = float(np.sum(p_i[defect_indices])) if defect_indices else 0.0
+
             hw_modes.append(hw_k)
             sk_list.append(s_k)
+            dqk_list.append(dq_k)
+            ipr_list.append(ipr_k)
+            pr_list.append(pr_k)
+            def_wt_list.append(def_wt)
 
         hw_modes = np.array(hw_modes, dtype=float)
         sk_modes = np.array(sk_list, dtype=float)
         total_S = float(np.sum(sk_modes))
         logger.info(f"[+] Total Huang-Rhys Factor S: {total_S:.3f} (Franck-Condon Delta Q = {dq_total:.4f} amu^(1/2)*A)")
+
+        if getattr(self.config, "export_normal_modes", True):
+            normal_modes_csv = os.path.join(self.config.workspace_dir, "normal_modes.csv")
+            with open(normal_modes_csv, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "mode_index",
+                    "hw_meV",
+                    "S_k",
+                    "dQ_k_amu12_A",
+                    "IPR",
+                    "participation_ratio",
+                    "is_localized",
+                    "defect_weight",
+                ])
+                for k, idx in enumerate(valid_indices):
+                    is_loc = 1 if ipr_list[k] > (3.0 / natoms) else 0
+                    writer.writerow([
+                        idx,
+                        f"{hw_modes[k]:.4f}",
+                        f"{sk_list[k]:.6f}",
+                        f"{dqk_list[k]:.6f}",
+                        f"{ipr_list[k]:.6f}",
+                        f"{pr_list[k]:.4f}",
+                        is_loc,
+                        f"{def_wt_list[k]:.4f}",
+                    ])
+            logger.info(f"[+] Exported per-mode normal mode analysis ({len(valid_indices)} modes) -> {normal_modes_csv}")
 
         max_mode = float(np.max(hw_modes)) if len(hw_modes) > 0 else 65.0
         user_hw_max = self.config.phonon_hw_max
@@ -220,7 +508,11 @@ class LineshapeEngine:
         if user_smear is not None:
             sigma_smear = float(user_smear)
         else:
-            active_mask = sk_modes > 0.005 * np.max(sk_modes) if (len(sk_modes) > 0 and np.max(sk_modes) > 0) else np.ones(len(sk_modes), dtype=bool)
+            active_mask = (
+                sk_modes > 0.005 * np.max(sk_modes)
+                if (len(sk_modes) > 0 and np.max(sk_modes) > 0)
+                else np.ones(len(sk_modes), dtype=bool)
+            )
             active_modes = np.sort(hw_modes[active_mask])
             scale_smear = 0.035 * hw_max
             if len(active_modes) > 2:
@@ -243,6 +535,15 @@ class LineshapeEngine:
 
         s_cont *= 1000.0  # eV^-1
 
+        trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+        int_s_before = float(trapz_fn(s_cont / 1000.0, hw_grid))
+        if int_s_before > 0 and total_S > 0:
+            s_cont *= (total_S / int_s_before)
+        int_s_after = float(trapz_fn(s_cont / 1000.0, hw_grid))
+        logger.info(
+            f"[+] Normalised continuous S(hw): integrated S = {int_s_after:.4f} strictly matches sum(S_k) = {total_S:.4f}"
+        )
+
         e_min = self.config.lineshape_e_min
         e_max = self.config.lineshape_e_max
         n_pts = self.config.lineshape_n_points
@@ -255,41 +556,86 @@ class LineshapeEngine:
             if e_max is None:
                 e_max = max(60.0, 2.5 * mean_hw)
 
-        logger.info(f"\n[-] Computing Harmonic Optical Lineshapes across temperatures: {self.config.temperatures} K (Range: [{e_min:.1f}, {e_max:.1f}] meV)...")
+        # Finite-T Debye-Waller factor
+        dwf_dict = {}
+        for T in self.config.temperatures:
+            if T < 0.1:
+                dwf_dict[T] = float(np.exp(-total_S))
+            else:
+                n_bose_k = 1.0 / (np.exp(np.clip(hw_modes / (KB_MEV_K * T), 1e-9, 500.0)) - 1.0)
+                dwf_dict[T] = float(np.exp(-np.sum(sk_modes * (2.0 * n_bose_k + 1.0))))
+
+        logger.info(
+            f"\n[-] Computing Harmonic Optical Lineshapes across temperatures: {self.config.temperatures} K "
+            f"(Range: [{e_min:.1f}, {e_max:.1f}] meV)..."
+        )
         lineshape_dict = {}
+        pl_dict = {}
+        zpl_eV = self.config.zpl_energy_eV
+
         for T in tqdm(self.config.temperatures, desc="Harmonic lineshapes", unit="T", leave=False):
             user_gamma = self.config.dephasing_gamma_meV
-            if user_gamma is not None:
-                gamma = float(user_gamma)
-            else:
-                gamma = 1.5 + 2.0e-4 * (T ** 2)
+            base_gamma = 1.5 if user_gamma is None else float(user_gamma)
+            coeff = getattr(self.config, "dephasing_temperature_coefficient", 0.0)
+            gamma = base_gamma + coeff * (T ** 2)
+
             eg, a_norm = compute_quantum_lineshape(
-                hw_grid, s_cont, temp_k=T, dephasing_gamma_meV=gamma,
-                e_min_meV=e_min, e_max_meV=e_max, n_e=n_pts
+                hw_grid,
+                s_cont,
+                temp_k=T,
+                dephasing_gamma_meV=gamma,
+                time_window_tau_fs=self.config.time_window_tau_fs,
+                e_min_meV=e_min,
+                e_max_meV=e_max,
+                n_e=n_pts,
             )
             lineshape_dict[T] = (eg, a_norm)
-            logger.info(f"    [+] Harmonic T = {T:5.1f} K | Peak A(E) = {np.max(a_norm):.4f} | ZPL DWF = {np.exp(-total_S)*100.0:.2f}%")
+            dwf_t = dwf_dict[T]
+            logger.info(
+                f"    [+] Harmonic T = {T:5.1f} K | Peak A(E) = {np.max(a_norm):.4f} | "
+                f"ZPL DWF(T) = {dwf_t*100.0:.2f}% (T=0: {np.exp(-total_S)*100.0:.2f}%)"
+            )
+            if zpl_eV is not None and getattr(self.config, "calculate_pl_intensity", True):
+                hw_phot, i_pl = compute_photoluminescence_spectrum(eg, a_norm, zpl_eV)
+                pl_dict[T] = (hw_phot, i_pl)
+
+        cc_dict = None
+        if self.config.plot_configuration_coordinate:
+            try:
+                calc_es_opt = getattr(self, "calc_es", None)
+                cc_dict = self.plot_configuration_coordinate(at_gs, at_es, zpl_energy_eV=zpl_eV, calc_es=calc_es_opt)
+                if zpl_eV is None and cc_dict and "zpl_energy_eV" in cc_dict:
+                    zpl_eV = float(cc_dict["zpl_energy_eV"])
+                    logger.info(f"[+] Derived ZPL energy from CC analysis: {zpl_eV:.4f} eV")
+                    if getattr(self.config, "calculate_pl_intensity", True):
+                        for T, (eg, a_norm) in lineshape_dict.items():
+                            hw_phot, i_pl = compute_photoluminescence_spectrum(eg, a_norm, zpl_eV)
+                            pl_dict[T] = (hw_phot, i_pl)
+            except Exception as e:
+                logger.warning(f"[!] Warning: Configuration coordinate calculation encountered an issue: {e}")
 
         anharmonic_dict = None
         if self.config.enable_anharmonic:
             anharmonic_dict = self.run_anharmonic_sampling(
                 at_gs, at_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts
             )
-            self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict)
+            self.plot_all(
+                lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict, zpl_energy_eV=zpl_eV
+            )
         else:
-            self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None)
-
-        cc_dict = None
-        if self.config.plot_configuration_coordinate:
-            try:
-                cc_dict = self.plot_configuration_coordinate(at_gs, at_es)
-            except Exception as e:
-                logger.warning(f"[!] Warning: Configuration coordinate calculation encountered an issue: {e}")
+            self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None, zpl_energy_eV=zpl_eV)
 
         res = {
             "harmonic": lineshape_dict,
             "anharmonic": anharmonic_dict,
+            "pl_spectrum": pl_dict,
             "total_S": total_S,
+            "total_S_discrete": total_S,
+            "total_S_integrated": int_s_after,
+            "dwf_temperatures": dwf_dict,
+            "n_normal_modes": len(valid_indices),
+            "n_imaginary_modes": len(imaginary_modes),
+            "zpl_energy_eV": zpl_eV,
             "hw_grid": hw_grid,
             "s_cont": s_cont,
             "cc_analysis": cc_dict,
@@ -310,9 +656,17 @@ class LineshapeEngine:
 
         # 1. Summary JSON
         total_S = float(results.get("total_S", 0.0))
+        zpl_eV = results.get("zpl_energy_eV")
+        dwf_dict = results.get("dwf_temperatures", {})
         summary_data = {
             "total_S": total_S,
+            "total_S_discrete": float(results.get("total_S_discrete", total_S)),
+            "total_S_integrated": float(results.get("total_S_integrated", total_S)),
             "dwf_zero_temp": float(np.exp(-total_S)),
+            "dwf_temperatures": {str(T): float(dwf_dict.get(T, np.exp(-total_S))) for T in self.config.temperatures},
+            "n_normal_modes": int(results.get("n_normal_modes", 0)),
+            "n_imaginary_modes": int(results.get("n_imaginary_modes", 0)),
+            "zpl_energy_eV": float(zpl_eV) if zpl_eV is not None else None,
             "temperatures": self.config.temperatures,
         }
         anharmonic_dict = results.get("anharmonic")
@@ -351,6 +705,7 @@ class LineshapeEngine:
 
         # 3. Optical lineshapes CSV
         lineshape_dict = results.get("harmonic", {})
+        pl_dict = results.get("pl_spectrum", {})
         if lineshape_dict:
             first_T = self.config.temperatures[0]
             if first_T in lineshape_dict:
@@ -358,18 +713,26 @@ class LineshapeEngine:
                 with open(lineshape_csv, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     headers = ["energy_rel_meV"]
+                    if zpl_eV is not None:
+                        headers.append("photon_energy_eV")
                     for T in self.config.temperatures:
                         if T in lineshape_dict:
                             headers.append(f"A_harmonic_{T}K")
+                        if pl_dict and T in pl_dict:
+                            headers.append(f"I_PL_{T}K_norm")
                         if anharmonic_dict and T in anharmonic_dict:
                             headers.append(f"A_anharmonic_{T}K")
                     writer.writerow(headers)
 
                     for idx, e_rel in enumerate(eg):
                         row = [f"{e_rel:.4f}"]
+                        if zpl_eV is not None:
+                            row.append(f"{zpl_eV + e_rel / 1000.0:.6f}")
                         for T in self.config.temperatures:
                             if T in lineshape_dict:
                                 row.append(f"{lineshape_dict[T][1][idx]:.8e}")
+                            if pl_dict and T in pl_dict:
+                                row.append(f"{pl_dict[T][1][idx]:.8e}")
                             if anharmonic_dict and T in anharmonic_dict:
                                 row.append(f"{anharmonic_dict[T]['lineshape'][idx]:.8e}")
                         writer.writerow(row)
@@ -377,11 +740,15 @@ class LineshapeEngine:
         logger.info(f"[+] Numerical lineshape results exported: {summary_json}, {spectral_csv}, {lineshape_csv}")
         return {"summary": summary_json, "spectral_density": spectral_csv, "lineshapes": lineshape_csv}
 
+        logger.info(f"[+] Numerical lineshape results exported: {summary_json}, {spectral_csv}, {lineshape_csv}")
+        return {"summary": summary_json, "spectral_density": spectral_csv, "lineshapes": lineshape_csv}
+
     def run_anharmonic_sampling(
         self, at_gs, at_es, hw_grid, s_cont, total_S=None, e_min=None, e_max=None, n_pts=1500
     ):
-        """Runs Langevin MD across configured temperatures to evaluate anharmonic VDOS and lineshapes."""
+        """Runs paired molecular dynamics across configured temperatures to evaluate anharmonic lineshapes."""
         from ase.md.langevin import Langevin
+        from ase.md.verlet import VelocityVerlet
         from ase import units
 
         logger.info("\n[-] Running Finite-Temperature Anharmonic Molecular Dynamics Sampling...")
@@ -396,12 +763,8 @@ class LineshapeEngine:
             total_S = float(np.sum(s_cont * dhw) / 1000.0)
 
         regime_opt = self.config.anharmonic_coupling_regime.lower()
-        if regime_opt == "auto":
-            is_quantum = (total_S < 10.0)
-        elif regime_opt == "quantum":
-            is_quantum = True
-        else:
-            is_quantum = False
+        is_cumulant = regime_opt in ("cumulant", "auto")
+        is_quantum = (regime_opt == "quantum")
 
         norm_dr = np.sqrt(np.sum(m[:, None] * (dr_fc ** 2)))
         if norm_dr > 1e-8:
@@ -409,9 +772,12 @@ class LineshapeEngine:
         else:
             u_opt = np.ones_like(dr_fc) / np.sqrt(len(dr_fc) * 3)
 
-        active_mask = s_cont > 0.01 * np.max(s_cont) if np.max(s_cont) > 0 else np.ones(len(hw_grid), dtype=bool)
-        if np.any(active_mask):
-            omega_0 = float(trapz_fn(hw_grid[active_mask] * s_cont[active_mask], hw_grid[active_mask]) / trapz_fn(s_cont[active_mask], hw_grid[active_mask]))
+        active_mask = (s_cont > 0.01 * np.max(s_cont)) if (len(s_cont) > 0 and np.max(s_cont) > 0) else np.ones(len(hw_grid), dtype=bool)
+        if np.any(active_mask) and trapz_fn(s_cont[active_mask], hw_grid[active_mask]) > 1e-8:
+            omega_0 = float(
+                trapz_fn(hw_grid[active_mask] * s_cont[active_mask], hw_grid[active_mask])
+                / trapz_fn(s_cont[active_mask], hw_grid[active_mask])
+            )
         else:
             omega_0 = 35.0
 
@@ -419,37 +785,51 @@ class LineshapeEngine:
             hw_grid, s_cont, temp_k=0.01, dephasing_gamma_meV=1.0,
             e_min_meV=e_min, e_max_meV=e_max, n_e=n_pts
         )
-        dE = eg_base[1] - eg_base[0]
+        dE = eg_base[1] - eg_base[0] if len(eg_base) > 1 else 1.0
         w_rad_fs = (hw_grid / 1000.0) / HBAR_EV_FS
 
+        calc_es_opt = getattr(self, "calc_es", None)
         at_disp = at_gs.copy()
-        at_disp.calc = self.calc
-        du_stride = 5 if is_quantum else 1
+        if calc_es_opt is not None:
+            at_disp.calc = calc_es_opt
+            logger.info("    [+] Anharmonic Delta U(t) driven by physical paired excited-state model (V_ES - V_GS)")
+        else:
+            at_disp.calc = self.calc
+            logger.info("    [i] Anharmonic Delta U(t) driven by displaced ground-state potential V_GS(R+Delta R) - V_GS(R)")
 
         anharmonic_dict = {}
         for T in self.config.temperatures:
             t0 = time.time()
             at = at_gs.copy()
             at.calc = self.calc
-            dyn = Langevin(at, dt_fs * units.fs, temperature_K=T, friction=0.01 / units.fs, logfile=None)
 
-            dyn.run(DEFAULT_THERMALIZATION_STEPS)
+            # 1. Thermalization with Langevin dynamics
+            n_therm = getattr(self.config, "anharmonic_thermalization_steps", 400)
+            if n_therm > 0:
+                dyn_therm = Langevin(at, dt_fs * units.fs, temperature_K=T, friction=0.01 / units.fs, logfile=None)
+                dyn_therm.run(n_therm)
+
+            # 2. Production dynamics: VelocityVerlet (NVE) eliminates artificial friction broadening
+            dyn = VelocityVerlet(at, dt_fs * units.fs, logfile=None)
 
             du_list = []
             v_opt_list = []
-            obs_count = [0]
 
             def step_observer():
                 v = at.get_velocities()
                 v_opt = float(np.sum(v * u_opt))
                 v_opt_list.append(v_opt)
-                obs_count[0] += 1
 
-                if (obs_count[0] - 1) % du_stride == 0:
-                    ug = at.get_potential_energy()
-                    at_disp.set_positions(at.positions + dr_fc)
+                ug = at.get_potential_energy()
+                if calc_es_opt is not None:
+                    at_disp.positions = at.positions
+                    at_disp.cell = at.cell
                     ue = at_disp.get_potential_energy()
-                    du_list.append((ue - ug) * 1000.0)
+                else:
+                    at_disp.positions = at.positions + dr_fc
+                    at_disp.cell = at.cell
+                    ue = at_disp.get_potential_energy()
+                du_list.append((ue - ug) * 1000.0)
 
             dyn.attach(step_observer, interval=2)
             pbar = tqdm(total=n_steps, desc=f"Anharmonic MD ({T:g} K)", unit="step", leave=False)
@@ -477,6 +857,7 @@ class LineshapeEngine:
             else:
                 sigma_du = 0.0
 
+            # Compute VACF VDOS for multi-panel spectrum
             v_arr = np.array(v_opt_list, dtype=float)
             n_v = len(v_arr)
             n_half = max(1, n_v // 2)
@@ -497,7 +878,59 @@ class LineshapeEngine:
             if np.max(vdos) > 0:
                 vdos /= np.max(vdos)
 
-            if is_quantum:
+            if is_cumulant:
+                # Energy-gap cumulant approach: C(tau) = <delta Delta U(tau) delta Delta U(0)>
+                du_demean = du - np.mean(du)
+                n_du = len(du_demean)
+                n_half_du = max(1, n_du // 2)
+                acf_du_full = correlate(du_demean, du_demean, mode="full")[n_du - 1 : n_du - 1 + n_half_du]
+                acf_du = acf_du_full / np.arange(n_du, n_du - n_half_du, -1, dtype=float)
+
+                t_du = np.arange(len(acf_du), dtype=float) * dt_vacf
+                denom_du = t_du[-1] if len(t_du) > 1 and t_du[-1] > 0 else 1.0
+                hann_du = 0.5 * (1.0 + np.cos(np.pi * t_du / denom_du))
+                weights_du = acf_du * hann_du * dt_vacf
+                if len(weights_du) > 1:
+                    weights_du[0] *= 0.5
+                    weights_du[-1] *= 0.5
+
+                j_cl = np.maximum(0.0, weights_du @ np.cos(np.outer(t_du, w_rad_fs)))
+
+                # Symmetric harmonic quantum correction factor:
+                # Q(hw, T) = (hw / kB T) / (2 * tanh(hw / 2 kB T))
+                if T < 0.1:
+                    q_factor = np.ones_like(hw_grid)
+                else:
+                    x = np.clip(hw_grid / (KB_MEV_K * T), 1e-4, 50.0)
+                    q_factor = x / (2.0 * np.tanh(0.5 * x))
+
+                j_quant = j_cl * q_factor
+
+                # S_anh(hw) = J_quant(hw) / (hw^2)
+                mask_hw = hw_grid > 0.5
+                s_anh = np.zeros_like(hw_grid)
+                s_anh[mask_hw] = j_quant[mask_hw] / (hw_grid[mask_hw] ** 2)
+
+                int_s_anh = float(trapz_fn(s_anh, hw_grid))
+                if int_s_anh > 0 and total_S > 0:
+                    s_anh *= (total_S / int_s_anh)
+                s_anh *= 1000.0  # eV^-1
+
+                user_gamma = self.config.dephasing_gamma_meV
+                base_gamma = 1.5 if user_gamma is None else float(user_gamma)
+                coeff = getattr(self.config, "dephasing_temperature_coefficient", 0.0)
+                gamma = base_gamma + coeff * (T ** 2)
+
+                eg_out, a_anh = compute_quantum_lineshape(
+                    hw_grid, s_anh, temp_k=T, dephasing_gamma_meV=gamma,
+                    time_window_tau_fs=self.config.time_window_tau_fs,
+                    e_min_meV=e_min, e_max_meV=e_max, n_e=n_pts
+                )
+                regime_tag = f"Energy-Gap Cumulant (NVE, sigma_DeltaU={sigma_du:.1f} meV)"
+                alpha_soft = 1.0
+                omega_T = omega_0
+            elif is_quantum:
+                # Legacy quantum regime
                 mask_active = (hw_grid >= max(10.0, 0.4 * omega_0)) & (hw_grid <= min(float(hw_grid[-1]), 1.8 * omega_0))
                 if np.sum(vdos[mask_active]) > 1e-4:
                     omega_T = float(trapz_fn(hw_grid[mask_active] * vdos[mask_active], hw_grid[mask_active]) / trapz_fn(vdos[mask_active], hw_grid[mask_active]))
@@ -510,11 +943,7 @@ class LineshapeEngine:
                 s_anh = np.interp(hw_shifted, hw_grid, s_cont, left=0.0, right=0.0) / alpha_soft
 
                 user_gamma = self.config.dephasing_gamma_meV
-                if user_gamma is not None:
-                    gamma_base = float(user_gamma)
-                else:
-                    gamma_base = 1.5 + 2.0e-4 * (T ** 2)
-
+                gamma_base = 1.5 if user_gamma is None else float(user_gamma)
                 delta_gamma_anh = 0.3 * np.sqrt(max(1.0, T) / 10.0)
                 gamma_total = gamma_base + delta_gamma_anh
 
@@ -524,6 +953,7 @@ class LineshapeEngine:
                 )
                 regime_tag = f"Quantum GenFn (alpha_soft={alpha_soft:.3f}, gamma={gamma_total:.2f} meV)"
             else:
+                # Legacy semiclassical regime
                 erel_est = abs(eg_base[np.argmax(a_quant_0K)])
                 sig_scale = np.sqrt(2.0 * max(1.0, KB_MEV_K * T) * max(50.0, erel_est))
                 sigma_du = min(max(sigma_du, 1.0), 2.0 * sig_scale)
@@ -554,7 +984,9 @@ class LineshapeEngine:
                 "vdos": vdos,
                 "omega_T": omega_T,
                 "alpha_soft": alpha_soft,
-                "regime": "quantum" if is_quantum else "semiclassical",
+                "regime": "cumulant" if is_cumulant else ("quantum" if is_quantum else "semiclassical"),
+                "method": "cumulant_energy_gap" if is_cumulant else "legacy_vdos",
+                "is_physical_paired": calc_es_opt is not None,
                 "walltime_s": time.time() - t0,
             }
             logger.info(f"    [+] Anharmonic MD T = {T:5.1f} K | {regime_tag} | Lineshape FWHM = {fwhm_meV:5.1f} meV ({time.time()-t0:.1f} s)")
@@ -683,17 +1115,21 @@ class LineshapeEngine:
 
         return (e_min_final, e_max_final), (y_min_final, y_max_final)
 
-    def plot_all(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None):
+    def plot_all(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None, zpl_energy_eV=None):
         """Dispatches combined and/or individual temperature plots according to `temperature_plot_mode`."""
         plot_mode = self.config.temperature_plot_mode.lower()
 
         if plot_mode in ("combined", "both"):
-            self.plot_combined(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict)
+            self.plot_combined(
+                lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict, zpl_energy_eV=zpl_energy_eV
+            )
 
         if plot_mode in ("individual", "both"):
-            self.plot_individual(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict)
+            self.plot_individual(
+                lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict, zpl_energy_eV=zpl_energy_eV
+            )
 
-    def plot_combined(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None):
+    def plot_combined(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None, zpl_energy_eV=None):
         """Plots a combined multi-temperature figure of phonon densities and lineshapes."""
         fig, axs = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
         show_harmonic = self.config.show_harmonic_in_anharmonic
@@ -762,6 +1198,16 @@ class LineshapeEngine:
         ax2.grid(True, linestyle=':', alpha=0.5)
         ax2.legend(frameon=True, loc='upper left', framealpha=0.9, fontsize=8.8, ncol=2 if len(lineshape_dict) > 2 else 1)
 
+        if zpl_energy_eV is not None and zpl_energy_eV > 0:
+            try:
+                secax = ax2.secondary_xaxis(
+                    'top',
+                    functions=(lambda e: zpl_energy_eV + e / 1000.0, lambda hw: (hw - zpl_energy_eV) * 1000.0)
+                )
+                secax.set_xlabel(r'Absolute Photon Energy $\hbar\omega$ (eV)', fontsize=11)
+            except Exception:
+                pass
+
         plt.tight_layout()
         fig_name = self.config.anharmonic_figure_name if anharmonic_dict else self.config.lineshape_figure_name
         out_fig = os.path.join(self.config.workspace_dir, fig_name)
@@ -769,7 +1215,7 @@ class LineshapeEngine:
         plt.close(fig)
         logger.info(f"[+] Combined lineshape figure saved: {out_fig} (X-limits: {e_xlim[0]:.1f} to {e_xlim[1]:.1f} meV)")
 
-    def plot_individual(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None):
+    def plot_individual(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None, zpl_energy_eV=None):
         """Plots per-temperature figures of phonon densities and lineshapes."""
         show_harmonic = self.config.show_harmonic_in_anharmonic
         prefix = self.config.individual_figure_prefix
@@ -843,6 +1289,16 @@ class LineshapeEngine:
             ax2.grid(True, linestyle=':', alpha=0.5)
             ax2.legend(frameon=True, loc='upper left', framealpha=0.9, fontsize=9.0)
 
+            if zpl_energy_eV is not None and zpl_energy_eV > 0:
+                try:
+                    secax = ax2.secondary_xaxis(
+                        'top',
+                        functions=(lambda e: zpl_energy_eV + e / 1000.0, lambda hw: (hw - zpl_energy_eV) * 1000.0)
+                    )
+                    secax.set_xlabel(r'Absolute Photon Energy $\hbar\omega$ (eV)', fontsize=11)
+                except Exception:
+                    pass
+
             plt.tight_layout()
             t_tag = f"{int(T)}K" if float(T).is_integer() else f"{T}K"
             out_file = os.path.join(self.config.workspace_dir, f"{prefix}_{t_tag}.png")
@@ -865,21 +1321,24 @@ class LineshapeEngine:
         """Calculates 1D potential energy curves and Stokes shift parameters along the configuration coordinate."""
         from .cc_diagram import ConfigurationCoordinateEngine
         engine = ConfigurationCoordinateEngine(self.config, self.calc)
+        calc_es = getattr(self, "calc_es", None)
         return engine.calculate_cc_curve(
             at_gs, at_es,
             lambda_min=lambda_min,
             lambda_max=lambda_max,
             n_points=n_points,
-            zpl_energy_eV=zpl_energy_eV
+            zpl_energy_eV=zpl_energy_eV,
+            calc_es=calc_es,
         )
 
     def plot_configuration_coordinate(
-        self, at_gs, at_es, output_path=None, zpl_energy_eV=None, system_name=None
+        self, at_gs, at_es, output_path=None, zpl_energy_eV=None, system_name=None, calc_es=None
     ):
         """Calculates 1D configuration coordinate curves and renders the 2-panel diagram."""
         from .cc_diagram import ConfigurationCoordinateEngine
         engine = ConfigurationCoordinateEngine(self.config, self.calc)
-        cc_data = engine.calculate_cc_curve(at_gs, at_es, zpl_energy_eV=zpl_energy_eV)
+        eff_calc_es = calc_es if calc_es is not None else getattr(self, "calc_es", None)
+        cc_data = engine.calculate_cc_curve(at_gs, at_es, zpl_energy_eV=zpl_energy_eV, calc_es=eff_calc_es)
         fig_path = engine.plot_configuration_coordinate(cc_data, output_path=output_path, system_name=system_name)
         cc_data["figure_path"] = fig_path
         return cc_data

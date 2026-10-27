@@ -65,9 +65,13 @@ CRASH
 *.save/
 licl_fcenter_run/
 hydeph_run/
+hydeph_run*/
 dft_calculations/
 sampler_md/
 vib/
+test_vib*/
+*.tmp
+*.tmp.xyz
 loss.out
 train.xyz
 test.xyz

@@ -1,0 +1,40 @@
+{
+  "total_S": 14.893071732721317,
+  "dwf_zero_temp": 3.4042475054157217e-07,
+  "temperatures": [
+    10.0,
+    77.0,
+    150.0,
+    300.0
+  ],
+  "anharmonic": {
+    "10.0": {
+      "regime": "semiclassical",
+      "fwhm_meV": 71.96797865243497,
+      "sigma_du": 13.041480056122962,
+      "alpha_soft": 1.0,
+      "omega_T": 6.827538609725802
+    },
+    "77.0": {
+      "regime": "semiclassical",
+      "fwhm_meV": 105.47031354236157,
+      "sigma_du": 35.06784898412064,
+      "alpha_soft": 1.0,
+      "omega_T": 6.827538609725802
+    },
+    "150.0": {
+      "regime": "semiclassical",
+      "fwhm_meV": 119.11941294196131,
+      "sigma_du": 42.14600096513366,
+      "alpha_soft": 1.0,
+      "omega_T": 6.827538609725802
+    },
+    "300.0": {
+      "regime": "semiclassical",
+      "fwhm_meV": 160.06671114076048,
+      "sigma_du": 61.868415327424586,
+      "alpha_soft": 1.0,
+      "omega_T": 6.827538609725802
+    }
+  }
+}

@@ -2,7 +2,6 @@
 Tests for QERunner caching, execution handling, and error messages.
 """
 
-import os
 import sys
 import pytest
 from ase import Atoms
@@ -36,6 +35,8 @@ def test_qe_runner_cache_hit(tmp_path):
         pseudo_dir=str(tmp_path),
         pseudopotentials={"Li": "fake.UPF", "Cl": "fake.UPF"}
     )
+    from hydeph.qe_runner import write_qe_input
+    write_qe_input(atoms, str(calc_dir / "pw.in"), cfg)
     
     runner = QERunner(cfg, n_procs=2, pw_exe="pw.exe")
     
@@ -59,6 +60,8 @@ def test_qe_runner_error_includes_guidance(tmp_path):
         pseudo_dir=str(tmp_path),
         pseudopotentials={"Li": "fake.UPF", "Cl": "fake.UPF"}
     )
+    from hydeph.qe_runner import write_qe_input
+    write_qe_input(atoms, str(calc_dir / "pw.in"), cfg)
     
     runner = QERunner(cfg, n_procs=2, pw_exe="pw.exe")
     

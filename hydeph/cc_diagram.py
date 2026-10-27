@@ -26,7 +26,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Module-level physical constants and prefactors
-NV_ZPL_EV = 1.945  # Reference canonical NV- defect ZPL energy in eV
 CC_HBAR_OMEGA_PREFACTOR = 91.43476  # Prefactor: 91.43476 * sqrt(Delta E_rel (eV)) / Delta Q (amu^(1/2) A)
 
 
@@ -42,6 +41,10 @@ class ConfigurationCoordinateEngine:
         self, at_gs: Atoms, at_es: Atoms, e_rel_es_eV: float = 0.0
     ) -> Tuple[Optional[float], Optional[str]]:
         """Derives ZPL energy from Kohn-Sham defect band gap, Delta-SCF energies, or stored CC results."""
+        # 0. Exact adiabatic Delta-SCF ZPL calculated directly from FC endpoint frames
+        if "e_zpl_exact_eV" in at_gs.info and at_gs.info["e_zpl_exact_eV"] is not None:
+            return float(at_gs.info["e_zpl_exact_eV"]), at_gs.info.get("zpl_source", "delta_scf_adiabatic")
+
         # 1. Kohn-Sham defect eigenvalue transition gap from DFT
         if "dft_gap_eV" in at_gs.info and at_gs.info["dft_gap_eV"] is not None:
             gap_val = float(at_gs.info["dft_gap_eV"])
@@ -56,9 +59,11 @@ class ConfigurationCoordinateEngine:
             if diff > float(e_rel_es_eV) * 1.5 and diff > 0.1:
                 return diff, "delta_scf"
 
-        # 3. Stored CC results cache
+        # 3. Stored CC results cache (only if derived from physics, not fallback)
         if self.last_results is not None and "e_zpl_eV" in self.last_results:
-            return float(self.last_results["e_zpl_eV"]), "stored_cc_results"
+            src = self.last_results.get("zpl_source", "")
+            if src not in ("unavailable", "relative_reference_0eV"):
+                return float(self.last_results["e_zpl_eV"]), "stored_cc_results"
 
         return None, None
 
@@ -70,6 +75,7 @@ class ConfigurationCoordinateEngine:
         lambda_max: Optional[float] = None,
         n_points: Optional[int] = None,
         zpl_energy_eV: Optional[float] = None,
+        calc_es=None,
     ) -> Dict[str, Any]:
         """Calculates ground- and excited-state potential energy curves along the 1D configuration coordinate."""
         l_min = lambda_min if lambda_min is not None else self.config.cc_lambda_min
@@ -139,23 +145,53 @@ class ConfigurationCoordinateEngine:
                     stacklevel=2,
                 )
             else:
-                e_zpl = NV_ZPL_EV
-                zpl_source = f"default_reference_{NV_ZPL_EV}eV"
+                if not getattr(self.config, "allow_fallbacks", False):
+                    raise RuntimeError(
+                        "Zero-Phonon Line (ZPL) energy could not be derived from DFT energies or Kohn-Sham gap, "
+                        "and ToolkitConfig.zpl_energy_eV was not specified. Fallbacks are disabled by default "
+                        "(allow_fallbacks=False). Either specify `zpl_energy_eV` in ToolkitConfig or provide "
+                        "DFT ground/excited state energies."
+                    )
+                e_zpl = 0.0
+                zpl_source = "relative_reference_0eV"
                 warnings.warn(
-                    f"No ZPL energy specified in ToolkitConfig and could not be derived from DFT energies. "
-                    f"Falling back to reference canonical NV- ZPL ({NV_ZPL_EV} eV). "
+                    "No ZPL energy specified in ToolkitConfig and could not be derived from DFT energies. "
+                    "Plotting potential energy surfaces relative to ZPL reference (allow_fallbacks=True). "
                     "For accurate defect-specific diagrams, specify `ToolkitConfig.zpl_energy_eV`.",
                     UserWarning,
                     stacklevel=2,
                 )
 
-        # Equal-curvature Franck-Condon excited state: E_ES(lambda) = E_ZPL + Delta E_rel,ES * (1 - lambda)^2
-        e_rel_es_eV = e_rel_gs_eV
-        e_rel_es_meV = e_rel_gs_meV
-        e_es = e_zpl + e_rel_es_eV * (1.0 - lambdas)**2
+        if calc_es is not None:
+            at_es_eval = at_gs.copy()
+            at_es_eval.calc = calc_es
+            e_es_list = []
+            for lam in lambdas:
+                at_es_eval.set_positions(pos_gs + lam * dr)
+                e_val_es = float(at_es_eval.get_potential_energy()) - v_ref
+                e_es_list.append(e_val_es)
+            e_es = np.array(e_es_list, dtype=float)
 
-        e_abs_eV = e_zpl + e_rel_es_eV
-        e_em_eV = e_zpl - e_rel_gs_eV
+            idx_0 = int(np.argmin(np.abs(lambdas - 0.0)))
+            idx_1 = int(np.argmin(np.abs(lambdas - 1.0)))
+            e_rel_es_eV = float(e_es[idx_0] - e_es[idx_1])
+            e_rel_es_meV = e_rel_es_eV * 1000.0
+
+            if e_zpl == 0.0 and zpl_source == "relative_reference_0eV":
+                e_zpl = float(e_es[idx_1])
+                zpl_source = "paired_potential_surface"
+            elif e_zpl is not None:
+                e_es = (e_es - e_es[idx_1]) + e_zpl
+
+            e_abs_eV = float(e_es[idx_0])
+            e_em_eV = e_zpl - e_rel_gs_eV
+        else:
+            # Equal-curvature Franck-Condon excited state: E_ES(lambda) = E_ZPL + Delta E_rel,ES * (1 - lambda)^2
+            e_rel_es_eV = e_rel_gs_eV
+            e_rel_es_meV = e_rel_gs_meV
+            e_es = e_zpl + e_rel_es_eV * (1.0 - lambdas)**2
+            e_abs_eV = e_zpl + e_rel_es_eV
+            e_em_eV = e_zpl - e_rel_gs_eV
         stokes_shift_eV = e_abs_eV - e_em_eV
         stokes_shift_meV = stokes_shift_eV * 1000.0
 

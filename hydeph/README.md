@@ -22,15 +22,16 @@ See the root [`README.md`](../README.md) for full configuration tables and [`doc
 
 ## Modules
 
-- `config.py`: `ToolkitConfig` dataclass and input validation.
-- `defect_builder.py`: Supercell tiling, defect site detection, and ground/excited-state relaxation (foundation potential or spin-proxy DFT).
-- `frame_sampler.py`: 4-phase frame sampling (Franck-Condon scan, core rattling, foundation MD + FPS, interleaved queue).
-- `qe_runner.py`: Quantum ESPRESSO (`pw.x` / `pw.exe`) runner with single-point labeling, BFGS relaxation, caching, and type-balanced resumption.
-- `delta_trainer.py`: Residual extraction ($\Delta E$, $\Delta \mathbf{F}$) and GPUMD `nep` training.
-- `calculator.py`: `HybridDefectCalculator` combining $V_{\mathrm{base}}$ and $\Delta V_{\mathrm{NEP}}$.
-- `lineshape.py`: Normal modes, Huang-Rhys factors, quantum generating functions, and anharmonic Langevin MD.
-- `cc_diagram.py`: 1D configuration coordinate potential surfaces and Stokes shift analysis.
-- `pipeline.py`: End-to-end `run_pipeline` orchestrator.
+- `config.py`: `ToolkitConfig` dataclass, fail-loud validation, and UPF discovery.
+- `defect_builder.py`: Vectorized supercell tiling, defect site detection, and ground/excited-state DFT relaxation (spin-proxy and $\Delta\text{SCF}$).
+- `frame_sampler.py`: 4-phase representative frame generation (Franck-Condon scan, core rattling, foundation MD + FPS, anchor frame priority).
+- `qe_runner.py`: Quantum ESPRESSO runner with fixed occupations, atom-scaled thresholds, single-pass parsing, and caching.
+- `delta_trainer.py`: Residual extraction, mean energy offset subtraction, automated quality control gates, and GPUMD training.
+- `calculator.py`: `HybridDefectCalculator` and `PairedDefectCalculator` combining foundation potential with ground- and optical excited-state $\Delta$-NEPs.
+- `lineshape.py`: Large-supercell phonon embedding, $(\hbar\omega)^3$ PL spectra, finite-$T$ DWF, normal mode decomposition, and paired cumulant NVE dynamics.
+- `cc_diagram.py`: 1D configuration coordinate curves, vertical transition energies, and Stokes shift analysis.
+- `provenance.py`: Environmental provenance, input SHA256 hashes, and manifest tracking for scientific reproducibility.
+- `pipeline.py`: Turnkey `run_pipeline` workflow orchestrator with stage resumption.
 
 ---
 

@@ -1,15 +1,13 @@
 """Unit tests for automated spin-proxy excited-state relaxation in DefectBuilder and QERunner."""
 
 import os
-import shutil
-import tempfile
 import pytest
 import numpy as np
 from ase import Atoms
 from ase.calculators.calculator import Calculator, all_changes
 
 from hydeph.config import ToolkitConfig
-from hydeph.qe_runner import write_qe_input, parse_qe_relaxation_output, QERunner
+from hydeph.qe_runner import write_qe_input, parse_qe_relaxation_output
 from hydeph.defect_builder import DefectBuilder
 
 
@@ -60,7 +58,9 @@ class MockRelaxationQERunner:
 def test_toolkit_config_spin_proxy_fields():
     """Tests default configuration fields and spin multiplicity derivations."""
     cfg = ToolkitConfig(pristine_cell_path="test.xyz")
-    assert cfg.excited_state_method == "spin_proxy"
+    assert cfg.excited_state_method == "delta_scf"
+    cfg_sp = ToolkitConfig(pristine_cell_path="test.xyz", excited_state_method="spin_proxy")
+    assert cfg_sp.excited_state_method == "spin_proxy"
     assert cfg.ground_state_relax_method == "auto"
     assert cfg.relax_forc_conv_thr == 1.0e-3
     assert cfg.relax_nstep == 100
@@ -200,6 +200,7 @@ B                0.0050000000        0.0010000000        0.0000000000
 N                1.5200000000       -0.0020000000        0.0010000000
 
 !    total energy              =    -100.50000000 Ry
+bfgs converged in  12 scf cycles and   3 bfgs steps
 """
     with open(mock_out, "w") as f:
         f.write(sample_output)
@@ -306,6 +307,7 @@ def test_defect_builder_spin_proxy_fallback_to_synthetic(tmp_path):
         workspace_dir=ws,
         excited_state_method="spin_proxy",
         ground_state_relax_method="foundation",
+        allow_fallbacks=True,
     )
 
     class FailingQERunner:
@@ -368,6 +370,7 @@ def test_defect_builder_fallback_with_numpy_defect_positions(tmp_path):
         pristine_cell_path=pristine_path,
         workspace_dir=ws,
         excited_state_method="spin_proxy",
+        allow_fallbacks=True,
     )
 
     class FailingQERunner:

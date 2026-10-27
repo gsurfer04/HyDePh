@@ -1,0 +1,16 @@
+{
+  "dq_total": 2.012621186240754,
+  "delta_e_rel_gs_eV": 0.2148027780567645,
+  "delta_e_rel_gs_meV": 214.8027780567645,
+  "delta_e_rel_es_eV": 0.2148027780567645,
+  "delta_e_rel_es_meV": 214.8027780567645,
+  "e_zpl_eV": 1.945,
+  "zpl_source": "default_reference_1.945eV",
+  "e_abs_eV": 2.159802778056765,
+  "e_em_eV": 1.7301972219432356,
+  "stokes_shift_eV": 0.42960555611352924,
+  "stokes_shift_meV": 429.60555611352925,
+  "hbar_omega_meV": 21.05567827727715,
+  "s_factor_1d": 10.20165559276118,
+  "k_curvature_gs": 0.07310703440892796
+}

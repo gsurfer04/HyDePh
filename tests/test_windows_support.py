@@ -16,14 +16,13 @@ from hydeph.qe_runner import (
     build_qe_command,
     write_qe_input,
     parse_qe_output,
-    QERunner,
 )
 from hydeph.delta_trainer import resolve_nep_executable, write_delta_nep_in
 
 
 def test_version_bump():
     """Verify package version."""
-    assert __version__ == "0.6.3"
+    assert __version__ == "0.7.0"
 
 
 def test_is_windows():

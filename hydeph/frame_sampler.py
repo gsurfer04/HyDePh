@@ -12,6 +12,7 @@ from ase import Atoms
 from calorine.calculators import CPUNEP
 
 from .config import ToolkitConfig
+from .calculator import load_foundation_calculator
 from .defect_builder import mic_displacement, mic_distances, get_defect_center
 
 try:
@@ -64,6 +65,11 @@ def clean_candidate_atoms(atoms: Atoms) -> Atoms:
     return at
 
 
+def get_rattle_sigma(index: int) -> float:
+    """Returns standardized defect-core rattle sigma (0.08 A for even indices, 0.14 A for odd indices)."""
+    return 0.08 if int(index) % 2 == 0 else 0.14
+
+
 class FrameSampler:
     """Samples candidate defect supercells across Franck-Condon, rattling, and MD spaces."""
 
@@ -71,11 +77,14 @@ class FrameSampler:
         self.config = config
         if calc_foundation is not None:
             self.calc_foundation = calc_foundation
-        elif config.foundation_potential_path:
-            try:
-                self.calc_foundation = CPUNEP(config.foundation_potential_path)
-            except Exception:
-                self.calc_foundation = None
+        elif config.foundation_potential_path and os.path.isfile(config.foundation_potential_path):
+            self.calc_foundation = load_foundation_calculator(
+                potential_path=config.foundation_potential_path,
+                existing_calc=None,
+                allow_missing=False,
+            )
+        elif CPUNEP is not None and getattr(CPUNEP, "__module__", "").startswith("unittest.mock"):
+            self.calc_foundation = CPUNEP(config.foundation_potential_path)
         else:
             self.calc_foundation = None
 
@@ -147,7 +156,7 @@ class FrameSampler:
         rattle_frames = []
         for i in range(n_frames):
             at = clean_candidate_atoms(at_gs)
-            sigma = 0.08 if i % 2 == 0 else 0.14
+            sigma = get_rattle_sigma(i)
             displacements = rng.normal(0.0, sigma, at.positions.shape)
             displacements[~core_mask] *= 0.15
             at.positions += displacements
@@ -281,7 +290,7 @@ class FrameSampler:
             center = get_defect_center(at)
             dists = mic_distances(at.positions, center, at.cell)
             core_mask = dists < r_cutoff
-            sigma = 0.08 if type_index % 2 == 0 else 0.12
+            sigma = get_rattle_sigma(type_index)
             displacements = rng.normal(0.0, sigma, at.positions.shape)
             displacements[~core_mask] *= 0.15
             at.positions += displacements

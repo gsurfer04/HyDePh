@@ -1,0 +1,14 @@
+Program PWSCF v.7.2 starts on 27Oct2026 at 12:00:00
+
+     Self-consistent Calculation
+     iteration #   8 ecut=   80.00 Ry     beta= 0.40
+     End of self-consistent calculation
+!    total energy              =    -120.12345678 Ry
+     The maximum number of steps has been reached.
+     End of molecular dynamics calculation
+
+     ATOMIC_POSITIONS (angstrom)
+     C        0.00000000   0.00000000   0.00000000
+     C        1.52000000   1.52000000   1.52000000
+
+     JOB DONE.

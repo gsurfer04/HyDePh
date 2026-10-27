@@ -1,0 +1,5 @@
+Program PWSCF v.7.2 starts on 27Oct2026 at 12:00:00
+
+     iteration #   4 ecut=   80.00 Ry     beta= 0.40
+     Davidson diagonalization with overlap
+     Maximum CPU time exceeded

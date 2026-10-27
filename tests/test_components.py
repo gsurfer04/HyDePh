@@ -121,7 +121,8 @@ def test_generic_excited_state_generation(tmp_path):
     cfg = ToolkitConfig(
         pristine_cell_path=str(tmp_path / "pristine.xyz"),
         workspace_dir=str(tmp_path),
-        excited_state_displacement=0.08
+        excited_state_method="synthetic",
+        excited_state_displacement=0.08,
     )
 
     with patch("hydeph.defect_builder.CPUNEP") as mock_nep:
@@ -221,7 +222,6 @@ def test_smart_axis_scaling(tmp_path):
 
 def test_finite_size_phonon_smearing(tmp_path):
     """Verify finite-size smearing collapses discrete mode comb into smooth physical bands."""
-    from hydeph.lineshape import LineshapeEngine
     cfg_discrete = ToolkitConfig(
         pristine_cell_path=str(tmp_path / "pristine.xyz"),
         phonon_smearing_meV=1.8, # Tiny smearing
@@ -255,63 +255,71 @@ def test_finite_size_phonon_smearing(tmp_path):
 
 
 def test_anharmonic_regimes(tmp_path):
-    """Verify anharmonic sampling distinguishes intermediate (quantum) and strong (semiclassical) regimes."""
+    """Verify anharmonic sampling distinguishes modern cumulant and legacy (quantum, semiclassical) regimes."""
     from hydeph.lineshape import LineshapeEngine
-    from unittest.mock import patch, MagicMock
+    from ase.calculators.calculator import Calculator, all_changes
 
-    cfg_quantum = ToolkitConfig(
+    class MockHarmonicMDCalc(Calculator):
+        implemented_properties = ["energy", "forces"]
+
+        def __init__(self, k=5.0, offset_eV=0.0, **kwargs):
+            super().__init__(**kwargs)
+            self.k = k
+            self.offset_eV = offset_eV
+            self.r0 = None
+
+        def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            pos = atoms.positions
+            if self.r0 is None:
+                self.r0 = pos.copy()
+            dr = pos - self.r0
+            self.results["energy"] = float(0.5 * self.k * np.sum(dr ** 2) + self.offset_eV)
+            self.results["forces"] = -self.k * dr
+
+    cfg = ToolkitConfig(
         pristine_cell_path=str(tmp_path / "pristine.xyz"),
         temperatures=[10.0],
         anharmonic_md_steps=10,
-        anharmonic_coupling_regime="auto"
+        anharmonic_thermalization_steps=5,
+        anharmonic_coupling_regime="auto",
     )
-    
-    mock_calc = MagicMock()
-    mock_calc.get_potential_energy.return_value = -50.0
 
-    engine = LineshapeEngine(cfg_quantum, hybrid_calc=mock_calc)
+    calc_gs = MockHarmonicMDCalc(k=5.0, offset_eV=0.0)
+    calc_es = MockHarmonicMDCalc(k=5.0, offset_eV=2.0)
 
-    at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[3, 3, 3], pbc=True)
-    at_es = Atoms("C2", positions=[[0, 0, 0], [1.6, 1.6, 1.6]], cell=[3, 3, 3], pbc=True)
-    hw_grid = np.linspace(1.0, 100.0, 200)
-    s_cont = 2.5 * np.exp(-0.5 * ((hw_grid - 40.0) / 5.0)**2) * 1000.0 # S ~ 2.5
+    engine = LineshapeEngine(cfg, hybrid_calc=calc_gs)
+    engine.calc_es = calc_es
 
-    # Mock Langevin MD
-    with patch("ase.md.langevin.Langevin") as mock_langevin_cls:
-        mock_dyn = MagicMock()
-        mock_langevin_cls.return_value = mock_dyn
-        
-        # When dyn.attach is called, simulate step_observer calls
-        def fake_run(steps):
-            if mock_dyn.attach.called:
-                obs = mock_dyn.attach.call_args[0][0]
-                for _ in range(5):
-                    obs()
-        mock_dyn.run.side_effect = fake_run
+    at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[4, 4, 4], pbc=True)
+    at_es = Atoms("C2", positions=[[0, 0, 0], [1.55, 1.55, 1.55]], cell=[4, 4, 4], pbc=True)
+    hw_grid = np.linspace(1.0, 100.0, 100)
+    s_cont = 2.5 * np.exp(-0.5 * ((hw_grid - 40.0) / 5.0)**2) * 1000.0
 
-        # 1. Intermediate coupling: S = 2.5 < 10 -> quantum regime
-        res_quant = engine.run_anharmonic_sampling(
-            at_gs, at_es, hw_grid, s_cont, total_S=2.5, e_min=-200, e_max=50, n_pts=200
-        )
-        assert 10.0 in res_quant
-        assert res_quant[10.0]["regime"] == "quantum"
-        assert res_quant[10.0]["alpha_soft"] is not None
-        # Must retain sharp lineshape
-        assert np.max(res_quant[10.0]["lineshape"]) > 0.0
+    # 1. Default / auto coupling regime -> modern paired cumulant method
+    res_cumulant = engine.run_anharmonic_sampling(
+        at_gs, at_es, hw_grid, s_cont, total_S=2.5, e_min=-200, e_max=50, n_pts=200
+    )
+    assert 10.0 in res_cumulant
+    assert res_cumulant[10.0]["regime"] == "cumulant"
+    assert res_cumulant[10.0]["method"] == "cumulant_energy_gap"
+    assert np.max(res_cumulant[10.0]["lineshape"]) > 0.0
 
-        # 2. Strong coupling: S = 15.0 >= 10 -> semiclassical regime
-        res_semi = engine.run_anharmonic_sampling(
-            at_gs, at_es, hw_grid, s_cont, total_S=15.0, e_min=-200, e_max=50, n_pts=200
-        )
-        assert 10.0 in res_semi
-        assert res_semi[10.0]["regime"] == "semiclassical"
+    # 2. Explicit legacy overrides: 'semiclassical' and 'quantum'
+    cfg.anharmonic_coupling_regime = "semiclassical"
+    res_semi = engine.run_anharmonic_sampling(
+        at_gs, at_es, hw_grid, s_cont, total_S=15.0, e_min=-200, e_max=50, n_pts=200
+    )
+    assert 10.0 in res_semi
+    assert res_semi[10.0]["regime"] == "semiclassical"
 
-        # 3. Explicit override: regime='semiclassical' even with S = 2.5
-        cfg_quantum.anharmonic_coupling_regime = "semiclassical"
-        res_override = engine.run_anharmonic_sampling(
-            at_gs, at_es, hw_grid, s_cont, total_S=2.5, e_min=-200, e_max=50, n_pts=200
-        )
-        assert res_override[10.0]["regime"] == "semiclassical"
+    cfg.anharmonic_coupling_regime = "quantum"
+    res_quant = engine.run_anharmonic_sampling(
+        at_gs, at_es, hw_grid, s_cont, total_S=2.5, e_min=-200, e_max=50, n_pts=200
+    )
+    assert 10.0 in res_quant
+    assert res_quant[10.0]["regime"] == "quantum"
+    assert res_quant[10.0]["alpha_soft"] is not None
 
 
 def test_configuration_coordinate_engine(tmp_path):

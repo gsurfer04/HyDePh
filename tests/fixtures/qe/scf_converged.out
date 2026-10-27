@@ -1,0 +1,28 @@
+Program PWSCF v.7.2 starts on 27Oct2026 at 12:00:00
+
+     iteration #  10 ecut=   80.00 Ry     beta= 0.40
+     Davidson diagonalization with overlap
+     ethr =  1.00E-12, avg # of iterations =  2.0
+
+     total cpu time spent up to now is        4.5 secs
+
+     End of self-consistent calculation
+
+          k = 0.0000 0.0000 0.0000 (   250 PWs)   bands (ev):
+
+   -15.4200 -10.2100  -5.3400  -1.1200   2.4500   4.8900
+
+     the Fermi energy is    -0.5000 ev
+
+!    total energy              =    -120.45678901 Ry
+     Harris-Foulkes estimate   =    -120.45678901 Ry
+     estimated scf accuracy    <          0.00000001 Ry
+
+     Forces acting on atoms (cartesian axes, Ry/au):
+
+     atom    1 type  1   force =     0.00001000    0.00000500   -0.00000200
+     atom    2 type  1   force =    -0.00001000   -0.00000500    0.00000200
+
+     Total force =     0.000015     Total SCF correction =     0.000001
+
+     JOB DONE.

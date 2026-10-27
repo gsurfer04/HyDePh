@@ -96,9 +96,20 @@ class ToolkitConfig:
     excited_cell_path : str, optional
         Path to pre-constructed or DFT-relaxed excited-state geometry.
     excited_state_method : str
-        Method for constructing the optical excited-state geometry: "spin_proxy" (automated DFT
-        relaxation using an automated spin-proxy state), "synthetic" (isotropic breathing mode), or "file".
-        Default is "spin_proxy".
+        Method for constructing the optical excited-state geometry: "delta_scf" (automated constrained
+        occupation Delta-SCF DFT relaxation, default), "spin_proxy" (legacy spin-proxy proxy relaxation),
+        "synthetic" (isotropic breathing mode), or "file".
+    delta_scf_homo_band : int, optional
+        Band index of the occupied defect state from which to promote an electron in Delta-SCF mode.
+        If omitted, auto-detected from ground-state Kohn-Sham eigenvalues.
+    delta_scf_lumo_band : int, optional
+        Band index of the unoccupied defect state into which to promote an electron in Delta-SCF mode.
+        If omitted, auto-detected from ground-state Kohn-Sham eigenvalues.
+    delta_scf_spin_channel : int, optional
+        Spin channel (1=up, 2=down) for the optical transition promotion in Delta-SCF mode.
+        If omitted, auto-detected from the active in-gap defect channel.
+    paired_delta_nep : bool
+        Whether to train paired Delta-NEP potential surfaces (Delta V_GS and Delta V_ES). Default is True.
     excited_state_tot_magnetization : int, optional
         Target spin magnetization (2S) for excited-state relaxation in "spin_proxy" mode.
         Defaults to ground state tot_magnetization + 2.
@@ -121,6 +132,10 @@ class ToolkitConfig:
         Target substitutional element symbol.
     defect_site_index : int, optional
         Explicit 0-based atom index in the supercell for defect creation.
+    allow_fallbacks : bool
+        If False (default), raises an immediate RuntimeError upon DFT relaxation failure or
+        unresolvable ZPL instead of silently substituting heuristic displacements or default values.
+        If True, permits heuristic fallbacks with prominent warnings.
     supercell_repeat : tuple of int
         Supercell expansion multipliers (nx, ny, nz). Default is (2, 2, 2).
         For stiff covalent hosts (e.g. Diamond, SiC), (3, 3, 3) or >= 140-200 atoms
@@ -150,8 +165,10 @@ class ToolkitConfig:
         Extra arguments passed directly to the MPI runner.
     qe_timeout_s : float, optional
         Timeout per Quantum ESPRESSO calculation in seconds.
-    conv_thr : str
-        SCF convergence threshold in Quantum ESPRESSO. Default is "1.0d-5".
+    conv_thr : str, optional
+        SCF convergence threshold in Quantum ESPRESSO. If omitted (None, default),
+        automatically scales with supercell size ($1.0\\times 10^{-10}\\ \\mathrm{Ry/atom}$)
+        for accurate atomic forces and Hessians.
     mixing_beta : float
         SCF charge density mixing factor. Default is 0.4.
     mixing_ndim : int
@@ -163,7 +180,17 @@ class ToolkitConfig:
     nbnd : int, optional
         Number of Kohn-Sham bands. If omitted, automatically sized from valence electron count when UPF metadata is available.
     auto_spin_parity : bool
-        Automatically verify and adjust spin multiplicity / tot_magnetization parity against total valence electrons to prevent fractional spin occupations. Default is True.
+        If False (default), raises an explicit ValueError when total valence electrons and tot_magnetization
+        have opposite parity (which forces unphysical fractional spin occupations in QE).
+        If True, automatically adjusts tot_magnetization to the nearest valid integer parity.
+    qe_occupations : str
+        Electronic occupations method in Quantum ESPRESSO: "fixed" (default for gapped defect insulators/semiconductors),
+        "smearing", or "from_input".
+    smearing : str
+        Smearing type if qe_occupations="smearing" (e.g. "gaussian", "marzari-vanderbilt", "methfessel-paxton", "fermi-dirac").
+        Default is "gaussian".
+    degauss : float
+        Smearing width in Ry if qe_occupations="smearing". Default is 0.005.
 
     nep_exe : str, optional
         Path to GPUMD nep executable.
@@ -183,6 +210,15 @@ class ToolkitConfig:
         Plane-wave cutoff energy for charge density (Ry). Default is 320.0.
     kpoints : tuple of int
         Monkhorst-Pack k-point grid. Default is (1, 1, 1) (Gamma-point).
+    input_dft : str, optional
+        Exchange-correlation functional tag in Quantum ESPRESSO (e.g. "hse", "hse06", "pbe0")
+        for hybrid functional DFT calculations.
+    exx_fraction : float, optional
+        Fraction of exact exchange for hybrid functionals (e.g. 0.25).
+    nqx : tuple of int, optional
+        Monkhorst-Pack q-point grid for exact exchange evaluations (e.g. (1, 1, 1)).
+    ecutfock : float, optional
+        Plane-wave cutoff energy for exact exchange operator (Ry).
 
     n_fc_frames : int
         Number of Franck-Condon 1D path frames to sample. Default is 7.
@@ -248,7 +284,11 @@ class ToolkitConfig:
     pristine_cell_path: str
     defect_cell_path: Optional[str] = None
     excited_cell_path: Optional[str] = None
-    excited_state_method: str = "spin_proxy"  # "spin_proxy", "synthetic", or "file"
+    excited_state_method: str = "delta_scf"  # "delta_scf", "spin_proxy", "synthetic", or "file"
+    delta_scf_homo_band: Optional[int] = None
+    delta_scf_lumo_band: Optional[int] = None
+    delta_scf_spin_channel: Optional[int] = None
+    paired_delta_nep: bool = True
     excited_state_tot_magnetization: Optional[int] = None
     excited_state_spin_multiplicity: Optional[int] = None
     ground_state_relax_method: str = "auto"  # "auto", "foundation", or "dft"
@@ -260,6 +300,7 @@ class ToolkitConfig:
     substitutional_element: Optional[str] = None
     defect_site_index: Optional[int] = None
     supercell_repeat: Tuple[int, int, int] = (2, 2, 2)
+    allow_fallbacks: bool = False
 
     foundation_potential_path: str = field(
         default_factory=lambda: os.environ.get("NEP_FOUNDATION_PATH", "nep89_20250409.txt")
@@ -281,22 +322,29 @@ class ToolkitConfig:
     nep_exe: Optional[str] = None
     qe_timeout_s: Optional[float] = None
 
-    conv_thr: str = "1.0d-5"
+    conv_thr: Optional[str] = None
     mixing_beta: float = 0.4
     mixing_ndim: int = 8
     diagonalization: str = "david"
     diago_david_ndim: int = 2
     nbnd: Optional[int] = None
-    auto_spin_parity: bool = True
+    auto_spin_parity: bool = False
+    qe_occupations: str = "fixed"
+    smearing: str = "gaussian"
+    degauss: float = 0.005
 
     charge: Optional[float] = None  # Net charge in e
     tot_charge: float = 0.0         # QE alias for charge
     spin_polarized: bool = True     # nspin=2 in QE
-    spin_multiplicity: int = 2      # 2S+1
+    spin_multiplicity: Optional[int] = None  # 2S+1 (defaults to 2 if tot_magnetization omitted)
     tot_magnetization: Optional[int] = None  # 2S = spin_multiplicity - 1
     ecutwfc: float = 40.0           # Ry
     ecutrho: float = 320.0          # Ry
     kpoints: Tuple[int, int, int] = (1, 1, 1)
+    input_dft: Optional[str] = None
+    exx_fraction: Optional[float] = None
+    nqx: Optional[Tuple[int, int, int]] = None
+    ecutfock: Optional[float] = None
 
     n_fc_frames: int = 7
     n_phonon_frames: int = 12
@@ -321,11 +369,16 @@ class ToolkitConfig:
     nep_n_max_angular: int = 4
     nep_basis_size: int = 8
     nep_l_max: int = 2
+    nep_committee_size: int = 1
+    max_test_force_rmse_eV_A: float = 0.08
+    max_gs_residual_force_eV_A: float = 0.05
+    subtract_mean_energy_offset: bool = True
 
     enable_anharmonic: bool = True
     anharmonic_md_steps: int = 2500
     anharmonic_dt_fs: float = 1.0
-    anharmonic_coupling_regime: str = "auto"  # "auto", "quantum", or "semiclassical"
+    anharmonic_coupling_regime: str = "cumulant"  # "cumulant", "auto", "quantum", or "semiclassical"
+    anharmonic_thermalization_steps: int = 400
 
     workspace_dir: str = "./hydeph_run"
     lineshape_figure_name: str = "lineshapes.png"
@@ -344,7 +397,14 @@ class ToolkitConfig:
     lineshape_y_scale: str = "linear"        # "linear" or "log"
     individual_shared_x: bool = False
     phonon_smearing_meV: Optional[float] = None
-    dephasing_gamma_meV: Optional[float] = None
+    dephasing_gamma_meV: Optional[float] = 1.5
+    dephasing_temperature_coefficient: float = 0.0
+    time_window_tau_fs: Optional[float] = None
+    max_imaginary_modes: int = 0
+    phonon_supercell_repeat: Optional[Tuple[int, int, int]] = None
+    phonon_embedding_method: str = "displacement"  # "displacement" or "force"
+    export_normal_modes: bool = True
+    calculate_pl_intensity: bool = True
     finite_size_acoustic_cutoff: bool = True
     lineshape_n_points: int = 1500
 
@@ -356,20 +416,45 @@ class ToolkitConfig:
     cc_n_points: int = 81
 
     def __post_init__(self):
+        if self.excited_state_method == "spin_proxy":
+            logger.warning(
+                "[!] Notice: 'spin_proxy' excited state method optimizes an artificial spin state "
+                "rather than the true optical state. Consider 'delta_scf' (default) for physical optical transitions."
+            )
+
+        if self.charge is not None and self.tot_charge != 0.0 and abs(float(self.charge) - float(self.tot_charge)) > 1e-5:
+            raise ValueError(
+                f"Conflicting charge specifications: charge={self.charge} but tot_charge={self.tot_charge}. "
+                "Specify only one or ensure they agree."
+            )
         if self.charge is not None:
             self.tot_charge = float(self.charge)
         else:
             self.charge = float(self.tot_charge)
 
+        if self.spin_multiplicity is not None and self.tot_magnetization is not None:
+            if int(self.tot_magnetization) != int(self.spin_multiplicity) - 1:
+                raise ValueError(
+                    f"Conflicting spin specifications: spin_multiplicity={self.spin_multiplicity} "
+                    f"(implies tot_magnetization={self.spin_multiplicity - 1}) but tot_magnetization={self.tot_magnetization}. "
+                    "Specify only one or ensure they agree."
+                )
+
         if self.tot_magnetization is not None:
             self.spin_multiplicity = int(self.tot_magnetization) + 1
-        else:
+        elif self.spin_multiplicity is not None:
             self.tot_magnetization = max(0, int(self.spin_multiplicity) - 1)
+        else:
+            self.spin_multiplicity = 2
+            self.tot_magnetization = 1
 
         if self.excited_state_tot_magnetization is not None:
             self.excited_state_spin_multiplicity = int(self.excited_state_tot_magnetization) + 1
         elif self.excited_state_spin_multiplicity is not None:
             self.excited_state_tot_magnetization = max(0, int(self.excited_state_spin_multiplicity) - 1)
+
+        if self.phonon_supercell_repeat is not None:
+            self.phonon_supercell_repeat = tuple(int(x) for x in self.phonon_supercell_repeat)
 
         if self.zpl_energy_eV is not None and self.zpl_energy_eV <= 0:
             logger.info(
@@ -402,15 +487,26 @@ class ToolkitConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ToolkitConfig:
-        """Constructs a ToolkitConfig from a dictionary, filtering unknown keys."""
+        """Constructs a ToolkitConfig from a dictionary, rejecting unknown keys with helpful suggestions."""
         valid_keys = {f.name for f in fields(cls)}
+        unknown_keys = [k for k in data.keys() if k not in valid_keys]
+        if unknown_keys:
+            import difflib
+            errors = []
+            for k in sorted(unknown_keys):
+                matches = difflib.get_close_matches(k, list(valid_keys), n=1, cutoff=0.6)
+                if matches:
+                    errors.append(f"Unknown configuration key: '{k}'. Did you mean '{matches[0]}'?")
+                else:
+                    errors.append(f"Unknown configuration key: '{k}'.")
+            raise ValueError("\n".join(errors))
+
         filtered = {}
         for k, v in data.items():
-            if k in valid_keys:
-                if k in ("supercell_repeat", "kpoints") and isinstance(v, list):
-                    filtered[k] = tuple(v)
-                else:
-                    filtered[k] = v
+            if k in ("supercell_repeat", "kpoints", "nqx") and isinstance(v, list):
+                filtered[k] = tuple(v)
+            else:
+                filtered[k] = v
         return cls(**filtered)
 
     @classmethod
@@ -560,10 +656,10 @@ class ToolkitConfig:
                 "Must be 'combined', 'individual', or 'both'."
             )
 
-        if self.excited_state_method.lower() not in ("synthetic", "spin_proxy", "file"):
+        if self.excited_state_method.lower() not in ("delta_scf", "synthetic", "spin_proxy", "file"):
             raise ValueError(
                 f"Invalid excited_state_method: '{self.excited_state_method}'. "
-                "Must be 'synthetic', 'spin_proxy', or 'file'."
+                "Must be 'delta_scf', 'synthetic', 'spin_proxy', or 'file'."
             )
 
         if self.ground_state_relax_method.lower() not in ("auto", "foundation", "dft"):
@@ -590,10 +686,15 @@ class ToolkitConfig:
                 "Must be 'target_total' or 'max_new'."
             )
 
-        if self.anharmonic_coupling_regime.lower() not in ("auto", "quantum", "semiclassical"):
+        if self.anharmonic_coupling_regime.lower() not in ("auto", "quantum", "semiclassical", "cumulant"):
             raise ValueError(
                 f"Invalid anharmonic_coupling_regime: '{self.anharmonic_coupling_regime}'. "
-                "Must be 'auto', 'quantum', or 'semiclassical'."
+                "Must be 'cumulant', 'auto', 'quantum', or 'semiclassical'."
+            )
+
+        if int(self.anharmonic_thermalization_steps) < 0:
+            raise ValueError(
+                f"Invalid anharmonic_thermalization_steps: {self.anharmonic_thermalization_steps}. Must be >= 0."
             )
 
         if int(self.n_workers_qe) < 1:
@@ -602,5 +703,152 @@ class ToolkitConfig:
         if self.qe_timeout_s is not None and float(self.qe_timeout_s) <= 0.0:
             raise ValueError(f"Invalid qe_timeout_s: {self.qe_timeout_s}. Must be > 0.")
 
+        if self.qe_occupations.lower() not in ("fixed", "smearing", "from_input"):
+            raise ValueError(
+                f"Invalid qe_occupations: '{self.qe_occupations}'. "
+                "Must be 'fixed', 'smearing', or 'from_input'."
+            )
+
+        if self.qe_occupations.lower() == "smearing":
+            if float(self.degauss) <= 0.0:
+                raise ValueError(f"Invalid degauss: {self.degauss}. Must be > 0 when qe_occupations='smearing'.")
+
+        if self.input_dft is not None:
+            if self.exx_fraction is not None and not (0.0 <= float(self.exx_fraction) <= 1.0):
+                raise ValueError(f"Invalid exx_fraction: {self.exx_fraction}. Must be between 0.0 and 1.0.")
+            if self.nqx is not None:
+                if len(self.nqx) != 3 or any(int(k) < 1 for k in self.nqx):
+                    raise ValueError(f"Invalid nqx: {self.nqx}. Must be a 3-tuple of positive integers.")
+            if self.ecutfock is not None and float(self.ecutfock) <= 0.0:
+                raise ValueError(f"Invalid ecutfock: {self.ecutfock}. Must be > 0.")
+
+        if self.conv_thr is not None and not str(self.conv_thr).strip():
+            raise ValueError("conv_thr cannot be an empty string. Provide a valid threshold or None for auto-scaling.")
+
+        # Temperatures validation
+        if not self.temperatures or any(float(t) <= 0.0 for t in self.temperatures):
+            raise ValueError(
+                f"Invalid temperatures: {self.temperatures}. Must be a non-empty list of positive temperatures (K)."
+            )
+
+        # Supercell repeat validation
+        if len(self.supercell_repeat) != 3 or any(int(r) < 1 for r in self.supercell_repeat):
+            raise ValueError(
+                f"Invalid supercell_repeat: {self.supercell_repeat}. Must be a 3-tuple of integers >= 1."
+            )
+
+        # K-points validation
+        if len(self.kpoints) != 3 or any(int(k) < 1 for k in self.kpoints):
+            raise ValueError(
+                f"Invalid kpoints: {self.kpoints}. Must be a 3-tuple of positive integers."
+            )
+
+        # Plane-wave cutoffs validation
+        if float(self.ecutwfc) <= 0.0:
+            raise ValueError(f"Invalid ecutwfc: {self.ecutwfc}. Must be > 0 Ry.")
+        if float(self.ecutrho) <= 0.0:
+            raise ValueError(f"Invalid ecutrho: {self.ecutrho}. Must be > 0 Ry.")
+        if float(self.ecutrho) < 4.0 * float(self.ecutwfc):
+            raise ValueError(
+                f"Invalid ecutrho: {self.ecutrho} Ry is less than 4 * ecutwfc ({4.0 * self.ecutwfc} Ry). "
+                "Charge density cutoff must be at least 4 times wavefunction cutoff."
+            )
+
+        # Frame numbers validation
+        if int(self.n_fc_frames) < 2:
+            raise ValueError(f"Invalid n_fc_frames: {self.n_fc_frames}. Must be >= 2 to include lambda=0 and lambda=1.")
+        if int(self.n_phonon_frames) < 0:
+            raise ValueError(f"Invalid n_phonon_frames: {self.n_phonon_frames}. Must be >= 0.")
+        if int(self.n_md_frames) < 0:
+            raise ValueError(f"Invalid n_md_frames: {self.n_md_frames}. Must be >= 0.")
+
+        # NEP hyperparameters validation
+        if int(self.nep_steps) < 1:
+            raise ValueError(f"Invalid nep_steps: {self.nep_steps}. Must be >= 1.")
+        if int(self.nep_neurons) < 1:
+            raise ValueError(f"Invalid nep_neurons: {self.nep_neurons}. Must be >= 1.")
+        if int(self.nep_committee_size) < 1:
+            raise ValueError(f"Invalid nep_committee_size: {self.nep_committee_size}. Must be >= 1.")
+        if float(self.max_test_force_rmse_eV_A) <= 0.0:
+            raise ValueError(f"Invalid max_test_force_rmse_eV_A: {self.max_test_force_rmse_eV_A}. Must be > 0.")
+        if float(self.max_gs_residual_force_eV_A) <= 0.0:
+            raise ValueError(f"Invalid max_gs_residual_force_eV_A: {self.max_gs_residual_force_eV_A}. Must be > 0.")
+        if int(self.nep_batch) < 1:
+            raise ValueError(f"Invalid nep_batch: {self.nep_batch}. Must be >= 1.")
+        if float(self.nep_cutoff_radial) <= 0.0 or float(self.nep_cutoff_angular) <= 0.0:
+            raise ValueError("nep_cutoff_radial and nep_cutoff_angular must be > 0 Angstrom.")
+        if int(self.nep_n_max_radial) < 1 or int(self.nep_n_max_angular) < 1 or int(self.nep_basis_size) < 1:
+            raise ValueError("nep_n_max_radial, nep_n_max_angular, and nep_basis_size must be >= 1.")
+
+        # Phonon and lineshape parameters validation
+        if self.phonon_supercell_repeat is not None:
+            if len(self.phonon_supercell_repeat) != 3 or any(int(r) < 1 for r in self.phonon_supercell_repeat):
+                raise ValueError(
+                    f"Invalid phonon_supercell_repeat: {self.phonon_supercell_repeat}. Must be a 3-tuple of integers >= 1."
+                )
+        if self.phonon_embedding_method.lower() not in ("displacement", "force"):
+            raise ValueError(
+                f"Invalid phonon_embedding_method: '{self.phonon_embedding_method}'. Must be 'displacement' or 'force'."
+            )
+        if self.dephasing_gamma_meV is not None and float(self.dephasing_gamma_meV) < 0.0:
+            raise ValueError(f"Invalid dephasing_gamma_meV: {self.dephasing_gamma_meV}. Must be >= 0.")
+        if float(self.dephasing_temperature_coefficient) < 0.0:
+            raise ValueError(
+                f"Invalid dephasing_temperature_coefficient: {self.dephasing_temperature_coefficient}. Must be >= 0."
+            )
+        if self.time_window_tau_fs is not None and float(self.time_window_tau_fs) <= 0.0:
+            raise ValueError(f"Invalid time_window_tau_fs: {self.time_window_tau_fs}. Must be > 0 fs.")
+        if int(self.max_imaginary_modes) < 0:
+            raise ValueError(f"Invalid max_imaginary_modes: {self.max_imaginary_modes}. Must be >= 0.")
+
         os.makedirs(self.workspace_dir, exist_ok=True)
         return True
+
+    def export_resolved_manifest(self, workspace_dir: Optional[str] = None) -> str:
+        """Saves config_resolved.json containing fully validated configuration, versions, and hashes."""
+        ws = workspace_dir or self.workspace_dir
+        os.makedirs(ws, exist_ok=True)
+        manifest_path = os.path.join(ws, "config_resolved.json")
+
+        from .provenance import compute_file_sha256
+        import sys
+        import time
+        from . import __version__
+
+        upf_hashes = {}
+        for elem, path in self.pseudopotentials.items():
+            full_p = path if os.path.isabs(path) else os.path.join(self.pseudo_dir, path)
+            h = compute_file_sha256(full_p) if os.path.isfile(full_p) else None
+            upf_hashes[elem] = {"path": path, "sha256": h}
+
+        manifest = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "software_versions": {
+                "hydeph": __version__,
+                "python": sys.version.split()[0],
+                "pw_exe": self.pw_exe,
+                "nep_exe": self.nep_exe,
+            },
+            "input_hashes": {
+                "pristine_cell_path": {
+                    "path": self.pristine_cell_path,
+                    "sha256": compute_file_sha256(self.pristine_cell_path) if os.path.isfile(self.pristine_cell_path) else None,
+                },
+                "defect_cell_path": {
+                    "path": self.defect_cell_path,
+                    "sha256": compute_file_sha256(self.defect_cell_path) if self.defect_cell_path and os.path.isfile(self.defect_cell_path) else None,
+                },
+                "foundation_potential_path": {
+                    "path": self.foundation_potential_path,
+                    "sha256": compute_file_sha256(self.foundation_potential_path) if os.path.isfile(self.foundation_potential_path) else None,
+                },
+                "pseudopotentials": upf_hashes,
+            },
+            "config": self.to_dict(),
+        }
+
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+        logger.info(f"[+] Exported resolved configuration manifest to {manifest_path}")
+        return manifest_path

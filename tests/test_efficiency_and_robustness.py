@@ -12,9 +12,8 @@ from ase.calculators.emt import EMT
 from unittest.mock import patch
 
 from hydeph.config import ToolkitConfig
-from hydeph.defect_builder import DefectBuilder, mic_displacement, mic_distances
-from hydeph.frame_sampler import FrameSampler, farthest_point_sampling
-from hydeph.qe_runner import QERunner, write_qe_input
+from hydeph.defect_builder import DefectBuilder, mic_displacement
+from hydeph.qe_runner import QERunner
 from hydeph.delta_trainer import DeltaTrainer, stratified_train_test_split
 from hydeph.lineshape import LineshapeEngine, compute_quantum_lineshape
 from hydeph.cc_diagram import ConfigurationCoordinateEngine
@@ -35,7 +34,7 @@ def test_pbc_minimum_image_invariance(tmp_path):
     dr_wrapped = mic_displacement(at_es_wrapped.positions, at_gs.positions, at_gs.cell)
     np.testing.assert_allclose(dr_unwrapped, dr_wrapped, atol=1e-10)
 
-    cfg = ToolkitConfig(pristine_cell_path=str(tmp_path), workspace_dir=str(tmp_path))
+    cfg = ToolkitConfig(pristine_cell_path=str(tmp_path), workspace_dir=str(tmp_path), zpl_energy_eV=2.0)
     cc_engine = ConfigurationCoordinateEngine(cfg, EMT())
     res1 = cc_engine.calculate_cc_curve(at_gs, at_es, n_points=11)
     res2 = cc_engine.calculate_cc_curve(at_gs, at_es_wrapped, n_points=11)

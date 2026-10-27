@@ -6,24 +6,20 @@ import json
 import warnings
 import pytest
 import numpy as np
-from unittest.mock import patch, MagicMock
 from ase import Atoms
 from ase.calculators.calculator import Calculator, all_changes
 
 from hydeph.config import ToolkitConfig
 from hydeph.calculator import HybridDefectCalculator
 from hydeph.defect_builder import DefectBuilder
-from hydeph.frame_sampler import FrameSampler, farthest_point_sampling
+from hydeph.frame_sampler import farthest_point_sampling
 from hydeph.qe_runner import write_qe_input, parse_qe_output, QERunner
 from hydeph.delta_trainer import (
     DeltaTrainer,
     stratified_train_test_split,
-    write_delta_nep_in,
-    _compute_training_digest,
 )
-from hydeph.cc_diagram import ConfigurationCoordinateEngine, NV_ZPL_EV
+from hydeph.cc_diagram import ConfigurationCoordinateEngine
 from hydeph.lineshape import LineshapeEngine
-from hydeph.pipeline import main as cli_main
 
 
 class MockLinearCalc(Calculator):
@@ -159,10 +155,21 @@ def test_configuration_coordinate_zpl_derivation_and_warning(tmp_path):
     calc = MockLinearCalc()
     engine = ConfigurationCoordinateEngine(cfg, calc)
 
-    # 1. Neither user nor atoms.info energy specified -> emits warning and uses canonical reference
-    with pytest.warns(UserWarning, match="Falling back to reference canonical NV- ZPL"):
-        res = engine.calculate_cc_curve(at_gs, at_es, n_points=5)
-        assert res["e_zpl_eV"] == NV_ZPL_EV
+    # 1. Neither user nor atoms.info energy specified with allow_fallbacks=False -> raises RuntimeError
+    with pytest.raises(RuntimeError, match=r"Zero-Phonon Line \(ZPL\) energy could not be derived"):
+        engine.calculate_cc_curve(at_gs, at_es, n_points=5)
+
+    # 1b. With allow_fallbacks=True -> plots relative reference with warning
+    cfg_fb = ToolkitConfig(
+        pristine_cell_path=str(tmp_path),
+        workspace_dir=str(tmp_path / "ws_cc_fb"),
+        allow_fallbacks=True,
+    )
+    engine_fb = ConfigurationCoordinateEngine(cfg_fb, calc)
+    with pytest.warns(UserWarning, match="No ZPL energy specified in ToolkitConfig and could not be derived"):
+        res = engine_fb.calculate_cc_curve(at_gs, at_es, n_points=5)
+        assert res["zpl_source"] == "relative_reference_0eV"
+        assert res["e_zpl_eV"] == 0.0
 
     # 2. Energies present in atoms.info -> auto-derived
     at_gs.info["energy"] = -100.0
@@ -324,6 +331,7 @@ def test_qe_speed_optimizations_upf_and_omp(tmp_path, monkeypatch):
         pseudopotentials={"C": "C_ONCV.upf", "Si": "Si_ONCV.upf"},
         n_procs_qe=2,
         n_workers_qe=2,
+        auto_spin_parity=True,
     )
     write_qe_input(at, str(pw_in), cfg)
     text = pw_in.read_text()

@@ -1,0 +1,17 @@
+{
+  "dq_total": 0.5736264783542856,
+  "delta_e_rel_gs_eV": 0.3459473732218612,
+  "delta_e_rel_gs_meV": 345.9473732218612,
+  "delta_e_rel_es_eV": 0.3459473732218612,
+  "delta_e_rel_es_meV": 345.9473732218612,
+  "e_zpl_eV": 1.398752626778137,
+  "zpl_source": "kohn_sham_eigenvalues",
+  "e_abs_eV": 1.7446999999999981,
+  "e_em_eV": 1.0528052535562757,
+  "stokes_shift_eV": 0.6918947464437224,
+  "stokes_shift_meV": 691.8947464437224,
+  "hbar_omega_meV": 93.75342837924353,
+  "s_factor_1d": 3.6899703744428822,
+  "k_curvature_gs": 2.1093060074514076,
+  "dft_gap_eV": 1.7446999999999981
+}

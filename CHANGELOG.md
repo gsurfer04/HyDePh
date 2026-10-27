@@ -5,6 +5,45 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-27
+
+### Added
+- **Paired Ground + Optical Excited State $\Delta$-NEP Architecture (`A2`, `A7`)**:
+  - Established paired $\Delta$-NEP models ($\Delta V_{\text{GS}}$ and $\Delta V_{\text{ES}}$) as the default workflow (`fit_paired_excited_state=True`), allowing accurate independent representation of both ground and optical excited potential energy surfaces.
+  - Implemented `PairedDefectCalculator` in `calculator.py` combining foundation potential with both ground- and excited-state $\Delta$-NEPs.
+  - Implemented $\Delta\text{SCF}$ constrained-occupation labeling (`occupations='from_input'`) in `QERunner` for Franck-Condon frames, with automated Kohn-Sham orbital defect level detection.
+- **Fail-Loud Architecture & Provenance Tracking (`A1`)**:
+  - Enforced `allow_fallbacks=False` as strict default across all pipeline stages; failures in ground-state or excited-state DFT relaxations raise fatal exceptions with remediation guidance instead of silently reverting to unoptimized or synthetic models.
+  - Added `provenance.json` tracking system environment, software versions, input file SHA256 checksums, and execution metrics.
+- **DFT Rigor & Spin Parity (`A3`)**:
+  - Standardized on `occupations='fixed'` as the default for localized defect color centers in wide-gap insulators.
+  - Scaled convergence thresholds by atom count (`conv_thr = conv_thr_per_atom * N_atoms`).
+  - Added automated norm-conserving detection setting `ecutrho = 4 * ecutwfc`.
+  - Added HSE hybrid functional support (`hybrid_functional='hse'`).
+  - Fixed spin-parity validation bug and prioritized physical anchor frames (GS, ES, Franck-Condon endpoints) in DFT sample budgets.
+- **$\Delta$-NEP Quality Control Gates & Committee Ensembles (`A9`)**:
+  - Implemented per-atom mean energy offset subtraction $\bar{\Delta E}$ during $\Delta$-NEP dataset preparation and restoration in `HybridDefectCalculator`.
+  - Added `evaluate_delta_nep_quality_control()` validating train/test energy and force RMSE, Franck-Condon path maximum error, and GS residual force against automated quality thresholds.
+  - Implemented committee ensemble support (`nep_committee_size >= 1`) with uncertainty quantification.
+- **Large-Supercell Phonon Embedding & Optical Lineshapes (`A4`, `A5`)**:
+  - Implemented `embed_phonon_supercell()` supporting displacement and force-based ($\Delta Q_k = F_k / \omega_k^2$) embedding.
+  - Added $(\hbar\omega)^3$ optical photoluminescence prefactor: $I_{\text{PL}}(\hbar\omega) \propto (\hbar\omega)^3 A(\hbar\omega - E_{\text{ZPL}})$.
+  - Implemented finite-$T$ Debye-Waller factor $\text{DWF}(T) = \exp(-\sum S_k (2n_k+1))$ and enforced strict continuous $S(\hbar\omega)$ normalization ($\int S(\hbar\omega) d\hbar\omega \equiv \sum S_k$).
+  - Configurable Lorentzian instrument broadening (`dephasing_gamma_meV`) and imaginary mode detection guards (`max_imaginary_modes=0`).
+  - Exported detailed normal mode decomposition and inverse participation ratios to `normal_modes.csv`.
+- **Physical Paired Cumulant Anharmonic Module (`A6`)**:
+  - Replaced empirical regime switches and friction broadening with the exact physical energy-gap cumulant method.
+  - NVT Langevin thermalization $\to$ NVE `VelocityVerlet` production dynamics (zero thermostat friction).
+  - Evaluated physical vertical energy-gap trajectory $\Delta U(t) = V_{\text{ES}}(\mathbf{R}(t)) - V_{\text{GS}}(\mathbf{R}(t))$ using the paired excited-state potential.
+  - Applied symmetric harmonic quantum correction factor $Q(\hbar\omega, T) = \frac{\hbar\omega / (k_B T)}{2 \tanh(\hbar\omega / (2 k_B T))}$ to obtain $J_{\text{quant}}(\omega)$ and generating function lineshapes.
+- **Scientific Regression Test Suite (`D`)**:
+  - Added analytic 1D displaced harmonic oscillator tests (Poisson progression, sum rule, first and second moments, finite-$T$ DWF).
+  - Added toy force-field analytical Hessian and $S_k$ derivation comparison test.
+  - Added Quantum ESPRESSO output parser regression fixtures (converged SCF, unconverged, BFGS $n_{\text{step}}$ exhausted, timeout, spin-polarized bands).
+- **Benchmark Suite & Data Reproducibility (`C`)**:
+  - Established authentic `benchmarks/` data repository (`diamond-nvminus`, `CsI`, `4H-SiC`, `NaCl`).
+  - Updated all plotting scripts (`scripts/make_stiff_vs_soft_diagram.py`, `scripts/make_github_diagram.py`, `examples/plot_experimental_comparison.py`) to read exclusively from `benchmarks/` data.
+
 ## [0.6.3] - 2026-10-27
 
 ### Fixed

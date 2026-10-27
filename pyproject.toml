@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hydeph"
-version = "0.6.3"
+dynamic = ["version"]
 authors = [
   { name = "Quantum Materials & Machine Learning Team" },
 ]
@@ -31,6 +31,7 @@ dependencies = [
     "matplotlib>=3.5.0,<4",
     "ase>=3.22.0,<4",
     "calorine>=2.3.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -50,3 +51,6 @@ hydeph = "hydeph.pipeline:main"
 
 [tool.setuptools.packages.find]
 include = ["hydeph*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "hydeph.__version__"}

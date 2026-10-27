@@ -3,8 +3,6 @@ Tests for smart resumption, frame labeling, cache validation, and DFT budget all
 """
 
 import os
-import shutil
-import pytest
 import numpy as np
 from unittest.mock import patch, MagicMock
 from ase import Atoms
@@ -12,7 +10,7 @@ import ase.io
 
 from hydeph.config import ToolkitConfig
 from hydeph.frame_sampler import FrameSampler
-from hydeph.qe_runner import QERunner, check_pw_in_matches_atoms, find_frame_calc_dir
+from hydeph.qe_runner import QERunner, check_pw_in_matches_atoms
 
 
 def test_frame_sampler_labels(tmp_path):

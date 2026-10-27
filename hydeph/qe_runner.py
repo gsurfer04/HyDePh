@@ -11,7 +11,7 @@ import threading
 import subprocess
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Union
 import numpy as np
 import ase.io
 from ase import Atoms
@@ -38,8 +38,13 @@ def is_windows() -> bool:
 
 
 def inspect_upf_metadata(upf_path: str) -> Dict[str, Any]:
-    """Reads lightweight header metadata (`is_norm_conserving`, `z_valence`) from a UPF file."""
-    info: Dict[str, Any] = {"is_norm_conserving": None, "z_valence": None}
+    """Reads lightweight header metadata (`is_norm_conserving`, `z_valence`, suggested cutoffs) from a UPF file."""
+    info: Dict[str, Any] = {
+        "is_norm_conserving": None,
+        "z_valence": None,
+        "suggested_cutoff_wfc": None,
+        "suggested_cutoff_rho": None,
+    }
     if not upf_path or not os.path.isfile(upf_path):
         return info
     try:
@@ -63,6 +68,25 @@ def inspect_upf_metadata(upf_path: str) -> Dict[str, Any]:
             if m_z1:
                 info["z_valence"] = float(m_z1.group(1))
 
+        # Parse suggested cutoffs (UPF v2 attributes or comments)
+        m_wfc = re.search(r'(?:suggested_cutoff_wfc|wfc_cutoff)\s*=\s*"\s*([-\d.Ee+]+)\s*"', text, re.IGNORECASE)
+        if not m_wfc:
+            m_wfc = re.search(r'(?:suggested|recommended)?\s*cutoff(?:\s*for)?\s*wavefunctions?\s*[:=]\s*([-\d.Ee+]+)', text, re.IGNORECASE)
+        if m_wfc:
+            try:
+                info["suggested_cutoff_wfc"] = float(m_wfc.group(1))
+            except ValueError:
+                pass
+
+        m_rho = re.search(r'(?:suggested_cutoff_rho|rho_cutoff)\s*=\s*"\s*([-\d.Ee+]+)\s*"', text, re.IGNORECASE)
+        if not m_rho:
+            m_rho = re.search(r'(?:suggested|recommended)?\s*cutoff(?:\s*for)?\s*(?:charge\s*density|density|rho)\s*[:=]\s*([-\d.Ee+]+)', text, re.IGNORECASE)
+        if m_rho:
+            try:
+                info["suggested_cutoff_rho"] = float(m_rho.group(1))
+            except ValueError:
+                pass
+
         # Parse pseudopotential type (Norm-Conserving vs Ultrasoft/PAW)
         m_us = re.search(r'is_ultrasoft\s*=\s*"\s*([TFtf])\s*"', text)
         m_paw = re.search(r'is_paw\s*=\s*"\s*([TFtf])\s*"', text)
@@ -85,6 +109,172 @@ def inspect_upf_metadata(upf_path: str) -> Dict[str, Any]:
 
 
 _PARITY_WARNED_KEYS = set()
+_PARITY_LOCK = threading.Lock()
+_UPF_RESOLVE_LOCK = threading.Lock()
+
+
+def run_monitored_qe_subprocess(
+    cmd_args: List[str],
+    calc_dir: str,
+    pw_out: str,
+    env: Dict[str, str],
+    timeout: Optional[float] = None,
+    mode: str = "scf",
+    allow_fallbacks: bool = False,
+    atoms_template: Optional[Atoms] = None,
+) -> Optional[Atoms]:
+    """Executes a Quantum ESPRESSO subprocess, continuously monitoring progress and enforcing timeouts.
+
+    Parameters
+    ----------
+    cmd_args : List[str]
+        Command line arguments for the subprocess.
+    calc_dir : str
+        Working directory for the calculation.
+    pw_out : str
+        Path to output file (pw.out).
+    env : Dict[str, str]
+        Environment variables for subprocess execution.
+    timeout : float, optional
+        Maximum execution walltime in seconds.
+    mode : str
+        "scf" (logs SCF iterations) or "relax" (logs BFGS steps).
+    allow_fallbacks : bool
+        If True and mode == "relax", attempts to recover latest partial BFGS geometry upon timeout.
+    atoms_template : Atoms, optional
+        Reference Atoms object for parsing partial relaxation coordinates.
+
+    Returns
+    -------
+    Optional[Atoms]
+        Partial relaxed geometry if timed out under allow_fallbacks=True, otherwise None.
+
+    Raises
+    ------
+    RuntimeError
+        If the process execution fails or times out.
+    """
+    t_start = time.time()
+    t_last_log = t_start
+    last_iter = 0
+    last_step = 0
+    sleep_interval = min(0.5, max(0.05, float(timeout) / 5.0 if timeout else 0.5))
+    calc_type = "relaxation" if mode == "relax" else "calculation"
+
+    try:
+        with open(pw_out, "wb") as f_out:
+            proc = subprocess.Popen(
+                cmd_args,
+                stdout=f_out,
+                stderr=subprocess.STDOUT,
+                cwd=calc_dir,
+                env=env,
+            )
+
+            while proc.poll() is None:
+                now = time.time()
+                if timeout is not None and (now - t_start) > float(timeout):
+                    try:
+                        proc.kill()
+                        proc.wait()
+                    except Exception:
+                        pass
+                    if mode == "relax" and allow_fallbacks and atoms_template is not None:
+                        at_part, e_part = parse_qe_relaxation_output(pw_out, atoms_template, require_converged=False)
+                        if at_part is not None:
+                            logger.warning(
+                                f"      [pw relax] Relaxation reached timeout ({float(timeout):.1f}s) but recovered latest BFGS geometry "
+                                f"({at_part.info.get('energy', 0.0):.4f} eV) under allow_fallbacks=True."
+                            )
+                            return at_part
+                    raise RuntimeError(f"QE {calc_type} timed out after {float(timeout):.1f}s in {calc_dir}")
+
+                time.sleep(sleep_interval)
+                now = time.time()
+                if (now - t_last_log) >= 2.0 and os.path.isfile(pw_out):
+                    t_last_log = now
+                    try:
+                        with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
+                            lines = f.readlines()
+                        for line in reversed(lines[-30:]):
+                            if mode == "scf":
+                                if "iteration #" in line:
+                                    m = re.search(r"iteration #\s+(\d+)", line)
+                                    if m:
+                                        cur_iter = int(m.group(1))
+                                        if cur_iter != last_iter:
+                                            last_iter = cur_iter
+                                            logger.info(f"      [pw] SCF iteration {cur_iter}...")
+                                    break
+                                elif "Forces acting on atoms" in line:
+                                    logger.info("      [pw] SCF converged! Calculating atomic forces...")
+                                    break
+                            elif mode == "relax":
+                                if "number of scf cycles" in line or "iteration #" in line:
+                                    m = re.search(r"iteration #\s+(\d+)", line)
+                                    if m and int(m.group(1)) != last_iter:
+                                        last_iter = int(m.group(1))
+                                elif "step" in line and ("search" in line or "new bfgs" in line):
+                                    m = re.search(r"step\s+(\d+)", line)
+                                    if m and int(m.group(1)) != last_step:
+                                        last_step = int(m.group(1))
+                                        logger.info(f"      [pw relax] BFGS Step {last_step}...")
+                                    break
+                    except Exception:
+                        pass
+
+            proc.wait()
+    except OSError as exc:
+        raise RuntimeError(f"QE {calc_type} failed in {calc_dir}: {exc}") from exc
+
+    return None
+
+
+def build_delta_scf_occupations(
+    nelec: int,
+    tot_magnetization: int,
+    nbnd: int,
+    homo_band: int,
+    lumo_band: int,
+    spin_channel: int = 1,
+) -> Tuple[List[float], List[float]]:
+    """Builds constrained occupation arrays for Delta-SCF optical excitation.
+
+    Promotes one electron from `homo_band` to `lumo_band` in `spin_channel` (1=up, 2=down),
+    conserving total electron number and total magnetization (2S).
+    """
+    n_up = (int(nelec) + int(tot_magnetization)) // 2
+    n_dw = (int(nelec) - int(tot_magnetization)) // 2
+
+    if n_up + n_dw != int(nelec):
+        raise ValueError(
+            f"Electron count {nelec} and magnetization {tot_magnetization} have incompatible parity: "
+            f"n_up={n_up}, n_dw={n_dw}"
+        )
+
+    if nbnd < max(n_up, n_dw, homo_band, lumo_band):
+        raise ValueError(
+            f"nbnd ({nbnd}) must be at least max(n_up={n_up}, n_dw={n_dw}, "
+            f"homo={homo_band}, lumo={lumo_band})"
+        )
+
+    occ_up = [1.0] * n_up + [0.0] * (nbnd - n_up)
+    occ_dw = [1.0] * n_dw + [0.0] * (nbnd - n_dw)
+
+    if spin_channel == 1:
+        if occ_up[homo_band - 1] < 0.5:
+            logger.warning(f"[!] Warning: HOMO band {homo_band} in spin up has low occupation: {occ_up[homo_band - 1]}")
+        occ_up[homo_band - 1] = 0.0
+        occ_up[lumo_band - 1] = 1.0
+    elif spin_channel == 2:
+        if occ_dw[homo_band - 1] < 0.5:
+            logger.warning(f"[!] Warning: HOMO band {homo_band} in spin down has low occupation: {occ_dw[homo_band - 1]}")
+        occ_dw[homo_band - 1] = 0.0
+        occ_dw[lumo_band - 1] = 1.0
+    else:
+        raise ValueError(f"Invalid spin_channel: {spin_channel}. Must be 1 (up) or 2 (down).")
+
+    return occ_up, occ_dw
 
 
 def write_qe_input(
@@ -95,6 +285,8 @@ def write_qe_input(
     retry: bool = False,
     tot_magnetization: Optional[int] = None,
     nspin: Optional[int] = None,
+    occupations_mode: Optional[str] = None,
+    constrained_occupations: Optional[Union[List[List[float]], Tuple[List[float], ...]]] = None,
 ):
     """Writes a Quantum ESPRESSO `pw.x` input card.
     
@@ -121,7 +313,8 @@ def write_qe_input(
             disc = discover_pseudopotential(s, config.pseudo_dir)
             if disc:
                 full_disc = disc if os.path.isabs(disc) else os.path.join(config.pseudo_dir, disc)
-                config.pseudopotentials[s] = full_disc
+                with _UPF_RESOLVE_LOCK:
+                    config.pseudopotentials[s] = full_disc
                 upf_rel = full_disc
                 logger.info(f"[+] Auto-discovered pseudopotential for '{s}' during QE input prep: {os.path.basename(disc)}")
         full_upf = upf_rel if os.path.isabs(upf_rel) else os.path.join(config.pseudo_dir or ".", upf_rel)
@@ -131,8 +324,28 @@ def write_qe_input(
     all_z = bool(unique_symbols) and all(meta_by_sym[s]["z_valence"] is not None for s in unique_symbols)
 
     eff_ecutrho = float(config.ecutrho)
-    if all_nc and config.ecutrho == 320.0 and (4.0 * config.ecutwfc) < config.ecutrho:
+    if all_nc:
         eff_ecutrho = 4.0 * float(config.ecutwfc)
+    else:
+        eff_ecutrho = max(eff_ecutrho, 4.0 * float(config.ecutwfc))
+        for m in meta_by_sym.values():
+            if m.get("suggested_cutoff_rho") is not None:
+                eff_ecutrho = max(eff_ecutrho, float(m["suggested_cutoff_rho"]))
+
+    HARD_ELEMENTS = {"C", "N", "O", "B", "F"}
+    for s in unique_symbols:
+        meta = meta_by_sym.get(s, {})
+        rec_wfc = meta.get("suggested_cutoff_wfc")
+        if rec_wfc is not None and float(config.ecutwfc) < float(rec_wfc):
+            logger.warning(
+                f"    [!] Warning: Configured ecutwfc={config.ecutwfc} Ry is lower than "
+                f"UPF suggested cutoff {rec_wfc} Ry for element '{s}'."
+            )
+        elif s in HARD_ELEMENTS and float(config.ecutwfc) < 60.0:
+            logger.warning(
+                f"    [!] Warning: ecutwfc={config.ecutwfc} Ry may be too low for hard element '{s}' "
+                f"(recommended >= 60-80 Ry for converged forces/Hessians)."
+            )
 
     if tot_magnetization is not None:
         tot_mag = int(tot_magnetization)
@@ -146,32 +359,69 @@ def write_qe_input(
         nelec_int = int(round(total_nelec))
         if eff_nspin == 2 and abs(total_nelec - nelec_int) < 1e-4:
             if (nelec_int - tot_mag) % 2 != 0:
-                warn_key = (nelec_int, tot_mag, getattr(config, "auto_spin_parity", True))
-                if getattr(config, "auto_spin_parity", True):
-                    new_mag = tot_mag + 1 if tot_mag >= 1 else 0
-                    if warn_key not in _PARITY_WARNED_KEYS:
-                        _PARITY_WARNED_KEYS.add(warn_key)
-                        logger.warning(
-                            f"    [Spin Parity] Total valence electrons ({nelec_int}) and tot_magnetization ({tot_mag}) "
-                            f"have opposite parity, which forces fractional spin occupations "
-                            f"({0.5*(nelec_int+tot_mag):.1f} up, {0.5*(nelec_int-tot_mag):.1f} down). "
-                            f"Auto-adjusting tot_magnetization -> {new_mag} (spin_multiplicity={new_mag+1})."
-                        )
-                    tot_mag = new_mag
+                if nelec_int % 2 != 0:
+                    valid_mag = 1 if tot_mag <= 0 else (tot_mag if tot_mag % 2 != 0 else tot_mag + 1)
                 else:
-                    if warn_key not in _PARITY_WARNED_KEYS:
-                        _PARITY_WARNED_KEYS.add(warn_key)
-                        logger.warning(
-                            f"    [Spin Parity] WARNING: Total valence electrons ({nelec_int}) and tot_magnetization ({tot_mag}) "
-                            f"have opposite parity! QE will use fractional spin occupations."
-                        )
+                    valid_mag = 0 if tot_mag <= 0 else (tot_mag if tot_mag % 2 == 0 else tot_mag + 1)
+
+                auto_parity = getattr(config, "auto_spin_parity", False)
+                if not auto_parity:
+                    raise ValueError(
+                        f"Spin parity mismatch: Total valence electrons ({nelec_int}) and tot_magnetization ({tot_mag}) "
+                        f"have opposite parity, forcing fractional spin occupations "
+                        f"({0.5*(nelec_int+tot_mag):.1f} up, {0.5*(nelec_int-tot_mag):.1f} down). "
+                        f"Set tot_magnetization to an {'odd' if nelec_int % 2 != 0 else 'even'} integer "
+                        f"(e.g. tot_magnetization={valid_mag}, spin_multiplicity={valid_mag+1}) "
+                        f"or set auto_spin_parity=True to allow automatic parity adjustment."
+                    )
+                else:
+                    warn_key = (nelec_int, tot_mag, auto_parity)
+                    with _PARITY_LOCK:
+                        if warn_key not in _PARITY_WARNED_KEYS:
+                            _PARITY_WARNED_KEYS.add(warn_key)
+                            logger.warning(
+                                f"    [Spin Parity] Total valence electrons ({nelec_int}) and tot_magnetization ({tot_mag}) "
+                                f"have opposite parity, which forces fractional spin occupations "
+                                f"({0.5*(nelec_int+tot_mag):.1f} up, {0.5*(nelec_int-tot_mag):.1f} down). "
+                                f"Auto-adjusting tot_magnetization -> {valid_mag} (spin_multiplicity={valid_mag+1})."
+                            )
+                    tot_mag = valid_mag
+                    try:
+                        config.tot_magnetization = valid_mag
+                        config.spin_multiplicity = valid_mag + 1
+                    except Exception:
+                        pass
 
         if eff_nbnd is None and abs(total_nelec - nelec_int) < 1e-4 and nelec_int > 0:
             n_occ_max = (nelec_int + abs(tot_mag)) // 2 if eff_nspin == 2 else (nelec_int + 1) // 2
             buffer_bands = max(6, min(16, int(np.ceil(0.05 * n_occ_max))))
             eff_nbnd = n_occ_max + buffer_bands
 
-    conv_thr = config.conv_thr
+    if constrained_occupations is not None:
+        eff_nbnd = len(constrained_occupations[0])
+
+    occ_mode = occupations_mode or getattr(config, "qe_occupations", "fixed")
+    if constrained_occupations is not None:
+        occ_mode = "from_input"
+
+    if occ_mode == "from_input":
+        occ_lines = "  occupations = 'from_input'"
+    elif occ_mode == "fixed":
+        occ_lines = "  occupations = 'fixed'"
+    elif occ_mode == "smearing":
+        smearing = getattr(config, "smearing", "gaussian")
+        degauss = getattr(config, "degauss", 0.005)
+        occ_lines = f"  occupations = 'smearing',\n  smearing = '{smearing}',\n  degauss = {degauss}"
+    else:
+        raise ValueError(f"Unsupported occupations_mode: '{occ_mode}'. Must be 'fixed', 'smearing', or 'from_input'.")
+
+    if getattr(config, "conv_thr", None) is not None:
+        conv_thr = str(config.conv_thr)
+    else:
+        nat = len(atoms)
+        target_conv = max(1.0e-11, nat * 1.0e-10)
+        conv_thr = f"{target_conv:.1e}".replace("e", "d")
+
     diagonalization = config.diagonalization
     mixing_ndim = config.mixing_ndim
     base_mixing_beta = config.mixing_beta
@@ -182,6 +432,16 @@ def write_qe_input(
     retry_lines = "\n  mixing_mode = 'local-TF',\n  electron_maxstep = 150," if retry else ""
     forc_conv_line = f"\n  forc_conv_thr = {float(getattr(config, 'relax_forc_conv_thr', 1.0e-3))}," if calculation == "relax" else ""
     nstep_line = f"\n  nstep = {int(getattr(config, 'relax_nstep', 100))}," if calculation == "relax" else ""
+
+    hybrid_lines = ""
+    if getattr(config, "input_dft", None):
+        hybrid_lines += f"\n  input_dft = '{config.input_dft}',"
+    if getattr(config, "exx_fraction", None) is not None:
+        hybrid_lines += f"\n  exx_fraction = {float(config.exx_fraction)},"
+    if getattr(config, "nqx", None) is not None:
+        hybrid_lines += f"\n  nqx1 = {int(config.nqx[0])},\n  nqx2 = {int(config.nqx[1])},\n  nqx3 = {int(config.nqx[2])},"
+    if getattr(config, "ecutfock", None) is not None:
+        hybrid_lines += f"\n  ecutfock = {float(config.ecutfock)},"
 
     header = f"""&CONTROL
   calculation = '{calculation}',
@@ -202,10 +462,8 @@ def write_qe_input(
   nosym = .true.,
   nspin = {eff_nspin},
   tot_magnetization = {tot_mag},
-  tot_charge = {config.tot_charge},
-  occupations = 'smearing',
-  smearing = 'gaussian',
-  degauss = 0.005
+  tot_charge = {config.tot_charge},{hybrid_lines}
+{occ_lines}
 /
 &ELECTRONS
   conv_thr = {conv_thr},
@@ -227,7 +485,8 @@ def write_qe_input(
             disc = discover_pseudopotential(s, config.pseudo_dir) if config.pseudo_dir else None
             if disc:
                 full_disc = disc if os.path.isabs(disc) else os.path.join(config.pseudo_dir, disc)
-                config.pseudopotentials[s] = full_disc
+                with _UPF_RESOLVE_LOCK:
+                    config.pseudopotentials[s] = full_disc
             else:
                 raise KeyError(
                     f"Pseudopotential for element '{s}' was not specified in config.pseudopotentials "
@@ -251,6 +510,14 @@ def write_qe_input(
     else:
         k = config.kpoints
         header += f"\nK_POINTS (automatic)\n  {k[0]} {k[1]} {k[2]} 0 0 0\n"
+
+    if occ_mode == "from_input" and constrained_occupations is not None:
+        header += "\nOCCUPATIONS\n"
+        for spin_occs in constrained_occupations:
+            formatted = [f"{float(x):.4f}" if abs(float(x) - round(float(x))) > 1e-4 else f"{float(x):.1f}" for x in spin_occs]
+            for chunk_start in range(0, len(formatted), 10):
+                chunk = formatted[chunk_start:chunk_start + 10]
+                header += "  " + "  ".join(chunk) + "\n"
 
     with open(pw_in_path, "w") as f:
         f.write(header)
@@ -304,7 +571,11 @@ def parse_qe_output(pw_out_path: str) -> Tuple[Optional[float], Optional[np.ndar
     return energy_ev, f_arr
 
 
-def parse_qe_relaxation_output(pw_out_path: str, template_atoms: Atoms) -> Tuple[Optional[Atoms], Optional[float]]:
+def parse_qe_relaxation_output(
+    pw_out_path: str,
+    template_atoms: Atoms,
+    require_converged: bool = True,
+) -> Tuple[Optional[Atoms], Optional[float]]:
     """Parses the final relaxed geometry and total energy from a Quantum ESPRESSO `pw.x` relaxation output.
     
     Parameters
@@ -313,25 +584,40 @@ def parse_qe_relaxation_output(pw_out_path: str, template_atoms: Atoms) -> Tuple
         Path to `pw.out`.
     template_atoms : Atoms
         Reference Atoms object containing cell, symbols, and pbc.
+    require_converged : bool
+        If True (default), strictly verifies BFGS convergence marker ('Begin final coordinates' or
+        'bfgs converged in') and rejects timed-out, nstep-exhausted, or incomplete relaxations.
         
     Returns
     -------
     Tuple[Optional[Atoms], Optional[float]]
-        `(relaxed_atoms, energy_eV)`, or `(None, None)` if relaxation failed or output is missing.
+        `(relaxed_atoms, energy_eV)`, or `(None, None)` if relaxation failed or output is missing/unconverged.
     """
     if not os.path.isfile(pw_out_path):
         return None, None
-
-    final_positions: List[List[float]] = []
-    energy_ev: Optional[float] = None
-    in_final_coords = False
-    in_atomic_positions = False
 
     try:
         with open(pw_out_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
     except Exception:
         return None, None
+
+    text = "".join(lines)
+    text_lower = text.lower()
+
+    if require_converged:
+        has_final_coords = "begin final coordinates" in text_lower
+        has_bfgs_converged = "bfgs converged in" in text_lower
+        if not (has_final_coords or has_bfgs_converged):
+            return None, None
+        if "the maximum number of steps has been reached." in text_lower:
+            return None, None
+        if "convergence not achieved" in text_lower and not has_final_coords:
+            return None, None
+
+    final_positions: List[List[float]] = []
+    energy_ev: Optional[float] = None
+    in_final_coords = False
 
     # Pass 1: Check for "Begin final coordinates" block (standard upon BFGS completion)
     for line in lines:
@@ -352,16 +638,14 @@ def parse_qe_relaxation_output(pw_out_path: str, template_atoms: Atoms) -> Tuple
                 in_final_coords = False
                 break
             if "ATOMIC_POSITIONS" in line:
-                in_atomic_positions = True
                 continue
-            if in_atomic_positions:
-                parts = line.strip().split()
-                if len(parts) >= 4:
-                    try:
-                        x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
-                        final_positions.append([x, y, z])
-                    except ValueError:
-                        pass
+            parts = line.strip().split()
+            if len(parts) >= 4:
+                try:
+                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                    final_positions.append([x, y, z])
+                except ValueError:
+                    pass
 
     # Pass 2 fallback: If "Begin final coordinates" was omitted, retrieve the final ATOMIC_POSITIONS block
     if len(final_positions) != len(template_atoms):
@@ -427,9 +711,9 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, float]]:
         re.IGNORECASE,
     )
     if homo_lumo:
-        h, l = float(homo_lumo[-1][0]), float(homo_lumo[-1][1])
-        if l > h:
-            return {"gap_eV": l - h, "homo_eV": h, "lumo_eV": l, "fermi_eV": (h + l) / 2.0}
+        homo_val, lumo_val = float(homo_lumo[-1][0]), float(homo_lumo[-1][1])
+        if lumo_val > homo_val:
+            return {"gap_eV": lumo_val - homo_val, "homo_eV": homo_val, "lumo_eV": lumo_val, "fermi_eV": (homo_val + lumo_val) / 2.0}
 
     # 2. Spin-polarized bands (nspin = 2)
     spin_up = re.search(r"------ SPIN UP ------------.*?bands \(ev\):\s*(.*?)\n\s*------ SPIN DOWN", text, re.DOTALL)
@@ -441,18 +725,69 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, float]]:
         u_bands = [float(x) for x in spin_up.group(1).split()]
         d_bands = [float(x) for x in spin_dw.group(1).split()]
 
-        gaps = []
-        for bands, ef, spin_name in [(u_bands, ef_up, "up"), (d_bands, ef_dw, "down")]:
-            occ = [b for b in bands if b <= ef + 1e-3]
-            unocc = [b for b in bands if b > ef + 1e-3]
-            if occ and unocc:
-                gap = unocc[0] - occ[-1]
-                if gap > 0.05:
-                    gaps.append({"gap_eV": gap, "homo_eV": occ[-1], "lumo_eV": unocc[0], "fermi_eV": ef, "spin": spin_name})
+        # Compute gap for up and down
+        occ_u = [b for b in u_bands if b <= ef_up + 1e-3]
+        unocc_u = [b for b in u_bands if b > ef_up + 1e-3]
+        gap_u = (unocc_u[0] - occ_u[-1]) if (occ_u and unocc_u) else None
 
-        if gaps:
-            gaps.sort(key=lambda x: x["gap_eV"])
-            return gaps[0]
+        occ_d = [b for b in d_bands if b <= ef_dw + 1e-3]
+        unocc_d = [b for b in d_bands if b > ef_dw + 1e-3]
+        gap_d = (unocc_d[0] - occ_d[-1]) if (occ_d and unocc_d) else None
+
+        # Prioritize the minority or in-gap defect channel
+        if gap_d is not None and gap_u is not None:
+            if gap_d < gap_u and gap_d > 0.05:
+                chosen_spin = "down"
+                chosen_channel = 2
+                chosen_gap = gap_d
+                chosen_homo = occ_d[-1]
+                chosen_lumo = unocc_d[0]
+                homo_band = len(occ_d)
+                lumo_band = len(occ_d) + 1
+                chosen_ef = ef_dw
+            else:
+                chosen_spin = "up"
+                chosen_channel = 1
+                chosen_gap = gap_u
+                chosen_homo = occ_u[-1]
+                chosen_lumo = unocc_u[0]
+                homo_band = len(occ_u)
+                lumo_band = len(occ_u) + 1
+                chosen_ef = ef_up
+        elif gap_d is not None:
+            chosen_spin = "down"
+            chosen_channel = 2
+            chosen_gap = gap_d
+            chosen_homo = occ_d[-1]
+            chosen_lumo = unocc_d[0]
+            homo_band = len(occ_d)
+            lumo_band = len(occ_d) + 1
+            chosen_ef = ef_dw
+        elif gap_u is not None:
+            chosen_spin = "up"
+            chosen_channel = 1
+            chosen_gap = gap_u
+            chosen_homo = occ_u[-1]
+            chosen_lumo = unocc_u[0]
+            homo_band = len(occ_u)
+            lumo_band = len(occ_u) + 1
+            chosen_ef = ef_up
+        else:
+            return None
+
+        return {
+            "gap_eV": chosen_gap,
+            "homo_eV": chosen_homo,
+            "lumo_eV": chosen_lumo,
+            "fermi_eV": chosen_ef,
+            "spin": chosen_spin,
+            "spin_channel": chosen_channel,
+            "homo_band": homo_band,
+            "lumo_band": lumo_band,
+            "nbnd": max(len(u_bands), len(d_bands)),
+            "gap_up_eV": gap_u,
+            "gap_down_eV": gap_d,
+        }
 
     # 3. Non-spin-polarized bands (nspin = 1)
     single_bands = re.search(
@@ -470,9 +805,6 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, float]]:
             return {"gap_eV": unocc[0] - occ[-1], "homo_eV": occ[-1], "lumo_eV": unocc[0], "fermi_eV": ef}
 
     return None
-
-    forces_ev_a = np.array(forces_list) if forces_list else None
-    return energy_ev, forces_ev_a
 
 
 def resolve_pw_executable(pw_exe: Optional[str] = None) -> str:
@@ -519,7 +851,17 @@ def resolve_pw_executable(pw_exe: Optional[str] = None) -> str:
             found = shutil.which(name)
             if found:
                 return found
-        return "/usr/bin/pw.x"
+        # Common user-compiled or local paths
+        user_home = os.path.expanduser("~")
+        for local_cand in [
+            os.path.join(user_home, "qe-7.5", "bin", "pw.x"),
+            os.path.join(user_home, "qe-7.5", "PW", "src", "pw.x"),
+            "/usr/local/bin/pw.x",
+            "/usr/bin/pw.x",
+        ]:
+            if os.path.isfile(local_cand):
+                return local_cand
+        return "pw.x"
 
 
 def resolve_mpi_runner(mpi_command: Optional[str] = None, n_procs: int = 2) -> Tuple[Optional[str], Optional[str]]:
@@ -603,35 +945,106 @@ def build_qe_command(
     return cmd_args
 
 
-def check_pw_in_matches_atoms(pw_in: str, atoms: Atoms, tol: float = 1e-3) -> bool:
-    """Verifies that atomic positions in existing `pw.in` match `atoms` within `tol`."""
-    if not os.path.isfile(pw_in):
-        return True
+def check_pw_in_matches_atoms(
+    pw_in: str,
+    atoms: Atoms,
+    config: Optional[ToolkitConfig] = None,
+    tol: float = 1e-3,
+) -> bool:
+    """Verifies that atomic positions, cell, species, and configuration parameters in existing `pw.in` match `atoms` within `tol`.
+    
+    Fail-closed: returns False if `pw.in` is missing, unreadable, or fails to parse.
+    """
+    if not pw_in or not os.path.isfile(pw_in):
+        return False
     try:
         with open(pw_in, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+            text = f.read()
+            lines = text.splitlines()
+
         in_pos = False
         coords = []
+        species = []
+        in_cell = False
+        cell_vecs = []
+
         for line in lines:
             line_str = line.strip()
+            if "CELL_PARAMETERS" in line_str.upper():
+                in_cell = True
+                in_pos = False
+                continue
+            if in_cell:
+                if line_str.startswith("/") or line_str.startswith("&") or "ATOMIC" in line_str.upper():
+                    in_cell = False
+                else:
+                    parts = line_str.split()
+                    if len(parts) >= 3:
+                        try:
+                            cell_vecs.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                        except ValueError:
+                            pass
+                        if len(cell_vecs) == 3:
+                            in_cell = False
+                            continue
+
             if "ATOMIC_POSITIONS" in line_str.upper():
                 in_pos = True
+                in_cell = False
                 continue
             if in_pos:
                 if line_str.startswith("/") or line_str.startswith("&") or "K_POINTS" in line_str.upper():
                     break
                 parts = line_str.split()
                 if len(parts) >= 4:
+                    species.append(parts[0])
                     coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
+
         if len(coords) != len(atoms):
             return False
+
+        # Match species symbols
+        if species != list(atoms.get_chemical_symbols()):
+            return False
+
+        # Match positions
         diff = np.abs(np.array(coords) - atoms.positions)
-        return bool(np.max(diff) < tol)
-    except Exception:
+        if np.max(diff) >= tol:
+            return False
+
+        # Match cell vectors if parsed and atoms has a cell
+        if len(cell_vecs) == 3 and atoms.cell is not None and atoms.pbc.any():
+            cell_diff = np.abs(np.array(cell_vecs) - atoms.cell.array)
+            if np.max(cell_diff) >= tol:
+                return False
+
+        # If config is provided, verify matching cutoffs, charge, and spin
+        if config is not None:
+            m_wfc = re.search(r"ecutwfc\s*=\s*([-\d.Ee+]+)", text)
+            if m_wfc and abs(float(m_wfc.group(1)) - float(config.ecutwfc)) > 1e-3:
+                return False
+
+            m_chg = re.search(r"tot_charge\s*=\s*([-\d.Ee+]+)", text)
+            if m_chg and abs(float(m_chg.group(1)) - float(config.tot_charge)) > 1e-3:
+                return False
+
+            m_mag = re.search(r"tot_magnetization\s*=\s*([-\d]+)", text)
+            if m_mag and config.tot_magnetization is not None:
+                if int(m_mag.group(1)) != int(config.tot_magnetization):
+                    return False
+
         return True
+    except Exception:
+        return False
 
 
-def find_frame_calc_dir(dft_dir: str, cand_idx: int, frame_id: str, atoms: Atoms) -> Tuple[str, bool]:
+def find_frame_calc_dir(
+    dft_dir: str,
+    cand_idx: int,
+    frame_id: str,
+    atoms: Atoms,
+    config: Optional[ToolkitConfig] = None,
+) -> Tuple[str, bool]:
     """Finds the calculation directory for a frame and returns `(calc_dir, is_converged)`."""
     canonical_dir = os.path.join(dft_dir, f"frame_{cand_idx:03d}_{frame_id}")
     candidates = [
@@ -650,7 +1063,7 @@ def find_frame_calc_dir(dft_dir: str, cand_idx: int, frame_id: str, atoms: Atoms
                     if (
                         "JOB DONE." in content
                         and "convergence NOT achieved" not in content
-                        and check_pw_in_matches_atoms(pw_in, atoms)
+                        and check_pw_in_matches_atoms(pw_in, atoms, config=config)
                     ):
                         e_ev, f_ev_a = parse_qe_output(pw_out)
                         if e_ev is not None and f_ev_a is not None and len(f_ev_a) == len(atoms):
@@ -692,7 +1105,13 @@ class QERunner:
         return max(1, total_cores // active_ranks)
 
     def label_single_frame(
-        self, atoms: Atoms, calc_dir: str, retry: bool = False, timeout_s: Optional[float] = None
+        self,
+        atoms: Atoms,
+        calc_dir: str,
+        retry: bool = False,
+        timeout_s: Optional[float] = None,
+        occupations_mode: Optional[str] = None,
+        constrained_occupations: Optional[Union[List[List[float]], Tuple[List[float], ...]]] = None,
     ) -> Atoms:
         """Runs or reuses a cached single-point QE calculation for `atoms` in `calc_dir`."""
         os.makedirs(calc_dir, exist_ok=True)
@@ -736,7 +1155,14 @@ class QERunner:
                         pass
                 logger.info(f"      [Resuming] Incomplete calculation in {calc_dir}. Cleaned scratch tmp/ and restarting...")
 
-        write_qe_input(atoms, pw_in, self.config, retry=retry)
+        write_qe_input(
+            atoms,
+            pw_in,
+            self.config,
+            retry=retry,
+            occupations_mode=occupations_mode,
+            constrained_occupations=constrained_occupations,
+        )
         os.makedirs(os.path.join(calc_dir, "tmp"), exist_ok=True)
 
         cmd_args = build_qe_command(
@@ -761,55 +1187,15 @@ class QERunner:
             if pw_dir:
                 env["PATH"] = pw_dir + os.pathsep + env.get("PATH", "")
 
-        try:
-            with open(pw_out, "wb") as f_out:
-                proc = subprocess.Popen(
-                    cmd_args,
-                    stdout=f_out,
-                    stderr=subprocess.STDOUT,
-                    cwd=calc_dir,
-                    env=env,
-                )
-
-                last_iter = 0
-                t_start = time.time()
-                t_last_log = t_start
-                sleep_interval = min(0.5, max(0.05, float(eff_timeout) / 5.0 if eff_timeout else 0.5))
-
-                while proc.poll() is None:
-                    now = time.time()
-                    if eff_timeout is not None and (now - t_start) > float(eff_timeout):
-                        try:
-                            proc.kill()
-                            proc.wait()
-                        except Exception:
-                            pass
-                        raise RuntimeError(f"QE calculation timed out after {float(eff_timeout):.1f}s in {calc_dir}")
-                    time.sleep(sleep_interval)
-                    now = time.time()
-                    if (now - t_last_log) >= 2.0 and os.path.isfile(pw_out):
-                        t_last_log = now
-                        try:
-                            with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
-                                lines = f.readlines()
-                            for line in reversed(lines[-30:]):
-                                if "iteration #" in line:
-                                    m = re.search(r"iteration #\s+(\d+)", line)
-                                    if m:
-                                        cur_iter = int(m.group(1))
-                                        if cur_iter != last_iter:
-                                            last_iter = cur_iter
-                                            logger.info(f"      [pw] SCF iteration {cur_iter}...")
-                                    break
-                                elif "Forces acting on atoms" in line:
-                                    logger.info("      [pw] SCF converged! Calculating atomic forces...")
-                                    break
-                        except Exception:
-                            pass
-
-                proc.wait()
-        except OSError as exc:
-            raise RuntimeError(f"QE calculation failed in {calc_dir}: {exc}") from exc
+        run_monitored_qe_subprocess(
+            cmd_args=cmd_args,
+            calc_dir=calc_dir,
+            pw_out=pw_out,
+            env=env,
+            timeout=eff_timeout,
+            mode="scf",
+            allow_fallbacks=getattr(self.config, "allow_fallbacks", False),
+        )
 
         e_ev, f_ev_a = parse_qe_output(pw_out)
         if e_ev is None or f_ev_a is None or len(f_ev_a) != len(atoms):
@@ -857,6 +1243,8 @@ class QERunner:
         nspin: Optional[int] = None,
         timeout_s: Optional[float] = None,
         force_rerun: bool = False,
+        occupations_mode: Optional[str] = None,
+        constrained_occupations: Optional[Union[List[List[float]], Tuple[List[float], ...]]] = None,
     ) -> Atoms:
         """Executes or reuses a Quantum ESPRESSO BFGS geometry relaxation calculation.
         
@@ -886,8 +1274,8 @@ class QERunner:
         eff_timeout = timeout_s if timeout_s is not None else self.timeout_s
 
         if not force_rerun and os.path.isfile(pw_out):
-            at_rel, e_ev = parse_qe_relaxation_output(pw_out, atoms)
-            if at_rel is not None:
+            at_rel, e_ev = parse_qe_relaxation_output(pw_out, atoms, require_converged=True)
+            if at_rel is not None and check_pw_in_matches_atoms(pw_in, atoms, config=self.config):
                 logger.info(f"      [Cache hit] Reusing converged QE relaxation in {calc_dir}")
                 return at_rel
 
@@ -907,6 +1295,8 @@ class QERunner:
             calculation="relax",
             tot_magnetization=tot_magnetization,
             nspin=nspin,
+            occupations_mode=occupations_mode,
+            constrained_occupations=constrained_occupations,
         )
 
         cmd_args = build_qe_command(
@@ -933,56 +1323,19 @@ class QERunner:
 
         logger.info(f"      [pw relax] Starting QE BFGS relaxation in {calc_dir} (tot_magnetization={tot_magnetization})...")
         t_start = time.time()
-        last_step = 0
-        last_iter = 0
 
-        try:
-            with open(pw_out, "wb") as f_out:
-                proc = subprocess.Popen(
-                    cmd_args,
-                    stdout=f_out,
-                    stderr=subprocess.STDOUT,
-                    cwd=calc_dir,
-                    env=env,
-                )
-
-                sleep_interval = min(0.5, max(0.05, float(eff_timeout) / 5.0 if eff_timeout else 0.5))
-                while proc.poll() is None:
-                    now = time.time()
-                    if eff_timeout is not None and (now - t_start) > float(eff_timeout):
-                        try:
-                            proc.kill()
-                            proc.wait()
-                        except Exception:
-                            pass
-                        at_partial, e_part = parse_qe_relaxation_output(pw_out, atoms)
-                        if at_partial is not None:
-                            logger.warning(
-                                f"      [pw relax] Relaxation reached timeout ({float(eff_timeout):.1f}s) but successfully "
-                                f"recovered latest BFGS geometry ({at_partial.info.get('energy', 0.0):.4f} eV)."
-                            )
-                            return at_partial
-                        raise RuntimeError(f"QE relaxation timed out after {float(eff_timeout):.1f}s in {calc_dir}")
-                    time.sleep(sleep_interval)
-                    if os.path.isfile(pw_out):
-                        try:
-                            with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
-                                lines = f.readlines()
-                            for line in reversed(lines[-30:]):
-                                if "number of scf cycles" in line or "iteration #" in line:
-                                    m = re.search(r"iteration #\s+(\d+)", line)
-                                    if m and int(m.group(1)) != last_iter:
-                                        last_iter = int(m.group(1))
-                                elif "step" in line and ("search" in line or "new bfgs" in line):
-                                    m = re.search(r"step\s+(\d+)", line)
-                                    if m and int(m.group(1)) != last_step:
-                                        last_step = int(m.group(1))
-                                        logger.info(f"      [pw relax] BFGS Step {last_step}...")
-                        except Exception:
-                            pass
-                proc.wait()
-        except OSError as exc:
-            raise RuntimeError(f"QE relaxation failed in {calc_dir}: {exc}") from exc
+        at_fallback = run_monitored_qe_subprocess(
+            cmd_args=cmd_args,
+            calc_dir=calc_dir,
+            pw_out=pw_out,
+            env=env,
+            timeout=eff_timeout,
+            mode="relax",
+            allow_fallbacks=getattr(self.config, "allow_fallbacks", False),
+            atoms_template=atoms,
+        )
+        if at_fallback is not None:
+            return at_fallback
 
         at_rel, e_ev = parse_qe_relaxation_output(pw_out, atoms)
         if at_rel is None:
@@ -1059,6 +1412,92 @@ class QERunner:
         }
         return entry, next_cand_idx
 
+    def label_fc_excited_state(
+        self,
+        fc_frames: List[Atoms],
+        at_gs: Atoms,
+        calc_dir_base: Optional[str] = None,
+        constrained_occupations: Optional[Tuple[List[float], List[float]]] = None,
+    ) -> List[Atoms]:
+        """Labels Franck-Condon candidate frames with Delta-SCF constrained occupations."""
+        calc_base = calc_dir_base or self.config.workspace_dir
+        os.makedirs(calc_base, exist_ok=True)
+
+        if constrained_occupations is None:
+            gs_out = os.path.join(calc_base, "qe_gs_relax", "pw.out")
+            gap_info = parse_qe_band_gap(gs_out) if os.path.isfile(gs_out) else None
+
+            unique_syms = sorted(list(set(at_gs.get_chemical_symbols())))
+            z_vals = {}
+            for s in unique_syms:
+                upf = self.config.pseudopotentials.get(s, "")
+                if upf:
+                    p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
+                    z_vals[s] = inspect_upf_metadata(p).get("z_valence")
+
+            if all(v is not None for v in z_vals.values()):
+                nelec_total = int(round(sum(z_vals[s] for s in at_gs.get_chemical_symbols()) - float(self.config.tot_charge)))
+            else:
+                nelec_total = len(at_gs) * 4
+
+            tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
+            if (nelec_total % 2) != (tot_mag % 2):
+                if nelec_total % 2 != 0:
+                    valid_mag = 1 if tot_mag <= 0 else (tot_mag if tot_mag % 2 != 0 else tot_mag + 1)
+                else:
+                    valid_mag = 0 if tot_mag <= 0 else (tot_mag if tot_mag % 2 == 0 else tot_mag + 1)
+                if not getattr(self.config, "auto_spin_parity", False):
+                    raise ValueError(
+                        f"Spin parity mismatch in Delta-SCF: Total valence electrons ({nelec_total}) and "
+                        f"tot_magnetization ({tot_mag}) have opposite parity ({0.5*(nelec_total+tot_mag):.1f} up, {0.5*(nelec_total-tot_mag):.1f} down). "
+                        f"Set tot_magnetization={valid_mag} (spin_multiplicity={valid_mag+1}) or set auto_spin_parity=True."
+                    )
+                else:
+                    tot_mag = valid_mag
+            spin_chan = getattr(self.config, "delta_scf_spin_channel", None)
+            homo_b = getattr(self.config, "delta_scf_homo_band", None)
+            lumo_b = getattr(self.config, "delta_scf_lumo_band", None)
+
+            if gap_info is not None:
+                spin_chan = spin_chan or gap_info.get("spin_channel", 2)
+                homo_b = homo_b or gap_info.get("homo_band")
+                lumo_b = lumo_b or gap_info.get("lumo_band")
+                nbnd = gap_info.get("nbnd", max(homo_b or 1, lumo_b or 2) + 6)
+            else:
+                n_occ_max = (nelec_total + abs(tot_mag)) // 2
+                spin_chan = spin_chan or 2
+                homo_b = homo_b or n_occ_max
+                lumo_b = lumo_b or (n_occ_max + 1)
+                nbnd = lumo_b + 8
+
+            constrained_occupations = build_delta_scf_occupations(
+                nelec=nelec_total,
+                tot_magnetization=tot_mag,
+                nbnd=nbnd,
+                homo_band=homo_b,
+                lumo_band=lumo_b,
+                spin_channel=spin_chan,
+            )
+
+        labeled_es = []
+        for i, fr in enumerate(fc_frames):
+            frame_id = fr.info.get("frame_id", f"fc_{i:02d}")
+            calc_dir = os.path.join(calc_base, f"frame_es_{i:03d}_{frame_id}")
+            logger.info(f"    ---> [ES {i+1}/{len(fc_frames)}] Delta-SCF labeling for {frame_id}...")
+            at_labeled = self.label_single_frame(
+                fr,
+                calc_dir,
+                occupations_mode="from_input",
+                constrained_occupations=constrained_occupations,
+            )
+            at_labeled.info["electronic_state"] = "excited"
+            at_labeled.info["sample_type"] = "franck_condon"
+            if "lambda" in fr.info:
+                at_labeled.info["lambda"] = fr.info["lambda"]
+            labeled_es.append(at_labeled)
+
+        return labeled_es
+
     def label_all_frames(
         self,
         frames: List[Atoms],
@@ -1068,6 +1507,7 @@ class QERunner:
         sampler=None,
         at_gs: Optional[Atoms] = None,
         n_workers: Optional[int] = None,
+        force_resample: bool = False,
     ) -> List[Atoms]:
         """Labels candidate frames with DFT, retrying failed runs and optionally replacing failed rattle/MD frames."""
         dft_dir = os.path.join(self.config.workspace_dir, "dft_calculations")
@@ -1086,7 +1526,7 @@ class QERunner:
             frame_id = fr.info.get("frame_id") or fr.info.get("label") or f"frame_{cand_idx:02d}"
             stype = fr.info.get("sample_type", "unknown")
             type_total_counts[stype] = type_total_counts.get(stype, 0) + 1
-            cdir, is_done = find_frame_calc_dir(dft_dir, cand_idx, frame_id, fr)
+            cdir, is_done = find_frame_calc_dir(dft_dir, cand_idx, frame_id, fr, config=self.config)
             entry = {
                 "index": cand_idx,
                 "frame_id": frame_id,
@@ -1094,7 +1534,7 @@ class QERunner:
                 "atoms": fr,
                 "calc_dir": cdir,
             }
-            if is_done:
+            if is_done and not force_resample:
                 completed_entries.append(entry)
             else:
                 pending_entries.append(entry)
@@ -1132,15 +1572,29 @@ class QERunner:
         do_retry = self.config.retry_failed_dft
         do_replace = replace_failed_frames if replace_failed_frames is not None else self.config.replace_failed_frames
 
+        def _is_anchor_frame(entry) -> bool:
+            if entry.get("sample_type") != "franck_condon":
+                return False
+            fr = entry.get("atoms")
+            if fr is None:
+                return False
+            lam = fr.info.get("lambda")
+            if lam is not None:
+                return abs(float(lam)) < 1e-4 or abs(float(lam) - 1.0) < 1e-4
+            fid = entry.get("frame_id", "")
+            return fid in ("fc_00", "fc_01")
+
+        def _frame_sort_key(entry):
+            # Prioritize anchor frames (priority 0) over non-anchor frames (priority 1)
+            anchor_prio = 0 if _is_anchor_frame(entry) else 1
+            return (anchor_prio, type_completed.get(entry["sample_type"], 0), entry["index"])
+
         to_calculate = []
         if not pending_entries:
             to_calculate = []
         elif resume_mode == "max_new" or (dft_target is None and new_limit is not None):
             budget = new_limit if new_limit is not None else len(pending_entries)
-            sorted_pending = sorted(
-                pending_entries,
-                key=lambda e: (type_completed.get(e["sample_type"], 0), e["index"])
-            )
+            sorted_pending = sorted(pending_entries, key=_frame_sort_key)
             to_calculate = sorted_pending[:budget]
         elif dft_target is not None:
             n_done = len(completed_entries)
@@ -1152,15 +1606,19 @@ class QERunner:
                 needed = dft_target - n_done
                 if new_limit is not None:
                     needed = min(needed, new_limit)
-                sorted_pending = sorted(
-                    pending_entries,
-                    key=lambda e: (type_completed.get(e["sample_type"], 0), e["index"])
-                )
+                sorted_pending = sorted(pending_entries, key=_frame_sort_key)
                 to_calculate = sorted_pending[:needed]
                 calc_str = ", ".join(f"{e['frame_id']} ({e['sample_type']})" for e in to_calculate)
                 logger.info(f"    [i] Need {needed} additional frames to reach target {dft_target}. Selected: {calc_str}")
         else:
-            to_calculate = list(pending_entries)
+            to_calculate = sorted(pending_entries, key=_frame_sort_key)
+
+        total_budget = len(completed_entries) + len(to_calculate)
+        if total_budget < 20:
+            logger.warning(
+                f"[!] Warning: Total DFT frame budget ({total_budget}) is fewer than 20 frames. "
+                "A minimum of 20-40 frames is strongly recommended for reliable Delta-NEP training."
+            )
 
         selected_indices = {e["index"] for e in to_calculate}
         unused_by_type = {}

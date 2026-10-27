@@ -24,23 +24,25 @@
 
 Universal machine learning potentials (`nep89`) capture bulk lattice elasticity across the periodic table, while point defects require localized corrections for deep electronic states, Jahn-Teller distortions, and optical Franck-Condon relaxation.
 
-**HyDePh** (**Hy**brid **De**fect **Ph**otoluminescence) trains a localized $\Delta$-Neuroevolution Potential ($\Delta$-NEP) on top of a universal foundation model:
+**HyDePh** (**Hy**brid **De**fect **Ph**otoluminescence) trains paired localized $\Delta$-Neuroevolution Potentials ($\Delta V_{\mathrm{GS}}$ and $\Delta V_{\mathrm{ES}}$) on top of a universal foundation model:
 
 $$
 \begin{aligned}
-V_{\mathrm{hybrid}}(\mathbf{R}) &= V_{\mathrm{foundation}}(\mathbf{R}) + \Delta V_{\mathrm{NEP}}(\mathbf{R}) \\
+V_{\mathrm{hybrid,GS}}(\mathbf{R}) &= V_{\mathrm{foundation}}(\mathbf{R}) + \Delta V_{\mathrm{NEP,GS}}(\mathbf{R}) \\
+V_{\mathrm{hybrid,ES}}(\mathbf{R}) &= V_{\mathrm{foundation}}(\mathbf{R}) + \Delta V_{\mathrm{NEP,ES}}(\mathbf{R}) \\
 \mathbf{F}_{\mathrm{hybrid}}(\mathbf{R}) &= \mathbf{F}_{\mathrm{foundation}}(\mathbf{R}) + \Delta \mathbf{F}_{\mathrm{NEP}}(\mathbf{R})
 \end{aligned}
 $$
 
 Key capabilities:
-1. **Defect Embedding**: Vectorized tiling of pristine bulk unit cells around a defect unit cell and defect coordinate detection.
+1. **Defect Embedding**: Vectorized tiling of pristine bulk unit cells around a defect unit cell and automated defect coordinate detection.
 2. **4-Phase Active Sampling**: Generates candidate configurations across the Franck-Condon coordinate, defect-core rattling, and high-temperature foundation MD with incremental Farthest Point Sampling (FPS).
 3. **DFT Labeling & Resumption**: Runs Quantum ESPRESSO (`pw.x` / `pw.exe`) with Gamma-point real wavefunctions (`K_POINTS gamma`), universal ASE atomic masses, disk caching, and type-balanced resumption.
-4. **GPU $\Delta$-NEP Training**: Fits the residual potential in GPUMD with customizable architecture cutoffs and basis sizes.
-5. **Multi-Regime Lineshapes**: Computes Huang-Rhys factors $S$, spectral densities $S(\hbar\omega)$, and multi-temperature emission spectra $A(E - E_{\mathrm{ZPL}}, T)$ via mass-weighted optical projection ($\mathbf{u}_{\mathrm{opt}}$), using quantum generating functions for weak/intermediate coupling ($S < 10$) and semiclassical Marcus convolution for strong coupling ($S \ge 10$).
-6. **1D Configuration Coordinate & Stokes Shift**: Evaluates potential surfaces along $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda (\mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}})$ to extract $\Delta Q$, relaxation energies $\Delta E_{\mathrm{rel}}$, vertical transitions $E_{\mathrm{abs}}$ and $E_{\mathrm{em}}$, effective phonon energy $\hbar\Omega$, Stokes shift $\Delta E_{\mathrm{Stokes}}$, and auto-derived ZPL.
-7. **Numerical Data Export**: Automatically exports publication-ready CSV and JSON data alongside figures.
+4. **Paired GPU $\Delta$-NEP Training**: Fits independent ground-state and optical excited-state residuals in GPUMD with mean baseline offset subtraction ($\bar{\Delta E}$), automated quality control gates, and optional committee ensembles.
+5. **Optical Lineshapes & Paired Cumulant Dynamics**: Computes normal-mode Huang-Rhys factors $S_k$, continuous spectral density $S(\hbar\omega)$, $(\hbar\omega)^3$-scaled photoluminescence $I_{\text{PL}}(\hbar\omega)$, finite-$T$ Debye-Waller factor $\text{DWF}(T)$, and multi-temperature anharmonic lineshapes using NVE molecular dynamics with the physical energy-gap cumulant generating function and harmonic quantum correction.
+6. **Large-Supercell Phonon Embedding**: Seamlessly embeds localized defect vibrations and forces into large bulk phonon supercells ($L \ge 10\text{--}12\ \text{Å}$) to eliminate discrete comb artifacts.
+7. **1D Configuration Coordinate & Stokes Shift**: Evaluates paired potential surfaces along $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda (\mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}})$ to extract $\Delta Q$, relaxation energies $\Delta E_{\mathrm{rel}}$, vertical transitions $E_{\mathrm{abs}}$ and $E_{\mathrm{em}}$, effective phonon energy $\hbar\Omega$, Stokes shift $\Delta E_{\mathrm{Stokes}}$, and auto-derived ZPL.
+8. **Provenance & Numerical Data Export**: Automatically exports publication-ready CSV, JSON, `normal_modes.csv`, and `provenance.json` recording software versions, input SHA256 hashes, and execution metrics.
 
 See the **[Theoretical Walkthrough](docs/THEORY_WALKTHROUGH.md)** for the mathematical formulation and literature references, **[CHANGELOG.md](CHANGELOG.md)** for release notes, and **[CONTRIBUTING.md](CONTRIBUTING.md)** for developer setup.
 
