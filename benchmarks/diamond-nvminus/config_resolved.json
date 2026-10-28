@@ -1,9 +1,9 @@
 {
-  "timestamp": "2026-10-27T21:22:20Z",
+  "timestamp": "2026-10-28T22:06:59Z",
   "software_versions": {
     "hydeph": "0.6.3",
     "python": "3.14.8",
-    "pw_exe": null,
+    "pw_exe": "/home/jamesc/.local/bin/pw.x",
     "nep_exe": null
   },
   "input_hashes": {
@@ -12,35 +12,38 @@
       "sha256": "22ac73b2de06472b8331eec9decb2d762041b5e7dacf6f32422dc32744c469e6"
     },
     "defect_cell_path": {
-      "path": "defect.xyz",
-      "sha256": "a4e17644ff0eb5e5fc87d608269d303920729e6f0b02edbda4872fe0e9cd5200"
+      "path": "/home/jamesc/HyDePhTest/diamond-nvminus/hydeph_run_old/relaxed_gs.xyz",
+      "sha256": "fda17b680c62a710430705b440c6b2efb64a8255422314b1896f68b4d6804849"
     },
     "foundation_potential_path": {
-      "path": "/home/jamesc/HyDePhtest/nep89_20250409.txt",
+      "path": "/home/jamesc/HyDePhTest/nep89_20250409.txt",
       "sha256": "75168ece02e840e4a32644f982b78d43cba697f5b64b4c8134ab66c7a8c28be1"
     },
     "pseudopotentials": {
       "C": {
-        "path": "/home/jamesc/HyDePhtest/pseudo/C_ONCV_PBE-1.2.upf",
+        "path": "/home/jamesc/HyDePhTest/pseudo/C_ONCV_PBE-1.2.upf",
         "sha256": "1c674ec4fe19ee85db53e6b9ecf7cd40e70eda362cedd83f7c51c9c4081ea064"
       },
       "N": {
-        "path": "/home/jamesc/HyDePhtest/pseudo/N_ONCV_PBE-1.2.upf",
+        "path": "/home/jamesc/HyDePhTest/pseudo/N_ONCV_PBE-1.2.upf",
         "sha256": "460358be74e03cb3aa7c42e7d5d2cff06dd238cb24172009876de93b008cab9b"
       }
     }
   },
   "config": {
     "pristine_cell_path": "pristine.xyz",
-    "defect_cell_path": "defect.xyz",
+    "defect_cell_path": "/home/jamesc/HyDePhTest/diamond-nvminus/hydeph_run_old/relaxed_gs.xyz",
     "excited_cell_path": null,
+    "excited_state_seed_path": "/home/jamesc/HyDePhTest/diamond-nvminus/hydeph_run_old/relaxed_es.xyz",
     "excited_state_method": "delta_scf",
     "delta_scf_homo_band": null,
     "delta_scf_lumo_band": null,
+    "delta_scf_lumo_degeneracy": null,
     "delta_scf_spin_channel": null,
     "paired_delta_nep": true,
-    "excited_state_tot_magnetization": 2,
-    "excited_state_spin_multiplicity": 3,
+    "dft_es_candidates": "all",
+    "excited_state_tot_magnetization": null,
+    "excited_state_spin_multiplicity": null,
     "ground_state_relax_method": "auto",
     "relax_forc_conv_thr": 0.001,
     "relax_nstep": 100,
@@ -55,27 +58,28 @@
       3
     ],
     "allow_fallbacks": false,
-    "foundation_potential_path": "/home/jamesc/HyDePhtest/nep89_20250409.txt",
+    "foundation_potential_path": "/home/jamesc/HyDePhTest/nep89_20250409.txt",
     "pseudopotentials": {
-      "C": "/home/jamesc/HyDePhtest/pseudo/C_ONCV_PBE-1.2.upf",
-      "N": "/home/jamesc/HyDePhtest/pseudo/N_ONCV_PBE-1.2.upf"
+      "C": "/home/jamesc/HyDePhTest/pseudo/C_ONCV_PBE-1.2.upf",
+      "N": "/home/jamesc/HyDePhTest/pseudo/N_ONCV_PBE-1.2.upf"
     },
-    "pseudo_dir": "/home/jamesc/HyDePhtest/pseudo",
+    "pseudo_dir": "/home/jamesc/HyDePhTest/pseudo",
     "temperatures": [
       10.0,
       77.0,
       150.0,
       300.0
     ],
-    "pw_exe": null,
-    "n_procs_qe": 2,
+    "pw_exe": "/home/jamesc/.local/bin/pw.x",
+    "n_procs_qe": 1,
     "n_workers_qe": 1,
     "omp_num_threads": null,
     "mpi_command": null,
     "mpi_args": null,
     "nep_exe": null,
-    "qe_timeout_s": null,
-    "conv_thr": null,
+    "qe_timeout_s": 3600.0,
+    "conv_thr": 1e-06,
+    "mixing_mode": null,
     "mixing_beta": 0.4,
     "mixing_ndim": 8,
     "diagonalization": "david",
@@ -90,8 +94,8 @@
     "spin_polarized": true,
     "spin_multiplicity": 3,
     "tot_magnetization": 2,
-    "ecutwfc": 40.0,
-    "ecutrho": 320.0,
+    "ecutwfc": 65.0,
+    "ecutrho": 260.0,
     "kpoints": [
       1,
       1,
@@ -124,15 +128,15 @@
     "nep_basis_size": 8,
     "nep_l_max": 2,
     "nep_committee_size": 1,
-    "max_test_force_rmse_eV_A": 0.08,
+    "max_test_force_rmse_eV_A": 0.25,
     "max_gs_residual_force_eV_A": 0.05,
     "subtract_mean_energy_offset": true,
     "enable_anharmonic": true,
-    "anharmonic_md_steps": 2000,
+    "anharmonic_md_steps": 1500,
     "anharmonic_dt_fs": 1.0,
     "anharmonic_coupling_regime": "cumulant",
     "anharmonic_thermalization_steps": 400,
-    "workspace_dir": "./hydeph_run",
+    "workspace_dir": "hydeph_run_65ry",
     "lineshape_figure_name": "lineshapes.png",
     "anharmonic_figure_name": "anharmonic_lineshapes.png",
     "temperature_plot_mode": "both",

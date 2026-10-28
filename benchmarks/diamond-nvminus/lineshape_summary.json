@@ -1,6 +1,17 @@
 {
-  "total_S": 3.514646135465869,
-  "dwf_zero_temp": 0.029758331509262586,
+  "total_S": 2.305207291125262,
+  "total_S_discrete": 2.305207291125262,
+  "total_S_integrated": 2.305207291125262,
+  "dwf_zero_temp": 0.09973812368272669,
+  "dwf_temperatures": {
+    "10.0": 0.09973812368272669,
+    "77.0": 0.0996086001910449,
+    "150.0": 0.09544152777504379,
+    "300.0": 0.06594791479244756
+  },
+  "n_normal_modes": 642,
+  "n_imaginary_modes": 0,
+  "zpl_energy_eV": null,
   "temperatures": [
     10.0,
     77.0,
@@ -9,32 +20,52 @@
   ],
   "anharmonic": {
     "10.0": {
-      "regime": "quantum",
-      "fwhm_meV": 2.855227919797244,
-      "sigma_du": 21.187440718651963,
-      "alpha_soft": 0.8864127915053372,
-      "omega_T": 87.47562879403937
+      "regime": "cumulant",
+      "md_strategy": "NVT_thermalization_to_NVE_production",
+      "n_nvt_steps": 400,
+      "n_nve_steps": 1500,
+      "target_T_K": 10.0,
+      "equilibrated_T_K": 9.873767713271498,
+      "fwhm_meV": 2.3473002796367837,
+      "sigma_du": 16.24250073657171,
+      "alpha_soft": 1.0,
+      "omega_T": 75.45915617462106
     },
     "77.0": {
-      "regime": "quantum",
-      "fwhm_meV": 465.4021509269455,
-      "sigma_du": 74.47706259688975,
-      "alpha_soft": 0.920450693617593,
-      "omega_T": 90.8346584906247
+      "regime": "cumulant",
+      "md_strategy": "NVT_thermalization_to_NVE_production",
+      "n_nvt_steps": 400,
+      "n_nve_steps": 1500,
+      "target_T_K": 77.0,
+      "equilibrated_T_K": 72.4028361619286,
+      "fwhm_meV": 2.3473002796367837,
+      "sigma_du": 58.2641777344742,
+      "alpha_soft": 1.0,
+      "omega_T": 75.45915617462106
     },
     "150.0": {
-      "regime": "quantum",
-      "fwhm_meV": 496.80965804471487,
-      "sigma_du": 91.54379091898976,
-      "alpha_soft": 0.9117317778033351,
-      "omega_T": 89.97423245597862
+      "regime": "cumulant",
+      "md_strategy": "NVT_thermalization_to_NVE_production",
+      "n_nvt_steps": 400,
+      "n_nve_steps": 1500,
+      "target_T_K": 150.0,
+      "equilibrated_T_K": 147.6321516524089,
+      "fwhm_meV": 2.3473002796367837,
+      "sigma_du": 63.946633694035484,
+      "alpha_soft": 1.0,
+      "omega_T": 75.45915617462106
     },
     "300.0": {
-      "regime": "quantum",
-      "fwhm_meV": 459.69169508735115,
-      "sigma_du": 125.53905588839632,
-      "alpha_soft": 0.9349078788214209,
-      "omega_T": 92.26136552646187
+      "regime": "cumulant",
+      "md_strategy": "NVT_thermalization_to_NVE_production",
+      "n_nvt_steps": 400,
+      "n_nve_steps": 1500,
+      "target_T_K": 300.0,
+      "equilibrated_T_K": 282.88880505281594,
+      "fwhm_meV": 60.44298220064593,
+      "sigma_du": 105.17320900244803,
+      "alpha_soft": 1.0,
+      "omega_T": 75.45915617462106
     }
   }
 }

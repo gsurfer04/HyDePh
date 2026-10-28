@@ -1,38 +1,64 @@
 {
-  "system": "diamond-nvminus",
-  "timestamp_utc": "2026-10-27T21:30:09.360596+00:00",
+  "timestamp_utc": "2026-10-28T22:18:48.667371+00:00",
   "hydeph_version": "0.6.3",
-  "python_version": "3.14.6",
+  "python_version": "3.14.8 | packaged by Anaconda, Inc. | (main, Oct  1 2026, 20:26:14) [GCC 14.3.0]",
   "ase_version": "3.29.0",
   "allow_fallbacks": false,
-  "excited_state_method": "spin_proxy",
-  "paired_delta_nep": true,
-  "num_atoms": 215,
-  "chemical_formula": "C214N",
-  "total_huang_rhys_S": 3.514646135465869,
-  "dwf_zero_temp": 0.029758331509262586,
-  "zpl_energy_eV": null,
-  "stokes_shift_eV": 0.6918947464437224,
-  "data_files": {
-    "optical_lineshapes.csv": {
-      "bytes": 196362,
-      "sha256": "596888a825cd2ea2344ffb9fac466ed498042e69da9328a0fc156a9a6780ce44"
+  "total_walltime_s": 709.4736297130585,
+  "origins": {
+    "gs_source": "dft",
+    "es_source": "delta_scf",
+    "zpl_source": "delta_scf_adiabatic",
+    "zpl_energy_eV": 2.125214010491618
+  },
+  "input_files": {
+    "pristine_cell_path": {
+      "path": "pristine.xyz",
+      "sha256": "22ac73b2de06472b8331eec9decb2d762041b5e7dacf6f32422dc32744c469e6"
     },
-    "spectral_density.csv": {
-      "bytes": 95273,
-      "sha256": "fb8a31d4f2665ff338458ca1d129158a2adc7f24c1d2d7ba56555c9970f8762c"
-    },
-    "configuration_coordinate_curve.csv": {
-      "bytes": 3059,
-      "sha256": "5c6f76c8e4918c9f5a0bd1e31d645937960e5a26cde19bc8dfbf621be45d9e18"
-    },
-    "relaxed_gs.xyz": {
-      "bytes": 11894,
+    "defect_cell_path": {
+      "path": "/home/jamesc/HyDePhTest/diamond-nvminus/hydeph_run_old/relaxed_gs.xyz",
       "sha256": "fda17b680c62a710430705b440c6b2efb64a8255422314b1896f68b4d6804849"
     },
-    "relaxed_es.xyz": {
-      "bytes": 11893,
-      "sha256": "89d6eb127adc848291460fba1ad5fa60a2fb2d342de286ffdb2ed543c4f22f33"
+    "foundation_potential_path": {
+      "path": "/home/jamesc/HyDePhTest/nep89_20250409.txt",
+      "sha256": "75168ece02e840e4a32644f982b78d43cba697f5b64b4c8134ab66c7a8c28be1"
+    }
+  },
+  "pseudopotentials": {
+    "C": {
+      "path": "/home/jamesc/HyDePhTest/pseudo/C_ONCV_PBE-1.2.upf",
+      "sha256": "1c674ec4fe19ee85db53e6b9ecf7cd40e70eda362cedd83f7c51c9c4081ea064"
+    },
+    "N": {
+      "path": "/home/jamesc/HyDePhTest/pseudo/N_ONCV_PBE-1.2.upf",
+      "sha256": "460358be74e03cb3aa7c42e7d5d2cff06dd238cb24172009876de93b008cab9b"
+    }
+  },
+  "dft_parameters": {
+    "ecutwfc": 65.0,
+    "ecutrho": 260.0,
+    "conv_thr": 1e-06,
+    "spin_multiplicity": 3,
+    "tot_charge": -1.0,
+    "kpoints": [
+      1,
+      1,
+      1
+    ]
+  },
+  "models": {
+    "foundation_potential": {
+      "path": "/home/jamesc/HyDePhTest/nep89_20250409.txt",
+      "sha256": "75168ece02e840e4a32644f982b78d43cba697f5b64b4c8134ab66c7a8c28be1"
+    },
+    "delta_pot_gs": {
+      "path": "hydeph_run_65ry/nep_delta_gs.txt",
+      "sha256": "e49e57694e3f3b0a6542f0c4c348ffa5fa79e10cdd582f23c1af93ff6313ff5c"
+    },
+    "delta_pot_es": {
+      "path": "hydeph_run_65ry/nep_delta_es.txt",
+      "sha256": "e027f63780f61bbff8fcf0611f0cf81a82d547103d82d50548416f033c8587a4"
     }
   }
 }
