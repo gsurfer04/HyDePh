@@ -426,10 +426,19 @@ def write_qe_input(
     mixing_ndim = config.mixing_ndim
     base_mixing_beta = config.mixing_beta
     mixing_beta = 0.2 if retry else base_mixing_beta
+    if occupations_mode == "from_input":
+        mixing_beta = min(mixing_beta, 0.20 if len(atoms) < 100 else 0.15)
+    elif len(atoms) > 100 and mixing_beta > 0.25:
+        mixing_beta = 0.20
     david_ndim = getattr(config, "diago_david_ndim", 2)
     david_line = f"\n  diago_david_ndim = {int(david_ndim)}," if (diagonalization.startswith("david") and david_ndim) else ""
     nbnd_line = f"\n  nbnd = {eff_nbnd}," if eff_nbnd is not None else ""
-    retry_lines = "\n  mixing_mode = 'local-TF',\n  electron_maxstep = 150," if retry else ""
+    if retry:
+        retry_lines = "\n  mixing_mode = 'local-TF',\n  electron_maxstep = 150,"
+    elif occupations_mode == "from_input":
+        retry_lines = "\n  mixing_mode = 'local-TF',"
+    else:
+        retry_lines = ""
     forc_conv_line = f"\n  forc_conv_thr = {float(getattr(config, 'relax_forc_conv_thr', 1.0e-3))}," if calculation == "relax" else ""
     nstep_line = f"\n  nstep = {int(getattr(config, 'relax_nstep', 100))}," if calculation == "relax" else ""
 
