@@ -1781,7 +1781,7 @@ class QERunner:
                 cdir = entry["calc_dir"]
                 label = entry["frame_id"]
                 stype = entry["sample_type"]
-                logger.info(f"    ---> [Retry {retry_num}/{len(retry_queue)}] {label} ({stype}) with mixing_mode='local-TF'...")
+                logger.info(f"    ---> [Retry {retry_num}/{len(retry_queue)}] {label} ({stype}) with conservative mixing (beta=0.2, electron_maxstep=150)...")
                 try:
                     at_labeled = self.label_single_frame(
                         fr,

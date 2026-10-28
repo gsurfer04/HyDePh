@@ -212,7 +212,7 @@ def test_qe_runner_parallel_workers_and_timeout(tmp_path):
         "cwd = os.path.basename(os.getcwd())\n"
         "with open('pw.in') as f:\n"
         "    pw_in = f.read()\n"
-        "is_retry = 'local-TF' in pw_in\n"
+        "is_retry = 'electron_maxstep = 150' in pw_in or 'local-TF' in pw_in\n"
         "if 'rattle_00' in cwd and not is_retry:\n"
         "    time.sleep(2.0)\n"
         "print('!    total energy              =     -48.00000000 Ry')\n"
