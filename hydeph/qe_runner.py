@@ -1611,6 +1611,12 @@ class QERunner:
                 os.path.join(dft_es_dir, f"frame_{cand_idx:03d}_{frame_id}"),
                 os.path.join(calc_base, f"frame_es_{frame_id}"),
             ]
+            if frame_id.startswith("fc_"):
+                try:
+                    fc_idx = int(frame_id.split("_")[1])
+                    candidate_dirs.append(os.path.join(calc_base, f"frame_es_{fc_idx:03d}_{frame_id}"))
+                except ValueError:
+                    pass
             chosen_dir = canonical_dir
             is_done = False
             for cdir in candidate_dirs:
