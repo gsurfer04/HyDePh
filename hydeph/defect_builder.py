@@ -595,8 +595,20 @@ class DefectBuilder:
                     spin_channel=spin_chan,
                 )
 
+                init_es = at_gs
+                es_seed = getattr(self.config, "excited_state_seed_path", None)
+                if es_seed and os.path.isfile(es_seed):
+                    try:
+                        seed_at = ase.io.read(es_seed)
+                        if len(seed_at) == len(at_gs) and seed_at.get_chemical_symbols() == at_gs.get_chemical_symbols():
+                            init_es = at_gs.copy()
+                            init_es.positions = at_gs.positions + mic_displacement(seed_at.positions, at_gs.positions, at_gs.cell)
+                            logger.info(f"    [i] Seeding excited-state Delta-SCF relaxation from {es_seed}")
+                    except Exception as e:
+                        logger.warning(f"    [!] Could not load excited_state_seed_path '{es_seed}': {e}")
+
                 at_es = qe_runner.run_relaxation(
-                    at_gs,
+                    init_es,
                     calc_dir=es_calc_dir,
                     tot_magnetization=tot_mag,
                     nspin=2,
@@ -652,8 +664,20 @@ class DefectBuilder:
                     f"(proxy spin multiplicity = {target_mag + 1})"
                 )
 
+                init_es = at_gs
+                es_seed = getattr(self.config, "excited_state_seed_path", None)
+                if es_seed and os.path.isfile(es_seed):
+                    try:
+                        seed_at = ase.io.read(es_seed)
+                        if len(seed_at) == len(at_gs) and seed_at.get_chemical_symbols() == at_gs.get_chemical_symbols():
+                            init_es = at_gs.copy()
+                            init_es.positions = at_gs.positions + mic_displacement(seed_at.positions, at_gs.positions, at_gs.cell)
+                            logger.info(f"    [i] Seeding excited-state spin-proxy relaxation from {es_seed}")
+                    except Exception as e:
+                        logger.warning(f"    [!] Could not load excited_state_seed_path '{es_seed}': {e}")
+
                 at_es = qe_runner.run_relaxation(
-                    at_gs,
+                    init_es,
                     calc_dir=es_calc_dir,
                     tot_magnetization=target_mag,
                     nspin=2,

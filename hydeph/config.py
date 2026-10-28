@@ -289,6 +289,7 @@ class ToolkitConfig:
     pristine_cell_path: str
     defect_cell_path: Optional[str] = None
     excited_cell_path: Optional[str] = None
+    excited_state_seed_path: Optional[str] = None
     excited_state_method: str = "delta_scf"  # "delta_scf", "spin_proxy", "synthetic", or "file"
     delta_scf_homo_band: Optional[int] = None
     delta_scf_lumo_band: Optional[int] = None

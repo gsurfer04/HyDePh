@@ -342,3 +342,52 @@ def test_label_excited_state_frames_caching(tmp_path, monkeypatch):
     assert len(labeled_cached) == 2
     assert call_count[0] == 2
 
+
+def test_defect_builder_excited_state_seed_path(tmp_path):
+    """Verify that excited_state_seed_path passes seeded positions to relaxation instead of at_gs."""
+    from ase import Atoms
+    import ase.io
+
+    pristine_path = str(tmp_path / "pristine.xyz")
+    seed_path = str(tmp_path / "seed_es.xyz")
+    ws_dir = str(tmp_path / "ws")
+    os.makedirs(ws_dir, exist_ok=True)
+
+    pristine = Atoms("C2", positions=[[0, 0, 0], [1, 1, 1]], cell=[3, 3, 3], pbc=True)
+    ase.io.write(pristine_path, pristine, format="extxyz")
+
+    # Seed positions displaced by 0.1 A
+    seed_at = Atoms("C2", positions=[[0.1, 0, 0], [1.1, 1, 1]], cell=[3, 3, 3], pbc=True)
+    ase.io.write(seed_path, seed_at, format="extxyz")
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_path,
+        excited_state_method="delta_scf",
+        excited_state_seed_path=seed_path,
+        spin_multiplicity=3,
+        workspace_dir=ws_dir,
+    )
+
+    passed_initial_atoms = []
+    mock_qe = MagicMock()
+    def mock_run_relaxation(atoms, *args, **kwargs):
+        passed_initial_atoms.append(atoms.copy())
+        res = atoms.copy()
+        res.info["energy"] = -10.0
+        return res
+
+    mock_qe.run_relaxation = mock_run_relaxation
+
+    builder = DefectBuilder(cfg, calc_qe=mock_qe)
+    at_gs = Atoms("C2", positions=[[0, 0, 0], [1, 1, 1]], cell=[3, 3, 3], pbc=True)
+    at_gs.info["defect_center"] = [0.0, 0.0, 0.0]
+
+    # Run excited state generation
+    at_es, dq = builder.generate_excited_state_geometry(at_gs, force_relax=True)
+
+    assert len(passed_initial_atoms) == 1
+    # Initial atoms passed to run_relaxation should match seed positions, NOT at_gs
+    np.testing.assert_allclose(passed_initial_atoms[0].positions, seed_at.positions, atol=1e-5)
+    assert dq > 0.0
+
+
