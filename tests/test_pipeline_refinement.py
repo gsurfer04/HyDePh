@@ -85,6 +85,7 @@ def test_pipeline_hybrid_refinement_executes_cleanly(tmp_path):
         qe_instance = mock_qe_cls.return_value
         qe_instance.label_all_frames.return_value = [labeled_frame]
         qe_instance.label_fc_excited_state.return_value = [labeled_frame]
+        qe_instance.label_excited_state_frames.return_value = [labeled_frame]
         qe_instance.last_failed_entries = []
 
         trainer_instance = mock_trainer_cls.return_value

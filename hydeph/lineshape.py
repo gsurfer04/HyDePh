@@ -675,6 +675,11 @@ class LineshapeEngine:
             for T, data in anharmonic_dict.items():
                 summary_data["anharmonic"][str(T)] = {
                     "regime": data.get("regime"),
+                    "md_strategy": data.get("md_strategy", "NVT_thermalization_to_NVE_production"),
+                    "n_nvt_steps": int(data.get("n_nvt_steps", 0)),
+                    "n_nve_steps": int(data.get("n_nve_steps", 0)),
+                    "target_T_K": float(data.get("target_T_K", float(T))),
+                    "equilibrated_T_K": float(data.get("equilibrated_T_K", float(T))),
                     "fwhm_meV": float(data.get("fwhm_meV", 0.0)),
                     "sigma_du": float(data.get("sigma_du", 0.0)),
                     "alpha_soft": float(data.get("alpha_soft", 1.0)),
@@ -749,6 +754,7 @@ class LineshapeEngine:
         """Runs paired molecular dynamics across configured temperatures to evaluate anharmonic lineshapes."""
         from ase.md.langevin import Langevin
         from ase.md.verlet import VelocityVerlet
+        from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
         from ase import units
 
         logger.info("\n[-] Running Finite-Temperature Anharmonic Molecular Dynamics Sampling...")
@@ -790,11 +796,10 @@ class LineshapeEngine:
 
         calc_es_opt = getattr(self, "calc_es", None)
         at_disp = at_gs.copy()
+        at_disp.calc = self.calc
         if calc_es_opt is not None:
-            at_disp.calc = calc_es_opt
-            logger.info("    [+] Anharmonic Delta U(t) driven by physical paired excited-state model (V_ES - V_GS)")
+            logger.info("    [+] Anharmonic Delta U(t) driven by physical paired model with Franck-Condon projection V(R+Delta R) - V(R)")
         else:
-            at_disp.calc = self.calc
             logger.info("    [i] Anharmonic Delta U(t) driven by displaced ground-state potential V_GS(R+Delta R) - V_GS(R)")
 
         anharmonic_dict = {}
@@ -803,13 +808,35 @@ class LineshapeEngine:
             at = at_gs.copy()
             at.calc = self.calc
 
-            # 1. Thermalization with Langevin dynamics
+            # 1. Thermalization with Langevin dynamics (NVT)
             n_therm = getattr(self.config, "anharmonic_thermalization_steps", 400)
             if n_therm > 0:
-                dyn_therm = Langevin(at, dt_fs * units.fs, temperature_K=T, friction=0.01 / units.fs, logfile=None)
+                try:
+                    from ase.md.velocitydistribution import thermalize_momenta
+                    thermalize_momenta(at, temperature_K=T)
+                except ImportError:
+                    MaxwellBoltzmannDistribution(at, temperature_K=T)
+                Stationary(at)
+                if not np.any(at.pbc):
+                    ZeroRotation(at)
+                logger.info(
+                    f"    [MD T = {T:g} K] Phase 1/2: NVT Langevin thermalization ({n_therm} steps, target T = {T:g} K)..."
+                )
+                dyn_therm = Langevin(at, dt_fs * units.fs, temperature_K=T, friction=0.01 / units.fs, fixcm=False, logfile=None)
+                t_therm_samples = []
+                dyn_therm.attach(lambda: t_therm_samples.append(at.get_temperature()), interval=max(1, n_therm // 10))
                 dyn_therm.run(n_therm)
+                t_equil = float(np.mean(t_therm_samples[-5:])) if t_therm_samples else T
+            else:
+                t_equil = T
 
             # 2. Production dynamics: VelocityVerlet (NVE) eliminates artificial friction broadening
+            logger.info(
+                f"    [MD T = {T:g} K] Phase 2/2: NVE VelocityVerlet production ({n_steps} steps, equilibrated T = {t_equil:.1f} K)..."
+            )
+            Stationary(at)
+            if not np.any(at.pbc):
+                ZeroRotation(at)
             dyn = VelocityVerlet(at, dt_fs * units.fs, logfile=None)
 
             du_list = []
@@ -821,14 +848,9 @@ class LineshapeEngine:
                 v_opt_list.append(v_opt)
 
                 ug = at.get_potential_energy()
-                if calc_es_opt is not None:
-                    at_disp.positions = at.positions
-                    at_disp.cell = at.cell
-                    ue = at_disp.get_potential_energy()
-                else:
-                    at_disp.positions = at.positions + dr_fc
-                    at_disp.cell = at.cell
-                    ue = at_disp.get_potential_energy()
+                at_disp.positions = at.positions + dr_fc
+                at_disp.cell = at.cell
+                ue = at_disp.get_potential_energy()
                 du_list.append((ue - ug) * 1000.0)
 
             dyn.attach(step_observer, interval=2)
@@ -906,10 +928,11 @@ class LineshapeEngine:
 
                 j_quant = j_cl * q_factor
 
-                # S_anh(hw) = J_quant(hw) / (hw^2)
-                mask_hw = hw_grid > 0.5
-                s_anh = np.zeros_like(hw_grid)
-                s_anh[mask_hw] = j_quant[mask_hw] / (hw_grid[mask_hw] ** 2)
+                # Acoustic suppression filter to prevent 1/omega^2 low-frequency noise divergence:
+                # Below the lowest non-zero acoustic phonon frequency of the crystal, S(hw) must vanish physically.
+                hw_cutoff = max(3.0, 0.3 * omega_0)
+                filter_acoustic = 1.0 - np.exp(- (hw_grid / hw_cutoff) ** 4)
+                s_anh = (j_quant * filter_acoustic) / (hw_grid ** 2 + 1e-6)
 
                 int_s_anh = float(trapz_fn(s_anh, hw_grid))
                 if int_s_anh > 0 and total_S > 0:
@@ -926,7 +949,7 @@ class LineshapeEngine:
                     time_window_tau_fs=self.config.time_window_tau_fs,
                     e_min_meV=e_min, e_max_meV=e_max, n_e=n_pts
                 )
-                regime_tag = f"Energy-Gap Cumulant (NVE, sigma_DeltaU={sigma_du:.1f} meV)"
+                regime_tag = f"Energy-Gap Cumulant (NVT->NVE, T_equil={t_equil:.1f} K, sigma_DeltaU={sigma_du:.1f} meV)"
                 alpha_soft = 1.0
                 omega_T = omega_0
             elif is_quantum:
@@ -987,6 +1010,11 @@ class LineshapeEngine:
                 "regime": "cumulant" if is_cumulant else ("quantum" if is_quantum else "semiclassical"),
                 "method": "cumulant_energy_gap" if is_cumulant else "legacy_vdos",
                 "is_physical_paired": calc_es_opt is not None,
+                "md_strategy": "NVT_thermalization_to_NVE_production",
+                "n_nvt_steps": n_therm,
+                "n_nve_steps": n_steps,
+                "target_T_K": float(T),
+                "equilibrated_T_K": float(t_equil),
                 "walltime_s": time.time() - t0,
             }
             logger.info(f"    [+] Anharmonic MD T = {T:5.1f} K | {regime_tag} | Lineshape FWHM = {fwhm_meV:5.1f} meV ({time.time()-t0:.1f} s)")

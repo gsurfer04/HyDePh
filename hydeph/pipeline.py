@@ -280,20 +280,29 @@ def run_pipeline(
         if es_cand is not None and "energy" in es_cand.info:
             at_es.info["energy"] = float(es_cand.info["energy"])
 
-        # High-Fidelity Optical Excited State DFT Labeling (Delta-SCF) along FC path
+        # High-Fidelity Optical Excited State DFT Labeling (Delta-SCF)
         labeled_frames_es: List[Atoms] = []
-        fc_candidates = [f for f in candidate_frames if f.info.get("sample_type") == "franck_condon"]
         if getattr(config, "paired_delta_nep", True) and getattr(config, "excited_state_method", "delta_scf") == "delta_scf":
-            logger.info("\n[-] High-Fidelity Optical Excited State DFT Labeling (Delta-SCF)...")
-            labeled_frames_es = qe.label_fc_excited_state(fc_candidates, at_gs=at_gs)
+            es_cand_mode = getattr(config, "dft_es_candidates", "all").lower()
+            if es_cand_mode == "fc_path":
+                es_targets = [f for f in candidate_frames if f.info.get("sample_type") == "franck_condon"]
+                logger.info(f"\n[-] High-Fidelity Optical Excited State DFT Labeling (Delta-SCF, mode='fc_path', {len(es_targets)} frames)...")
+            else:
+                es_targets = list(labeled_frames)
+                logger.info(f"\n[-] High-Fidelity Optical Excited State DFT Labeling (Delta-SCF, mode='all', {len(es_targets)} paired frames)...")
+
+            if hasattr(qe, "label_excited_state_frames"):
+                labeled_frames_es = qe.label_excited_state_frames(es_targets, at_gs=at_gs, n_workers=eff_n_workers)
+            else:
+                labeled_frames_es = qe.label_fc_excited_state(es_targets, at_gs=at_gs)
             ase.io.write(labeled_es_xyz, labeled_frames_es, format="extxyz")
             logger.info(f"[+] Labeled {len(labeled_frames_es)} optical excited state frames -> {labeled_es_xyz}")
 
             # Extract exact adiabatic ZPL, absorption, emission, and Stokes shift
             gs_0 = next((f for f in labeled_frames if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4), None)
             gs_1 = next((f for f in labeled_frames if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 0.0) - 1.0) < 1e-4), None)
-            es_0 = next((f for f in labeled_frames_es if abs(f.info.get("lambda", 1.0)) < 1e-4), None)
-            es_1 = next((f for f in labeled_frames_es if abs(f.info.get("lambda", 0.0) - 1.0) < 1e-4), None)
+            es_0 = next((f for f in labeled_frames_es if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4), None)
+            es_1 = next((f for f in labeled_frames_es if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 0.0) - 1.0) < 1e-4), None)
 
             if gs_0 is not None and es_1 is not None and "energy" in gs_0.info and "energy" in es_1.info:
                 e_gs_0 = float(gs_0.info["energy"])

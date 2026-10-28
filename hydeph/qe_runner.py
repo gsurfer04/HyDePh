@@ -691,10 +691,11 @@ def parse_qe_relaxation_output(
     return at_relaxed, energy_ev
 
 
-def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, float]]:
+def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, Any]]:
     """Parses Kohn-Sham defect eigenvalue gap (eV), HOMO, LUMO, and Fermi level from `pw.x` output.
     
     Extracts the fundamental optical transition gap across spin channels without additional DFT cost.
+    Supports spin-polarized and non-spin-polarized outputs, with smearing or fixed occupations.
     """
     if not os.path.isfile(pw_out_path):
         return None
@@ -704,7 +705,166 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, float]]:
     except Exception:
         return None
 
-    # 1. Direct explicit HOMO-LUMO string if reported by QE
+    # Read number of electrons and magnetization if reported
+    nelec_m = re.findall(
+        r"number of electrons\s*=\s*([\d\.]+)\s*(?:\(up:\s*([\d\.]+),\s*down:\s*([\d\.]+)\))?",
+        text,
+        re.IGNORECASE,
+    )
+    nelec, n_up_elec, n_dw_elec = None, None, None
+    if nelec_m:
+        nelec = float(nelec_m[-1][0])
+        if nelec_m[-1][1] and nelec_m[-1][2]:
+            n_up_elec = int(round(float(nelec_m[-1][1])))
+            n_dw_elec = int(round(float(nelec_m[-1][2])))
+
+    mag_m = re.findall(r"total magnetization\s*=\s*([-\d\.]+)", text, re.IGNORECASE)
+    tot_mag = float(mag_m[-1]) if mag_m else 0.0
+
+    if nelec is not None and (n_up_elec is None or n_dw_elec is None):
+        n_up_elec = int(round((nelec + tot_mag) / 2.0))
+        n_dw_elec = int(round((nelec - tot_mag) / 2.0))
+
+    # 1. Spin-polarized bands (nspin = 2)
+    sp_up_matches = re.findall(
+        r"------ SPIN UP ------------.*?bands \(ev\):\s*(.*?)\n\s*------ SPIN DOWN",
+        text,
+        re.DOTALL,
+    )
+    sp_dw_matches = re.findall(
+        r"------ SPIN DOWN ----------.*?bands \(ev\):\s*(.*?)\n\s*(?:highest occupied|the spin|!|total energy|Forces|End of|convergence)",
+        text,
+        re.DOTALL,
+    )
+    fermi_spin = re.findall(
+        r"the spin up/dw Fermi energies are\s+([-\d\.]+)\s+([-\d\.]+)\s+ev",
+        text,
+        re.IGNORECASE,
+    )
+
+    if sp_up_matches and sp_dw_matches:
+        u_bands = [float(x) for x in sp_up_matches[-1].split()]
+        d_bands = [float(x) for x in sp_dw_matches[-1].split()]
+
+        ef_up, ef_dw = None, None
+        if fermi_spin:
+            ef_up, ef_dw = float(fermi_spin[-1][0]), float(fermi_spin[-1][1])
+
+        # Spin UP (Channel 1)
+        if ef_up is not None:
+            occ_u = [b for b in u_bands if b <= ef_up + 1e-3]
+            unocc_u = [b for b in u_bands if b > ef_up + 1e-3]
+            gap_u = (unocc_u[0] - occ_u[-1]) if (occ_u and unocc_u) else None
+            homo_b_u = len(occ_u)
+            lumo_b_u = len(occ_u) + 1
+            homo_u = occ_u[-1] if occ_u else None
+            lumo_u = unocc_u[0] if unocc_u else None
+        elif n_up_elec is not None and 0 < n_up_elec < len(u_bands):
+            homo_b_u = n_up_elec
+            lumo_b_u = n_up_elec + 1
+            homo_u = u_bands[homo_b_u - 1]
+            lumo_u = u_bands[lumo_b_u - 1]
+            gap_u = lumo_u - homo_u
+            ef_up = (homo_u + lumo_u) / 2.0
+        else:
+            gap_u, homo_b_u, lumo_b_u, homo_u, lumo_u = None, None, None, None, None
+
+        # Spin DOWN (Channel 2)
+        if ef_dw is not None:
+            occ_d = [b for b in d_bands if b <= ef_dw + 1e-3]
+            unocc_d = [b for b in d_bands if b > ef_dw + 1e-3]
+            gap_d = (unocc_d[0] - occ_d[-1]) if (occ_d and unocc_d) else None
+            homo_b_d = len(occ_d)
+            lumo_b_d = len(occ_d) + 1
+            homo_d = occ_d[-1] if occ_d else None
+            lumo_d = unocc_d[0] if unocc_d else None
+        elif n_dw_elec is not None and 0 < n_dw_elec < len(d_bands):
+            homo_b_d = n_dw_elec
+            lumo_b_d = n_dw_elec + 1
+            homo_d = d_bands[homo_b_d - 1]
+            lumo_d = d_bands[lumo_b_d - 1]
+            gap_d = lumo_d - homo_d
+            ef_dw = (homo_d + lumo_d) / 2.0
+        else:
+            gap_d, homo_b_d, lumo_b_d, homo_d, lumo_d = None, None, None, None, None
+
+        # Prioritize the minority or in-gap defect channel (smaller positive gap)
+        chosen = None
+        if gap_d is not None and gap_u is not None:
+            if 0.05 < gap_d < gap_u:
+                chosen = ("down", 2, gap_d, homo_d, lumo_d, homo_b_d, lumo_b_d, ef_dw)
+            else:
+                chosen = ("up", 1, gap_u, homo_u, lumo_u, homo_b_u, lumo_b_u, ef_up)
+        elif gap_d is not None:
+            chosen = ("down", 2, gap_d, homo_d, lumo_d, homo_b_d, lumo_b_d, ef_dw)
+        elif gap_u is not None:
+            chosen = ("up", 1, gap_u, homo_u, lumo_u, homo_b_u, lumo_b_u, ef_up)
+
+        if chosen:
+            spin_name, spin_chan, gap_v, homo_v, lumo_v, h_b, l_b, ef_v = chosen
+            return {
+                "gap_eV": gap_v,
+                "homo_eV": homo_v,
+                "lumo_eV": lumo_v,
+                "fermi_eV": ef_v,
+                "spin": spin_name,
+                "spin_channel": spin_chan,
+                "homo_band": h_b,
+                "lumo_band": l_b,
+                "nbnd": max(len(u_bands), len(d_bands)),
+                "gap_up_eV": gap_u,
+                "gap_down_eV": gap_d,
+                "nelec": nelec,
+                "n_up": n_up_elec,
+                "n_dw": n_dw_elec,
+                "tot_mag": tot_mag,
+            }
+
+    # 2. Non-spin-polarized bands (nspin = 1)
+    single_bands = re.findall(
+        r"(?:End of self-consistent calculation|End of band structure calculation).*?bands \(ev\):\s*(.*?)\n\s*(?:the Fermi|highest|!|Forces)",
+        text,
+        re.DOTALL,
+    )
+    single_fermi = re.findall(r"the Fermi energy is\s+([-\d\.]+)\s+ev", text, re.IGNORECASE)
+    if single_bands:
+        bands = [float(x) for x in single_bands[-1].split()]
+        if single_fermi:
+            ef = float(single_fermi[-1])
+            occ = [b for b in bands if b <= ef + 1e-3]
+            unocc = [b for b in bands if b > ef + 1e-3]
+            if occ and unocc and (unocc[0] - occ[-1]) > 0.05:
+                return {
+                    "gap_eV": unocc[0] - occ[-1],
+                    "homo_eV": occ[-1],
+                    "lumo_eV": unocc[0],
+                    "fermi_eV": ef,
+                    "spin": "down",
+                    "spin_channel": 2,
+                    "homo_band": len(occ),
+                    "lumo_band": len(occ) + 1,
+                    "nbnd": len(bands),
+                    "nelec": nelec,
+                }
+        elif nelec is not None:
+            n_occ = int(round(nelec / 2.0))
+            if 0 < n_occ < len(bands):
+                homo_val = bands[n_occ - 1]
+                lumo_val = bands[n_occ]
+                return {
+                    "gap_eV": lumo_val - homo_val,
+                    "homo_eV": homo_val,
+                    "lumo_eV": lumo_val,
+                    "fermi_eV": (homo_val + lumo_val) / 2.0,
+                    "spin": "down",
+                    "spin_channel": 2,
+                    "homo_band": n_occ,
+                    "lumo_band": n_occ + 1,
+                    "nbnd": len(bands),
+                    "nelec": nelec,
+                }
+
+    # 3. Direct explicit HOMO-LUMO string fallback if reported by QE
     homo_lumo = re.findall(
         r"highest occupied,\s+lowest unoccupied level\s*\(ev\):\s*([-\d\.]+)\s+([-\d\.]+)",
         text,
@@ -713,96 +873,19 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, float]]:
     if homo_lumo:
         homo_val, lumo_val = float(homo_lumo[-1][0]), float(homo_lumo[-1][1])
         if lumo_val > homo_val:
-            return {"gap_eV": lumo_val - homo_val, "homo_eV": homo_val, "lumo_eV": lumo_val, "fermi_eV": (homo_val + lumo_val) / 2.0}
-
-    # 2. Spin-polarized bands (nspin = 2)
-    spin_up = re.search(r"------ SPIN UP ------------.*?bands \(ev\):\s*(.*?)\n\s*------ SPIN DOWN", text, re.DOTALL)
-    spin_dw = re.search(r"------ SPIN DOWN ----------.*?bands \(ev\):\s*(.*?)\n\s*the spin", text, re.DOTALL)
-    fermi_spin = re.findall(r"the spin up/dw Fermi energies are\s+([-\d\.]+)\s+([-\d\.]+)\s+ev", text, re.IGNORECASE)
-
-    if fermi_spin and spin_up and spin_dw:
-        ef_up, ef_dw = float(fermi_spin[-1][0]), float(fermi_spin[-1][1])
-        u_bands = [float(x) for x in spin_up.group(1).split()]
-        d_bands = [float(x) for x in spin_dw.group(1).split()]
-
-        # Compute gap for up and down
-        occ_u = [b for b in u_bands if b <= ef_up + 1e-3]
-        unocc_u = [b for b in u_bands if b > ef_up + 1e-3]
-        gap_u = (unocc_u[0] - occ_u[-1]) if (occ_u and unocc_u) else None
-
-        occ_d = [b for b in d_bands if b <= ef_dw + 1e-3]
-        unocc_d = [b for b in d_bands if b > ef_dw + 1e-3]
-        gap_d = (unocc_d[0] - occ_d[-1]) if (occ_d and unocc_d) else None
-
-        # Prioritize the minority or in-gap defect channel
-        if gap_d is not None and gap_u is not None:
-            if gap_d < gap_u and gap_d > 0.05:
-                chosen_spin = "down"
-                chosen_channel = 2
-                chosen_gap = gap_d
-                chosen_homo = occ_d[-1]
-                chosen_lumo = unocc_d[0]
-                homo_band = len(occ_d)
-                lumo_band = len(occ_d) + 1
-                chosen_ef = ef_dw
-            else:
-                chosen_spin = "up"
-                chosen_channel = 1
-                chosen_gap = gap_u
-                chosen_homo = occ_u[-1]
-                chosen_lumo = unocc_u[0]
-                homo_band = len(occ_u)
-                lumo_band = len(occ_u) + 1
-                chosen_ef = ef_up
-        elif gap_d is not None:
-            chosen_spin = "down"
-            chosen_channel = 2
-            chosen_gap = gap_d
-            chosen_homo = occ_d[-1]
-            chosen_lumo = unocc_d[0]
-            homo_band = len(occ_d)
-            lumo_band = len(occ_d) + 1
-            chosen_ef = ef_dw
-        elif gap_u is not None:
-            chosen_spin = "up"
-            chosen_channel = 1
-            chosen_gap = gap_u
-            chosen_homo = occ_u[-1]
-            chosen_lumo = unocc_u[0]
-            homo_band = len(occ_u)
-            lumo_band = len(occ_u) + 1
-            chosen_ef = ef_up
-        else:
-            return None
-
-        return {
-            "gap_eV": chosen_gap,
-            "homo_eV": chosen_homo,
-            "lumo_eV": chosen_lumo,
-            "fermi_eV": chosen_ef,
-            "spin": chosen_spin,
-            "spin_channel": chosen_channel,
-            "homo_band": homo_band,
-            "lumo_band": lumo_band,
-            "nbnd": max(len(u_bands), len(d_bands)),
-            "gap_up_eV": gap_u,
-            "gap_down_eV": gap_d,
-        }
-
-    # 3. Non-spin-polarized bands (nspin = 1)
-    single_bands = re.search(
-        r"(?:End of self-consistent calculation|End of band structure calculation).*?bands \(ev\):\s*(.*?)\n\s*(?:the Fermi|highest)",
-        text,
-        re.DOTALL,
-    )
-    single_fermi = re.findall(r"the Fermi energy is\s+([-\d\.]+)\s+ev", text, re.IGNORECASE)
-    if single_bands and single_fermi:
-        ef = float(single_fermi[-1])
-        bands = [float(x) for x in single_bands.group(1).split()]
-        occ = [b for b in bands if b <= ef + 1e-3]
-        unocc = [b for b in bands if b > ef + 1e-3]
-        if occ and unocc and (unocc[0] - occ[-1]) > 0.05:
-            return {"gap_eV": unocc[0] - occ[-1], "homo_eV": occ[-1], "lumo_eV": unocc[0], "fermi_eV": ef}
+            n_occ = int(round(nelec / 2.0)) if nelec else 1
+            return {
+                "gap_eV": lumo_val - homo_val,
+                "homo_eV": homo_val,
+                "lumo_eV": lumo_val,
+                "fermi_eV": (homo_val + lumo_val) / 2.0,
+                "spin": "down",
+                "spin_channel": 2,
+                "homo_band": n_occ,
+                "lumo_band": n_occ + 1,
+                "nbnd": n_occ + 8,
+                "nelec": nelec,
+            }
 
     return None
 
@@ -1418,10 +1501,31 @@ class QERunner:
         at_gs: Atoms,
         calc_dir_base: Optional[str] = None,
         constrained_occupations: Optional[Tuple[List[float], List[float]]] = None,
+        n_workers: Optional[int] = None,
     ) -> List[Atoms]:
-        """Labels Franck-Condon candidate frames with Delta-SCF constrained occupations."""
+        """Backward-compatible alias for label_excited_state_frames."""
+        return self.label_excited_state_frames(
+            frames=fc_frames,
+            at_gs=at_gs,
+            calc_dir_base=calc_dir_base,
+            constrained_occupations=constrained_occupations,
+            n_workers=n_workers,
+        )
+
+    def label_excited_state_frames(
+        self,
+        frames: List[Atoms],
+        at_gs: Atoms,
+        calc_dir_base: Optional[str] = None,
+        constrained_occupations: Optional[Tuple[List[float], List[float]]] = None,
+        n_workers: Optional[int] = None,
+    ) -> List[Atoms]:
+        """Labels candidate frames with Delta-SCF constrained occupations for the optical excited state."""
         calc_base = calc_dir_base or self.config.workspace_dir
         os.makedirs(calc_base, exist_ok=True)
+        dft_es_dir = os.path.join(calc_base, "dft_calculations_es")
+        os.makedirs(dft_es_dir, exist_ok=True)
+        out_es_xyz = os.path.join(calc_base, "labeled_frames_es.xyz")
 
         if constrained_occupations is None:
             gs_out = os.path.join(calc_base, "qe_gs_relax", "pw.out")
@@ -1440,6 +1544,9 @@ class QERunner:
             else:
                 nelec_total = len(at_gs) * 4
 
+            if gap_info is not None and gap_info.get("nelec") is not None:
+                nelec_total = int(round(gap_info["nelec"]))
+
             tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
             if (nelec_total % 2) != (tot_mag % 2):
                 if nelec_total % 2 != 0:
@@ -1454,21 +1561,24 @@ class QERunner:
                     )
                 else:
                     tot_mag = valid_mag
+
+            n_occ_max = (nelec_total + abs(tot_mag)) // 2
             spin_chan = getattr(self.config, "delta_scf_spin_channel", None)
             homo_b = getattr(self.config, "delta_scf_homo_band", None)
             lumo_b = getattr(self.config, "delta_scf_lumo_band", None)
 
             if gap_info is not None:
-                spin_chan = spin_chan or gap_info.get("spin_channel", 2)
-                homo_b = homo_b or gap_info.get("homo_band")
-                lumo_b = lumo_b or gap_info.get("lumo_band")
-                nbnd = gap_info.get("nbnd", max(homo_b or 1, lumo_b or 2) + 6)
+                spin_chan = spin_chan or gap_info.get("spin_channel") or 2
+                homo_b = homo_b or gap_info.get("homo_band") or n_occ_max
+                lumo_b = lumo_b or gap_info.get("lumo_band") or (n_occ_max + 1)
+                nbnd = gap_info.get("nbnd") or max(homo_b + 1, lumo_b, n_occ_max) + 8
             else:
-                n_occ_max = (nelec_total + abs(tot_mag)) // 2
                 spin_chan = spin_chan or 2
                 homo_b = homo_b or n_occ_max
                 lumo_b = lumo_b or (n_occ_max + 1)
-                nbnd = lumo_b + 8
+                nbnd = max(lumo_b, n_occ_max) + 8
+
+            nbnd = max(nbnd, homo_b + 1, lumo_b, n_occ_max)
 
             constrained_occupations = build_delta_scf_occupations(
                 nelec=nelec_total,
@@ -1479,23 +1589,192 @@ class QERunner:
                 spin_channel=spin_chan,
             )
 
-        labeled_es = []
-        for i, fr in enumerate(fc_frames):
-            frame_id = fr.info.get("frame_id", f"fc_{i:02d}")
-            calc_dir = os.path.join(calc_base, f"frame_es_{i:03d}_{frame_id}")
-            logger.info(f"    ---> [ES {i+1}/{len(fc_frames)}] Delta-SCF labeling for {frame_id}...")
-            at_labeled = self.label_single_frame(
-                fr,
-                calc_dir,
+        eff_workers = max(1, int(n_workers if n_workers is not None else self.n_workers))
+        omp_threads = self._resolve_omp_threads(eff_workers)
+        logger.info(
+            f"[-] Optical Excited-State DFT Labeling (Delta-SCF, np={self.n_procs}, omp={omp_threads}, workers={eff_workers})..."
+        )
+        logger.info(f"    Target excited-state pool: {len(frames)} frames")
+
+        # Discover existing converged runs or resolve directories
+        frame_entries = []
+        for i, fr in enumerate(frames):
+            cand_idx = fr.info.get("candidate_index", i)
+            frame_id = fr.info.get("frame_id") or fr.info.get("label") or f"frame_{cand_idx:02d}"
+            stype = fr.info.get("sample_type", "franck_condon")
+
+            canonical_dir = os.path.join(dft_es_dir, f"frame_es_{cand_idx:03d}_{frame_id}")
+            candidate_dirs = [
+                canonical_dir,
+                os.path.join(calc_base, f"frame_es_{cand_idx:03d}_{frame_id}"),
+                os.path.join(calc_base, f"frame_es_{i:03d}_{frame_id}"),
+                os.path.join(dft_es_dir, f"frame_{cand_idx:03d}_{frame_id}"),
+                os.path.join(calc_base, f"frame_es_{frame_id}"),
+            ]
+            chosen_dir = canonical_dir
+            is_done = False
+            for cdir in candidate_dirs:
+                if os.path.isdir(cdir):
+                    pw_out = os.path.join(cdir, "pw.out")
+                    pw_in = os.path.join(cdir, "pw.in")
+                    if os.path.isfile(pw_out):
+                        try:
+                            with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
+                                content = f.read()
+                            if (
+                                "JOB DONE." in content
+                                and "convergence NOT achieved" not in content
+                                and check_pw_in_matches_atoms(pw_in, fr, config=self.config)
+                            ):
+                                e_ev, f_ev_a = parse_qe_output(pw_out)
+                                if e_ev is not None and f_ev_a is not None and len(f_ev_a) == len(fr):
+                                    chosen_dir = cdir
+                                    is_done = True
+                                    break
+                        except Exception:
+                            pass
+            frame_entries.append({
+                "index": i,
+                "cand_idx": cand_idx,
+                "frame_id": frame_id,
+                "sample_type": stype,
+                "atoms": fr,
+                "calc_dir": chosen_dir,
+                "is_done": is_done,
+            })
+
+        completed = [e for e in frame_entries if e["is_done"]]
+        pending = [e for e in frame_entries if not e["is_done"]]
+
+        if completed:
+            logger.info(f"    [i] Already converged: {len(completed)} ES frames")
+        if pending:
+            logger.info(f"    [i] Pending / uncalculated: {len(pending)} ES frames")
+        else:
+            logger.info(f"    [i] All {len(frames)} ES candidate frames are already converged!")
+
+        labeled_dict = {}
+        for e in completed:
+            at = self.label_single_frame(
+                e["atoms"],
+                e["calc_dir"],
                 occupations_mode="from_input",
                 constrained_occupations=constrained_occupations,
             )
-            at_labeled.info["electronic_state"] = "excited"
-            at_labeled.info["sample_type"] = "franck_condon"
-            if "lambda" in fr.info:
-                at_labeled.info["lambda"] = fr.info["lambda"]
-            labeled_es.append(at_labeled)
+            at.info["electronic_state"] = "excited"
+            at.info["sample_type"] = e["sample_type"]
+            at.info["qe_status"] = "converged"
+            if "lambda" in e["atoms"].info:
+                at.info["lambda"] = e["atoms"].info["lambda"]
+            labeled_dict[e["index"]] = at
 
+        # Write initial checkpoint if any were completed
+        if labeled_dict:
+            current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
+            for f in current_frames:
+                f.calc = None
+            tmp_xyz = out_es_xyz + ".tmp"
+            ase.io.write(tmp_xyz, current_frames, format="extxyz")
+            os.replace(tmp_xyz, out_es_xyz)
+
+        state_lock = threading.Lock()
+        retry_queue = []
+
+        def _run_single_es(step_num, entry):
+            idx = entry["index"]
+            fr = entry["atoms"]
+            cdir = entry["calc_dir"]
+            label = entry["frame_id"]
+            stype = entry["sample_type"]
+
+            t0 = time.time()
+            logger.info(f"\n    ---> [ES {step_num}/{len(pending)}] Calculating {label} ({stype}) in {os.path.basename(cdir)}...")
+            try:
+                at_labeled = self.label_single_frame(
+                    fr,
+                    cdir,
+                    retry=False,
+                    occupations_mode="from_input",
+                    constrained_occupations=constrained_occupations,
+                )
+                at_labeled.info["electronic_state"] = "excited"
+                at_labeled.info["sample_type"] = stype
+                at_labeled.info["qe_status"] = "converged"
+                if "lambda" in fr.info:
+                    at_labeled.info["lambda"] = fr.info["lambda"]
+                dt = time.time() - t0
+                with state_lock:
+                    labeled_dict[idx] = at_labeled
+                    current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
+                    for f in current_frames:
+                        f.calc = None
+                    tmp_xyz = out_es_xyz + ".tmp"
+                    ase.io.write(tmp_xyz, current_frames, format="extxyz")
+                    os.replace(tmp_xyz, out_es_xyz)
+                logger.info(f"    [+] ES {label} labeled | E = {at_labeled.info['energy']:.4f} eV | Max F = {np.abs(at_labeled.arrays['forces']).max():.4f} eV/A ({dt:.1f} s)")
+            except Exception as err:
+                with state_lock:
+                    entry["attempts"] = 1
+                    entry["last_error"] = str(err)
+                    retry_queue.append(entry)
+                    logger.warning(f"    [!] ES {label} failed on attempt 1: {err}. Tagged for retry.")
+
+        if pending:
+            if eff_workers > 1 and len(pending) > 1:
+                with ThreadPoolExecutor(max_workers=eff_workers) as pool:
+                    futures = [
+                        pool.submit(_run_single_es, step_num, entry)
+                        for step_num, entry in enumerate(pending, 1)
+                    ]
+                    for fut in futures:
+                        fut.result()
+            else:
+                for step_num, entry in enumerate(pending, 1):
+                    _run_single_es(step_num, entry)
+
+        if retry_queue:
+            logger.info(f"\n[-] Retrying {len(retry_queue)} tagged ES calculation(s)...")
+            for retry_num, entry in enumerate(retry_queue, 1):
+                idx = entry["index"]
+                fr = entry["atoms"]
+                cdir = entry["calc_dir"]
+                label = entry["frame_id"]
+                stype = entry["sample_type"]
+                logger.info(f"    ---> [Retry {retry_num}/{len(retry_queue)}] {label} ({stype}) with mixing_mode='local-TF'...")
+                try:
+                    at_labeled = self.label_single_frame(
+                        fr,
+                        cdir,
+                        retry=True,
+                        occupations_mode="from_input",
+                        constrained_occupations=constrained_occupations,
+                    )
+                    at_labeled.info["electronic_state"] = "excited"
+                    at_labeled.info["sample_type"] = stype
+                    at_labeled.info["qe_status"] = "converged"
+                    if "lambda" in fr.info:
+                        at_labeled.info["lambda"] = fr.info["lambda"]
+                    with state_lock:
+                        labeled_dict[idx] = at_labeled
+                        current_frames = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
+                        for f in current_frames:
+                            f.calc = None
+                        tmp_xyz = out_es_xyz + ".tmp"
+                        ase.io.write(tmp_xyz, current_frames, format="extxyz")
+                        os.replace(tmp_xyz, out_es_xyz)
+                    logger.info(f"    [+] ES {label} converged on retry!")
+                except Exception as err:
+                    is_anchor = (stype == "franck_condon" and (
+                        (fr.info.get("lambda") is not None and (abs(float(fr.info["lambda"]) - 0.0) < 1e-4 or abs(float(fr.info["lambda"]) - 1.0) < 1e-4))
+                        or label in ("fc_00", "fc_01")
+                    ))
+                    if is_anchor:
+                        raise RuntimeError(
+                            f"Critical optical anchor frame {label} failed Delta-SCF convergence on retry: {err}"
+                        ) from err
+                    logger.error(f"    [-] ES frame {label} ({stype}) permanently failed: {err}. Skipping non-anchor frame.")
+
+        labeled_es = [labeled_dict[k] for k in sorted(labeled_dict.keys())]
         return labeled_es
 
     def label_all_frames(

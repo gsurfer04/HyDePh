@@ -545,6 +545,8 @@ class DefectBuilder:
                     sum(z_vals.get(s) or _DEFAULT_VALENCE.get(s, 4) for s in at_gs.get_chemical_symbols())
                     - float(self.config.tot_charge)
                 ))
+                if gap_info is not None and gap_info.get("nelec") is not None:
+                    nelec_total = int(round(gap_info["nelec"]))
 
                 tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
                 if (nelec_total % 2) != (tot_mag % 2):
@@ -567,10 +569,10 @@ class DefectBuilder:
                 lumo_b = getattr(self.config, "delta_scf_lumo_band", None)
 
                 if gap_info is not None:
-                    spin_chan = spin_chan or gap_info.get("spin_channel", 2)
-                    homo_b = homo_b or gap_info.get("homo_band")
-                    lumo_b = lumo_b or gap_info.get("lumo_band")
-                    nbnd = gap_info.get("nbnd", max(homo_b or 1, lumo_b or 2, n_occ_max) + 8)
+                    spin_chan = spin_chan or gap_info.get("spin_channel") or 2
+                    homo_b = homo_b or gap_info.get("homo_band") or n_occ_max
+                    lumo_b = lumo_b or gap_info.get("lumo_band") or (n_occ_max + 1)
+                    nbnd = gap_info.get("nbnd") or max(homo_b + 1, lumo_b, n_occ_max) + 8
                 else:
                     spin_chan = spin_chan or 2
                     homo_b = homo_b or n_occ_max

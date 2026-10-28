@@ -1,5 +1,6 @@
 """Tests for Batch 3: Real Delta-SCF excited states and paired Delta-NEP architecture."""
 
+import os
 import pytest
 import numpy as np
 from unittest.mock import MagicMock
@@ -119,6 +120,36 @@ def test_parse_qe_band_gap_detects_defect_orbital(tmp_path):
     assert pytest.approx(gap_info["gap_eV"], rel=1e-3) == 2.2
 
 
+def test_parse_qe_band_gap_fixed_occupations_spin_polarized(tmp_path):
+    """Verify parse_qe_band_gap extracts orbital promotion for fixed occupations (no Fermi output)."""
+    pw_out = tmp_path / "pw_fixed.out"
+    sample_text = """
+     number of electrons       =         9.00 (up: 5.00, down: 4.00)
+     number of Kohn-Sham states=            6
+
+ ------ SPIN UP ------------
+          k = 0.0000 0.0000 0.0000 ( 21250 PWs)   bands (ev):
+    -5.0000  -4.0000  -3.0000   0.8591   4.8644   6.2577
+
+ ------ SPIN DOWN ----------
+          k = 0.0000 0.0000 0.0000 ( 21250 PWs)   bands (ev):
+    -5.0000  -4.0000  -3.0000   0.8619   5.4425   6.5451
+
+     highest occupied, lowest unoccupied level (ev):     4.8644    5.4425
+    """
+    pw_out.write_text(sample_text, encoding="utf-8")
+
+    gap_info = parse_qe_band_gap(str(pw_out))
+    assert gap_info is not None
+    assert gap_info["spin"] == "up"
+    assert gap_info["spin_channel"] == 1
+    assert gap_info["homo_band"] == 5
+    assert gap_info["lumo_band"] == 6
+    assert pytest.approx(gap_info["gap_eV"], rel=1e-3) == 1.3933
+    assert pytest.approx(gap_info["homo_eV"], rel=1e-3) == 4.8644
+    assert pytest.approx(gap_info["lumo_eV"], rel=1e-3) == 6.2577
+
+
 def test_defect_builder_delta_scf_relaxation(tmp_path):
     """Verify DefectBuilder invokes Delta-SCF relaxation with constrained occupations."""
     pristine_path = str(tmp_path / "pristine.xyz")
@@ -222,3 +253,92 @@ def test_configuration_coordinate_with_paired_calc(tmp_path):
     assert pytest.approx(res["e_es"][idx_1], rel=1e-4) == 2.10
     # ES relaxation energy should reflect true ESCalc curvature, not GSCalc curvature
     assert res["delta_e_rel_es_eV"] > res["delta_e_rel_gs_eV"]
+
+
+def test_dft_es_candidates_config(tmp_path):
+    """Verify dft_es_candidates validation in ToolkitConfig."""
+    cfg_default = ToolkitConfig(pristine_cell_path=str(tmp_path))
+    assert cfg_default.dft_es_candidates == "all"
+
+    cfg_fc = ToolkitConfig(pristine_cell_path=str(tmp_path), dft_es_candidates="fc_path")
+    assert cfg_fc.dft_es_candidates == "fc_path"
+
+    cfg_case = ToolkitConfig(pristine_cell_path=str(tmp_path), dft_es_candidates="ALL")
+    assert cfg_case.dft_es_candidates == "all"
+
+    with pytest.raises(ValueError, match="Invalid dft_es_candidates"):
+        ToolkitConfig(pristine_cell_path=str(tmp_path), dft_es_candidates="random_mode")
+
+
+def test_label_excited_state_frames_caching(tmp_path, monkeypatch):
+    """Verify label_excited_state_frames labels candidate frames and correctly reuses cache."""
+    import ase.io
+    from hydeph.qe_runner import QERunner
+
+    at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]], cell=[5, 5, 5], pbc=True)
+    at_1 = at_gs.copy()
+    at_1.info["candidate_index"] = 0
+    at_1.info["frame_id"] = "fc_00"
+    at_1.info["sample_type"] = "franck_condon"
+    at_1.info["lambda"] = 0.0
+
+    at_2 = at_gs.copy()
+    at_2.positions[1, 0] += 0.1
+    at_2.info["candidate_index"] = 1
+    at_2.info["frame_id"] = "rattle_00"
+    at_2.info["sample_type"] = "core_rattle"
+
+    upf = tmp_path / "C.upf"
+    upf.write_text("<UPF version=\"2.0.1\">\n  <PP_HEADER z_valence=\"4.0\" element=\"C\"/>\n</UPF>\n", encoding="utf-8")
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "pristine.xyz"),
+        workspace_dir=str(tmp_path / "ws_es_label"),
+        pseudopotentials={"C": str(upf)},
+        spin_multiplicity=1,
+    )
+    qe = QERunner(cfg)
+
+    call_count = [0]
+    def mock_label_single(atoms, calc_dir, retry=False, occupations_mode=None, constrained_occupations=None):
+        call_count[0] += 1
+        res = atoms.copy()
+        res.info["energy"] = -150.0 + call_count[0]
+        res.arrays["forces"] = np.zeros((len(atoms), 3))
+        os.makedirs(calc_dir, exist_ok=True)
+        with open(os.path.join(calc_dir, "pw.out"), "w") as f:
+            f.write("JOB DONE.\n!    total energy              =  -150.00000000 Ry\nForces acting on atoms (cartesian axes, Ry/au):\n     atom    1 type  1   force =   0.0  0.0  0.0\n     atom    2 type  1   force =   0.0  0.0  0.0\n")
+        from hydeph.qe_runner import write_qe_input
+        write_qe_input(
+            atoms,
+            os.path.join(calc_dir, "pw.in"),
+            cfg,
+            occupations_mode=occupations_mode,
+            constrained_occupations=constrained_occupations,
+        )
+        return res
+
+    monkeypatch.setattr(qe, "label_single_frame", mock_label_single)
+
+    dummy_occ = ([1.0, 1.0, 0.0, 0.0], [1.0, 0.0, 1.0, 0.0])
+    labeled = qe.label_excited_state_frames([at_1, at_2], at_gs=at_gs, constrained_occupations=dummy_occ)
+
+    assert len(labeled) == 2
+    assert labeled[0].info["sample_type"] == "franck_condon"
+    assert labeled[0].info["electronic_state"] == "excited"
+    assert labeled[1].info["sample_type"] == "core_rattle"
+    assert labeled[1].info["electronic_state"] == "excited"
+    assert call_count[0] == 2
+
+    # Verify labeled_frames_es.xyz was written
+    out_es_xyz = os.path.join(cfg.workspace_dir, "labeled_frames_es.xyz")
+    assert os.path.isfile(out_es_xyz)
+    read_back = ase.io.read(out_es_xyz, index=":")
+    assert len(read_back) == 2
+
+    # Re-running with cache should reload converged calculation
+    call_count[0] = 0
+    labeled_cached = qe.label_excited_state_frames([at_1, at_2], at_gs=at_gs, constrained_occupations=dummy_occ)
+    assert len(labeled_cached) == 2
+    assert call_count[0] == 2
+

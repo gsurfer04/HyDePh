@@ -110,6 +110,11 @@ class ToolkitConfig:
         If omitted, auto-detected from the active in-gap defect channel.
     paired_delta_nep : bool
         Whether to train paired Delta-NEP potential surfaces (Delta V_GS and Delta V_ES). Default is True.
+    dft_es_candidates : str
+        Candidate frame selection for optical excited state Delta-SCF DFT labeling.
+        "all" (default) labels all candidate frames (Franck-Condon, rattle, and MD frames) to train
+        a full 3D paired excited-state Delta-NEP potential matching the ground-state dataset size.
+        "fc_path" labels only the 1D Franck-Condon path frames (fast mode).
     excited_state_tot_magnetization : int, optional
         Target spin magnetization (2S) for excited-state relaxation in "spin_proxy" mode.
         Defaults to ground state tot_magnetization + 2.
@@ -289,6 +294,7 @@ class ToolkitConfig:
     delta_scf_lumo_band: Optional[int] = None
     delta_scf_spin_channel: Optional[int] = None
     paired_delta_nep: bool = True
+    dft_es_candidates: str = "all"  # "all" (paired with ground state dataset) or "fc_path"
     excited_state_tot_magnetization: Optional[int] = None
     excited_state_spin_multiplicity: Optional[int] = None
     ground_state_relax_method: str = "auto"  # "auto", "foundation", or "dft"
@@ -416,6 +422,12 @@ class ToolkitConfig:
     cc_n_points: int = 81
 
     def __post_init__(self):
+        if str(self.dft_es_candidates).lower() not in ("all", "fc_path"):
+            raise ValueError(
+                f"Invalid dft_es_candidates: {self.dft_es_candidates!r}. Must be 'all' or 'fc_path'."
+            )
+        self.dft_es_candidates = str(self.dft_es_candidates).lower()
+
         if self.excited_state_method == "spin_proxy":
             logger.warning(
                 "[!] Notice: 'spin_proxy' excited state method optimizes an artificial spin state "
