@@ -581,10 +581,21 @@ class DefectBuilder:
 
                 nbnd = max(nbnd, homo_b + 1, lumo_b, n_occ_max)
 
-                logger.info(
-                    f"    [Delta-SCF] Promoting electron: band {homo_b} -> {lumo_b} "
-                    f"in spin channel {spin_chan} ({'down' if spin_chan == 2 else 'up'}, nbnd={nbnd})"
-                )
+                lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", None)
+                if lumo_deg is None and gap_info is not None:
+                    lumo_deg = gap_info.get("lumo_degeneracy", 1)
+                lumo_deg = max(1, int(lumo_deg or 1))
+
+                if lumo_deg > 1:
+                    logger.info(
+                        f"    [Delta-SCF] Promoting electron: band {homo_b} -> bands {lumo_b}..{lumo_b + lumo_deg - 1} "
+                        f"in spin channel {spin_chan} (degeneracy={lumo_deg}, {1.0/lumo_deg:.2f} e/band, nbnd={nbnd})"
+                    )
+                else:
+                    logger.info(
+                        f"    [Delta-SCF] Promoting electron: band {homo_b} -> {lumo_b} "
+                        f"in spin channel {spin_chan} ({'down' if spin_chan == 2 else 'up'}, nbnd={nbnd})"
+                    )
 
                 occ_up, occ_dw = build_delta_scf_occupations(
                     nelec=nelec_total,
@@ -593,6 +604,7 @@ class DefectBuilder:
                     homo_band=homo_b,
                     lumo_band=lumo_b,
                     spin_channel=spin_chan,
+                    lumo_degeneracy=lumo_deg,
                 )
 
                 init_es = at_gs

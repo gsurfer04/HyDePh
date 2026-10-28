@@ -293,6 +293,7 @@ class ToolkitConfig:
     excited_state_method: str = "delta_scf"  # "delta_scf", "spin_proxy", "synthetic", or "file"
     delta_scf_homo_band: Optional[int] = None
     delta_scf_lumo_band: Optional[int] = None
+    delta_scf_lumo_degeneracy: Optional[int] = None
     delta_scf_spin_channel: Optional[int] = None
     paired_delta_nep: bool = True
     dft_es_candidates: str = "all"  # "all" (paired with ground state dataset) or "fc_path"
@@ -330,6 +331,7 @@ class ToolkitConfig:
     qe_timeout_s: Optional[float] = None
 
     conv_thr: Optional[str] = None
+    mixing_mode: Optional[str] = None
     mixing_beta: float = 0.4
     mixing_ndim: int = 8
     diagonalization: str = "david"

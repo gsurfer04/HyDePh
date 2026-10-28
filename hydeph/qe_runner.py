@@ -237,11 +237,15 @@ def build_delta_scf_occupations(
     homo_band: int,
     lumo_band: int,
     spin_channel: int = 1,
+    lumo_degeneracy: int = 1,
 ) -> Tuple[List[float], List[float]]:
     """Builds constrained occupation arrays for Delta-SCF optical excitation.
 
     Promotes one electron from `homo_band` to `lumo_band` in `spin_channel` (1=up, 2=down),
     conserving total electron number and total magnetization (2S).
+    If `lumo_degeneracy > 1`, the promoted electron is distributed equally across the
+    `lumo_degeneracy` degenerate orbitals starting at `lumo_band` to preserve spatial
+    symmetry and eliminate SCF orbital-rotation oscillations.
     """
     n_up = (int(nelec) + int(tot_magnetization)) // 2
     n_dw = (int(nelec) - int(tot_magnetization)) // 2
@@ -252,25 +256,32 @@ def build_delta_scf_occupations(
             f"n_up={n_up}, n_dw={n_dw}"
         )
 
-    if nbnd < max(n_up, n_dw, homo_band, lumo_band):
+    deg = max(1, int(lumo_degeneracy))
+    max_b = max(n_up, n_dw, homo_band, lumo_band + deg - 1)
+    if nbnd < max_b:
         raise ValueError(
             f"nbnd ({nbnd}) must be at least max(n_up={n_up}, n_dw={n_dw}, "
-            f"homo={homo_band}, lumo={lumo_band})"
+            f"homo={homo_band}, lumo_end={lumo_band + deg - 1})"
         )
 
     occ_up = [1.0] * n_up + [0.0] * (nbnd - n_up)
     occ_dw = [1.0] * n_dw + [0.0] * (nbnd - n_dw)
 
+    frac_occ = 1.0 / deg
     if spin_channel == 1:
         if occ_up[homo_band - 1] < 0.5:
             logger.warning(f"[!] Warning: HOMO band {homo_band} in spin up has low occupation: {occ_up[homo_band - 1]}")
         occ_up[homo_band - 1] = 0.0
-        occ_up[lumo_band - 1] = 1.0
+        for d_idx in range(deg):
+            b_idx = (lumo_band - 1) + d_idx
+            occ_up[b_idx] += frac_occ
     elif spin_channel == 2:
         if occ_dw[homo_band - 1] < 0.5:
             logger.warning(f"[!] Warning: HOMO band {homo_band} in spin down has low occupation: {occ_dw[homo_band - 1]}")
         occ_dw[homo_band - 1] = 0.0
-        occ_dw[lumo_band - 1] = 1.0
+        for d_idx in range(deg):
+            b_idx = (lumo_band - 1) + d_idx
+            occ_dw[b_idx] += frac_occ
     else:
         raise ValueError(f"Invalid spin_channel: {spin_channel}. Must be 1 (up) or 2 (down).")
 
@@ -433,10 +444,12 @@ def write_qe_input(
     david_ndim = getattr(config, "diago_david_ndim", 2)
     david_line = f"\n  diago_david_ndim = {int(david_ndim)}," if (diagonalization.startswith("david") and david_ndim) else ""
     nbnd_line = f"\n  nbnd = {eff_nbnd}," if eff_nbnd is not None else ""
+    mix_mode = getattr(config, "mixing_mode", None)
+    mix_mode_line = f"\n  mixing_mode = '{mix_mode}'," if mix_mode else ""
     if retry:
-        retry_lines = "\n  mixing_mode = 'local-TF',\n  electron_maxstep = 150,"
-    elif occupations_mode == "from_input":
-        retry_lines = "\n  mixing_mode = 'local-TF',"
+        retry_lines = f"{mix_mode_line}\n  electron_maxstep = 150,"
+    elif mix_mode_line:
+        retry_lines = mix_mode_line
     else:
         retry_lines = ""
     forc_conv_line = f"\n  forc_conv_thr = {float(getattr(config, 'relax_forc_conv_thr', 1.0e-3))}," if calculation == "relax" else ""
@@ -811,6 +824,12 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, Any]]:
 
         if chosen:
             spin_name, spin_chan, gap_v, homo_v, lumo_v, h_b, l_b, ef_v = chosen
+            chosen_bands = d_bands if spin_chan == 2 else u_bands
+            deg = 1
+            if chosen_bands and l_b <= len(chosen_bands):
+                lumo_e = chosen_bands[l_b - 1]
+                while (l_b - 1 + deg) < len(chosen_bands) and abs(chosen_bands[l_b - 1 + deg] - lumo_e) < 0.02:
+                    deg += 1
             return {
                 "gap_eV": gap_v,
                 "homo_eV": homo_v,
@@ -820,6 +839,7 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, Any]]:
                 "spin_channel": spin_chan,
                 "homo_band": h_b,
                 "lumo_band": l_b,
+                "lumo_degeneracy": deg,
                 "nbnd": max(len(u_bands), len(d_bands)),
                 "gap_up_eV": gap_u,
                 "gap_down_eV": gap_d,
@@ -1589,6 +1609,11 @@ class QERunner:
 
             nbnd = max(nbnd, homo_b + 1, lumo_b, n_occ_max)
 
+            lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", None)
+            if lumo_deg is None and gap_info is not None:
+                lumo_deg = gap_info.get("lumo_degeneracy", 1)
+            lumo_deg = max(1, int(lumo_deg or 1))
+
             constrained_occupations = build_delta_scf_occupations(
                 nelec=nelec_total,
                 tot_magnetization=tot_mag,
@@ -1596,6 +1621,7 @@ class QERunner:
                 homo_band=homo_b,
                 lumo_band=lumo_b,
                 spin_channel=spin_chan,
+                lumo_degeneracy=lumo_deg,
             )
 
         eff_workers = max(1, int(n_workers if n_workers is not None else self.n_workers))

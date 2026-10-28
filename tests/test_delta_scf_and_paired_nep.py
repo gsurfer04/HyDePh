@@ -50,11 +50,21 @@ def test_build_delta_scf_occupations():
     assert occ_up2[3] == 0.0
     assert occ_up2[4] == 1.0
 
-    # 3. Incompatible parity raises ValueError
+    # 3. Degenerate promotion (e.g. into doubly degenerate e orbital): lumo_degeneracy=2
+    occ_up3, occ_dw3 = build_delta_scf_occupations(
+        nelec=14, tot_magnetization=2, nbnd=12, homo_band=6, lumo_band=7, spin_channel=2, lumo_degeneracy=2
+    )
+    assert sum(occ_up3) == 8.0
+    assert sum(occ_dw3) == 6.0
+    assert occ_dw3[5] == 0.0
+    assert occ_dw3[6] == 0.5
+    assert occ_dw3[7] == 0.5
+
+    # 4. Incompatible parity raises ValueError
     with pytest.raises(ValueError, match="incompatible parity"):
         build_delta_scf_occupations(nelec=8, tot_magnetization=1, nbnd=10, homo_band=4, lumo_band=5)
 
-    # 4. Invalid spin channel raises ValueError
+    # 5. Invalid spin channel raises ValueError
     with pytest.raises(ValueError, match="Invalid spin_channel"):
         build_delta_scf_occupations(nelec=14, tot_magnetization=2, nbnd=12, homo_band=6, lumo_band=7, spin_channel=3)
 
