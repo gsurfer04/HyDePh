@@ -1,6 +1,6 @@
 # HyDePh Theoretical Walkthrough
 
-**HyDePh** (**Hy**brid **De**fect **Ph**otoluminescence) combines a $\Delta$-machine learning potential ($\Delta$-NEP) with quantum generating functions and finite-temperature molecular dynamics to compute optical spectra of point defects in solids.
+**HyDePh** (**Hy**brid **De**fect **Ph**otoluminescence) combines paired $\Delta$-machine learning potentials ($\Delta$-NEP) with quantum generating functions, large-supercell phonon embedding, and finite-temperature microcanonical cumulant dynamics to compute first-principles optical spectra of point defects in solids.
 
 ---
 
@@ -9,66 +9,66 @@
 Point defects in crystalline solids (color centers) are leading platforms for quantum repeaters, single-photon sources, and nanoscale sensors [1–4]. Identifying and characterizing these centers relies on photoluminescence (PL) spectroscopy, which probes electronic transitions coupled to host lattice vibrations [5, 6].
 
 First-principles modeling of color-center PL faces four competing demands:
-1. **Electronic localization**: Deep defect states involve localized correlations, charge reorganization, and Jahn-Teller distortions that require density functional theory (DFT) or constrained $\Delta$SCF [5–8].
-2. **Long-range elastic strain**: Defects couple to acoustic and optical phonons across thousands of atoms. Converging periodic image strain requires supercells ($>10^3$ atoms) that are expensive for direct DFT [5, 6, 9].
-3. **Finite-temperature anharmonicity**: In soft lattices (e.g., alkali halides, perovskites), optical relaxation drives large displacements into cubic and quartic repulsive walls ($V \sim k_3 Q^3 + k_4 Q^4$), breaking harmonic approximations and requiring picosecond molecular dynamics (MD) [10–13].
-4. **Foundation model gaps**: Universal machine-learned potentials (`nep89`) capture bulk elasticity and phonons across the periodic table, but lack defect-specific excited-state forces and Franck-Condon relaxation paths [14, 15].
+1. **Electronic localization & excited-state rearrangement**: Deep defect states involve localized correlations, charge reorganization, and Jahn-Teller distortions across distinct ground-state (GS) and excited-state (ES) potential energy surfaces (PES) that require spin-polarized density functional theory (DFT) and constrained orbital occupations ($\Delta$SCF) [5–8, 23].
+2. **Long-range elastic strain & Brillouin-zone sampling**: Defects couple to acoustic and optical phonons across thousands of atoms. Converging periodic image strain ($L^{-3}$) and eliminating discrete finite-size mode-comb artifacts requires supercells with physical edge length $L \ge 10\text{--}12\ \text{Å}$ (or large-supercell phonon embedding) that are expensive for direct ab initio molecular dynamics [5, 6, 9, 35].
+3. **Finite-temperature anharmonicity & quadratic dephasing**: In soft lattices (e.g., alkali halides, perovskites) or at elevated temperatures, thermal motion samples cubic and quartic anharmonicity ($V \sim k_3 Q^3 + k_4 Q^4$) and curvature differences between the GS and ES manifolds ($\hbar\Omega_{\mathrm{GS}} \ne \hbar\Omega_{\mathrm{ES}}$), requiring picosecond molecular dynamics (MD) and time-domain cumulant expansions [10–13, 33].
+4. **Foundation model gaps**: Universal machine-learned potentials (`nep89`) capture bulk elasticity and phonons across the periodic table, but lack defect-specific Kohn-Sham electronic states, $\Delta$SCF excited-state forces, and Franck-Condon relaxation paths [14, 15].
 
-HyDePh bridges these scales by training a localized $\Delta$-NEP correction on top of a universal foundation potential, then evaluating lineshapes through normal-mode generating functions and anharmonic Langevin dynamics.
+HyDePh bridges these scales by training **paired localized $\Delta$-NEP corrections** ($\Delta V_{\mathrm{GS}}$ and $\Delta V_{\mathrm{ES}}$) on top of a universal foundation potential, then evaluating optical lineshapes through normal-mode generating functions and ensemble-averaged NVE energy-gap autocorrelation functions [5, 10, 33].
 
 ---
 
 ## 2. Pipeline Architecture
 
+The workflow is organized into six stages (matching the CLI `--from-stage 1..6` and `--force-stage` controls in [`pipeline.py`](../hydeph/pipeline.py)):
+
 ```mermaid
 flowchart TD
-    subgraph S1["Stage 1: Defect Embedding"]
+    subgraph S1["Stage 1: Defect Construction & Relaxation"]
         Pristine["Pristine Bulk Unit Cell"] --> Builder["DefectBuilder"]
         Defect["Defect Unit Cell"] --> Builder
-        Builder --> SC["Defect Supercell (PBC)"]
-        SC --> Relax["GS & ES Relaxations (Delta Q)"]
+        Builder --> SC["Defect Supercell (PBC, L >= 10 A)"]
+        SC --> Relax["GS & ES Relaxations (R_GS, R_ES, Delta Q)"]
     end
 
-    subgraph S2["Stage 2 & 3: Active Frame Sampling"]
-        Relax --> FC["Phase 1: Franck-Condon Path"]
-        Relax --> Rattle["Phase 2: Defect-Core Rattling"]
-        Relax --> MD["Phase 3: nep89 MD + FPS"]
-        FC --> Priority["Phase 4: Interleaved Ensemble"]
+    subgraph S2["Stage 2: Active Frame Sampling"]
+        Relax --> FC["Phase 1: Franck-Condon Path R(lambda)"]
+        Relax --> Rattle["Phase 2: Defect-Core Rattling (r < 6 A)"]
+        Relax --> MD["Phase 3: nep89 MD + Incremental FPS"]
+        FC --> Priority["Phase 4: Anchor-First Interleaved Queue"]
         Rattle --> Priority
         MD --> Priority
     end
 
-    subgraph S3["Stage 4 & 5: Delta-Learning & Training"]
-        Priority --> QE["pw.x DFT Labeling"]
-        BasePot["Foundation Potential (nep89)"] --> Subtract["Extract Delta E & Delta F"]
-        QE --> Subtract
-        Subtract --> NEP["GPU Delta-NEP Training (GPUMD)"]
-        NEP --> Calc["HybridDefectCalculator (V_base + Delta V)"]
+    subgraph S3["Stage 3: Paired GS & Delta-SCF DFT Labeling"]
+        Priority --> QE_GS["pw.x Ground-State SCF (occupations='fixed')"]
+        QE_GS --> Gap["Automated In-Gap HOMO/LUMO & Degeneracy Detection"]
+        Gap --> QE_ES["pw.x Excited-State Delta-SCF (occupations='from_input')"]
+        QE_GS --> ExactZPL["Exact Adiabatic E_ZPL, E_abs, E_em & Stokes Shift"]
+        QE_ES --> ExactZPL
+    end
+
+    subgraph S4["Stage 4: Baseline Extraction & Paired GPU Delta-NEP Training"]
+        BasePot["Foundation Potential (nep89)"] --> Subtract["Subtract V_base & Mean Offset bar(Delta E)"]
+        QE_GS --> Subtract
+        QE_ES --> Subtract
+        Subtract --> Split["Stratified Train/Test Split"]
+        Split --> NEP["GPUMD SNES Training (nep_delta_gs & nep_delta_es)"]
+        NEP --> QC["Quality Control Gates & Optional Committee"]
+    end
+
+    subgraph S5["Stage 5: Paired Hybrid Potential Assembly"]
+        QC --> Calc["PairedDefectCalculator (V_hybrid,GS & V_hybrid,ES)"]
         BasePot --> Calc
     end
 
-    subgraph S4["Stage 6 & 7: Harmonic Quantum Spectroscopy"]
-        Calc --> Hessian["Hessian & Normal Modes e_k"]
-        Hessian --> Sk["Huang-Rhys S_k & S(hw)"]
-        Sk --> GenFunc["Generating Function G(t)"]
-        GenFunc --> HarmPL["Harmonic Lineshapes A_harm(E, T)"]
-    end
-
-    subgraph S5["Stage 8: Anharmonic Sampling & Multi-Regime Spectroscopy"]
-        Calc --> LangMD["Finite-T Langevin MD"]
-        LangMD --> Proj["Mass-Weighted Projection u_opt"]
-        Proj --> VACF["Projected VDOS g_opt(hw, T) & Softening alpha_soft"]
-        LangMD --> DeltaU["Energy Gap Variance sigma_DeltaU"]
-        VACF --> Regimes{"Coupling S < 10?"}
-        Regimes -->|"Yes (Weak/Intermediate)"| SoftGen["Softened Quantum GenFn A_anh(E, T)"]
-        Regimes -->|"No (Strong, S >= 10)"| MarcusConv["Semiclassical Marcus Convolution"]
-        DeltaU --> MarcusConv
-    end
-
-    subgraph S6["Stage 9: 1D Configuration Coordinate & Stokes Shift"]
-        Calc --> CCScan["Linear Path R(lambda) & Q = lambda Delta Q"]
-        CCScan --> PES["Surfaces E_GS(Q) & E_ES(Q)"]
-        PES --> Stokes["Stokes Shift, E_abs, E_em, hbar Omega, S_1D"]
+    subgraph S6["Stage 6: Vibrational Embedding, Cumulant MD & Optical Spectroscopy"]
+        Calc --> Embed["6A: Phonon Embedding & Normal Modes (omega_k, S_k, IPR_k)"]
+        Embed --> HarmPL["6B: Harmonic Generating Function & (hbar omega)^3 PL"]
+        Calc --> NVE["6C: NVT Equilibration -> Multi-Trajectory NVE Production"]
+        NVE --> Cumulant["Energy-Gap ACF C_DeltaU(t), Gaussian Window & Cumulant J(omega)"]
+        Cumulant --> AnhPL["Anharmonic Lineshapes I_PL(hbar omega, T) & DWF(T)"]
+        Calc --> CCScan["6D: Paired 1D Configuration Coordinate E_GS(Q) & E_ES(Q)"]
     end
 ```
 
@@ -84,114 +84,152 @@ $$
 E_{\mathrm{elastic}}(L) = E_{\mathrm{dilute}} + \frac{\alpha_{\mathrm{el}}}{L^3} + \mathcal{O}(L^{-5})
 $$
 
-where $L$ is the supercell dimension and $\alpha_{\mathrm{el}}$ is the elastic dipole parameter. In addition to elastic ($L^{-3}$) and electrostatic ($L^{-1}$) image interactions, supercell size directly dictates the resolution of the vibrational spectrum. A supercell of linear dimension $L$ samples the phonon Brillouin zone on a discrete grid of spacing $\Delta q = \frac{2\pi}{L}$. When $L < 10\ \text{Å}$ (such as in a 64-atom diamond cell), the absence of long-wavelength acoustic modes prevents the localized defect breathing mode from hybridizing with the host lattice continuum. This artificially concentrates electron-phonon coupling into an isolated discrete mode and produces an unphysical comb of Poissonian multi-phonon spikes [5]. Converging sideband spectra to the continuous dilute limit requires supercells with physical dimension $L \ge 10\text{--}12\ \text{Å}$ [5, 6, 9]. Depending on the lattice constant of the host crystal, this corresponds to $2\times 2\times 2$ for large-lattice systems ($a > 5.5\ \text{Å}$, e.g. rocksalt halides $\ge 63$ atoms, $L \approx 11.4\ \text{Å}$) or $3\times 3\times 3$ for compact covalent crystals ($a \approx 3.5\text{--}4.5\ \text{Å}$, e.g. diamond $\ge 215$ atoms, $L \approx 10.7\ \text{Å}$).
+where $L$ is the supercell dimension and $\alpha_{\mathrm{el}}$ is the elastic dipole tensor parameter. Beyond elastic ($L^{-3}$) and electrostatic ($L^{-1}$) image interactions, supercell size directly dictates the resolution of the vibrational spectrum. A supercell of linear dimension $L$ samples the phonon Brillouin zone on a discrete grid of spacing $\Delta q = \frac{2\pi}{L}$. When $L < 10\ \text{Å}$ (such as in a 64-atom diamond cell), the absence of long-wavelength acoustic modes prevents the localized defect breathing mode from hybridizing with the host lattice continuum. This artificially concentrates electron-phonon coupling into an isolated discrete mode and produces an unphysical comb of Poissonian multi-phonon spikes [5, 35]. Converging sideband spectra to the continuous dilute limit requires supercells with physical dimension $L \ge 10\text{--}12\ \text{Å}$ [5, 6, 9]:
+- **Compact covalent crystals** ($a \approx 3.5\text{--}4.5\ \text{Å}$): `(3, 3, 3)` for diamond ($215$ atoms, $L = 10.72\ \text{Å}$) or `(3, 3, 2)` for 4H-SiC ($142$ atoms, $L \approx 9.2\text{--}10.1\ \text{Å}$).
+- **Large-lattice ionic crystals** ($a > 5.5\ \text{Å}$): `(2, 2, 2)` for rocksalt alkali halides such as NaCl or LiCl ($63$ atoms, $L = 11.38\ \text{Å}$).
 
-[`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around a central defect unit cell, locates the defect site, and relaxes the Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) geometries. These define the Franck-Condon displacement vector and total mass-weighted displacement [5]:
+[`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around the defect cell, locates the defect site via minimum-image coordinate matching (without assuming fixed atom ordering), and obtains the relaxed Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) geometries. Using minimum-image displacements $\Delta \mathbf{R}_{\mathrm{MIC}}$, these define the Franck-Condon displacement vector and total mass-weighted configurational displacement [5]:
 
 $$
-\Delta \mathbf{R} = \mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}}, \qquad \Delta Q = \sqrt{\sum_{i=1}^N M_i \vert \Delta \mathbf{R}_i \vert^2}
+\Delta \mathbf{R}_i = \mathrm{MIC}(\mathbf{R}_{\mathrm{ES}, i} - \mathbf{R}_{\mathrm{GS}, i}), \qquad \Delta Q = \sqrt{\sum_{i=1}^N M_i \vert \Delta \mathbf{R}_i \vert^2}
 $$
 
-where $M_i$ is the mass of atom $i$.
+where $M_i$ is the atomic mass of site $i$. By default (`allow_fallbacks = False`), any failure in requested DFT geometry optimization raises an immediate error rather than silently substituting an unrelaxed structure, and every structural origin is recorded in `provenance.json`.
 
 ---
 
-### Stage 2: Hybrid $\Delta$-Learning Potential
+### Stage 2: Four-Phase Active Frame Sampling
 
-[`HybridDefectCalculator`](../hydeph/calculator.py) decomposes total energy and forces into a universal baseline (`nep89` [14, 15]) and a defect-specific neural correction [16, 17]:
+[`FrameSampler`](../hydeph/frame_sampler.py) constructs a compact, diverse candidate dataset across four physical regimes:
 
-$$
-\begin{aligned}
-V_{\mathrm{hybrid}}(\mathbf{R}) &= V_{\mathrm{base}}(\mathbf{R}) + \Delta V_{\mathrm{NEP}}(\mathbf{R}) \\
-\mathbf{F}_{\mathrm{hybrid}}(\mathbf{R}) &= \mathbf{F}_{\mathrm{base}}(\mathbf{R}) + \Delta \mathbf{F}_{\mathrm{NEP}}(\mathbf{R})
-\end{aligned}
-$$
-
-The $\Delta$-model is trained on the residuals between DFT and the foundation baseline:
-
-$$
-\Delta V_{\mathrm{target}}(\mathbf{R}_k) = E_{\mathrm{DFT}}(\mathbf{R}_k) - V_{\mathrm{base}}(\mathbf{R}_k), \qquad \Delta \mathbf{F}_{\mathrm{target}}(\mathbf{R}_k) = \mathbf{F}_{\mathrm{DFT}}(\mathbf{R}_k) - \mathbf{F}_{\mathrm{base}}(\mathbf{R}_k)
-$$
-
-Because $V_{\mathrm{base}}$ already captures bulk acoustic phonons and short-range repulsion, learning the smooth residual $\Delta V$ converges with $10\text{--}100\times$ fewer DFT frames than training from scratch [16, 17, 21].
-
----
-
-### Stage 3: Four-Phase Active Frame Sampling
-
-[`FrameSampler`](../hydeph/frame_sampler.py) builds a compact training set across four physical regimes:
-
-1. **Franck-Condon Coordinate Scan**: Linear interpolation along the optical relaxation path [18]:
+1. **Franck-Condon Coordinate Scan**: Linear interpolation and extrapolation along the optical transition path [5, 18]:
 
 $$
 \mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda \Delta \mathbf{R}, \quad \lambda \in [-0.2, 1.2]
 $$
 
-2. **Defect-Core Rattling**: Gaussian displacements applied within $r_{\mathrm{core}} < 6.0\ \text{Å}$ of the defect site to sample local harmonic and anharmonic force constants ($k_2, k_3, k_4$) [19]:
+   The ground-state minimum ($\lambda = 0$, `fc_00`) and excited-state minimum ($\lambda = 1$, `fc_01`) are tagged as **optical anchor frames**.
+
+2. **Defect-Core Rattling**: Two-tier Gaussian displacements applied within $r_{\mathrm{core}} < 6.0\ \text{Å}$ of the defect center to sample local harmonic and anharmonic force constants ($k_2, k_3, k_4$) [19]:
 
 $$
-\mathbf{R}_i' = \mathbf{R}_i + \boldsymbol{\eta}_i, \quad \boldsymbol{\eta}_i \sim \mathcal{N}(0, \sigma_r^2), \quad \sigma_r \in [0.08, 0.14]\ \text{Å}
+\mathbf{R}_i' = \mathbf{R}_i + \boldsymbol{\eta}_i, \quad \boldsymbol{\eta}_i \sim \mathcal{N}(0, \sigma_r^2), \quad \sigma_r \in \{0.08, 0.14\}\ \text{Å}
 $$
 
-3. **Foundation MD + Farthest Point Sampling (FPS)**: An NVT trajectory ($T = 500\ \text{K}$) driven by `nep89`, subsampled via FPS in descriptor space $\mathbf{q}_i$ to maximize phase-space coverage [20]:
+3. **Foundation MD + Incremental Farthest Point Sampling (FPS)**: A finite-temperature NVT trajectory ($T = 500\ \text{K}$) driven by `nep89`, subsampled via FPS in structural descriptor space $\mathbf{q}_i$ to maximize bulk and local phase-space coverage [20]:
 
 $$
 d(i, j) = \Vert \mathbf{q}_i - \mathbf{q}_j \Vert_2
 $$
 
-4. **Interleaved Priority Queue**: Balances frames across Phases 1–3 so tight DFT budgets cover all three manifolds.
+4. **Anchor-Prioritized Interleaved Queue**: Guarantees that the $\lambda = 0$ and $\lambda = 1$ optical anchor frames are selected first, followed by balanced round-robin sampling across Franck-Condon, core-rattle, and MD-FPS manifolds.
 
 ---
 
-### Stage 4: First-Principles DFT Labeling
+### Stage 3: First-Principles GS & $\Delta$SCF Excited-State Labeling
 
-For each sampled frame $\mathbf{R}_k$, [`QERunner`](../hydeph/qe_runner.py) runs Quantum ESPRESSO (`pw.x`) [22] to obtain Kohn-Sham energies and Hellmann-Feynman forces:
+For each selected candidate frame $\mathbf{R}_k$, [`QERunner`](../hydeph/qe_runner.py) drives Quantum ESPRESSO (`pw.x`) [22] at the $\Gamma$-point (`K_POINTS gamma`) to compute Kohn-Sham total energies and Hellmann-Feynman forces:
 
 $$
 \mathbf{F}_{i, \mathrm{DFT}} = -\nabla_i E_{\mathrm{DFT}} = -\langle \Psi \vert \nabla_i \hat{H} \vert \Psi \rangle
 $$
 
-Excited-state geometries and manifolds are modeled via constrained orbital occupations ($\Delta$SCF), which reproduce experimental Stokes shifts and TD-DFT lineshapes for deep defects at ground-state DFT cost [6, 8, 23].
+#### (A) Ground-State Rigor & Cutoff Verification
+- **Fixed Occupations**: Gapped defect supercells default to `occupations = 'fixed'` with explicit integer spin magnetization `tot_magnetization` (and strict spin-parity verification against total valence electron count $N_e$) to prevent artificial metallic smearing across degenerate defect states.
+- **Size-Scaled Convergence & Cutoffs**: The SCF threshold `conv_thr` scales with supercell size ($10^{-10}\ \text{Ry/atom}$) to ensure clean Hellmann-Feynman forces, while UPF pseudopotential headers are automatically inspected for norm-conserving vs. ultrasoft/PAW metadata and recommended plane-wave cutoffs (`ecutwfc`, `ecutrho`).
+- **Hybrid Functionals**: Supports semilocal (PBE) as well as hybrid exchange-correlation functionals (`input_dft = 'HSE06'` or `'PBE0'`, `exx_fraction`, `nqx1..3`) so that $\Delta$-NEP models can be trained directly on hybrid-DFT forces and energetics.
+
+#### (B) Constrained $\Delta$SCF Optical Excited States
+By default (`excited_state_method = "delta_scf"`, `paired_delta_nep = True`), HyDePh labels the optical excited-state manifold using constrained orbital occupations (`occupations = 'from_input'`) [6, 8, 23]:
+1. **Automated In-Gap Orbital Detection**: [`parse_qe_band_gap`](../hydeph/qe_runner.py) inspects the ground-state Kohn-Sham eigenvalues at $\mathbf{R}_{\mathrm{GS}}$ to identify the highest occupied defect orbital ($\mathrm{HOMO}$, band $b_{\mathrm{H}}$) and lowest unoccupied defect orbital ($\mathrm{LUMO}$, band $b_{\mathrm{L}}$) within the active spin channel (`delta_scf_spin_channel`).
+2. **Degenerate LUMO Symmetrization**: For high-symmetry defects where promoting an electron into a degenerate $e$-doublet or $t_2$-triplet LUMO (e.g., the ${}^3E$ excited state of Diamond $\mathrm{NV}^-$ or 4H-SiC $kk$-$\mathrm{VV}^0$) would cause SCF charge sloshing, [`build_delta_scf_occupations`](../hydeph/qe_runner.py) distributes the promoted electron equally across the $g_{\mathrm{L}}$-fold degenerate LUMO manifold ($f_{b_{\mathrm{H}}} = 0$, $f_{b_{\mathrm{L}} + m} = 1/g_{\mathrm{L}}$ for $m = 0, \dots, g_{\mathrm{L}}-1$).
+3. **Exact Adiabatic Energetics**: Evaluating both ground-state and $\Delta$SCF excited-state energies at the $\lambda = 0$ ($\mathbf{R}_{\mathrm{GS}}$) and $\lambda = 1$ ($\mathbf{R}_{\mathrm{ES}}$) anchor frames yields the exact first-principles adiabatic Zero-Phonon Line ($E_{\mathrm{ZPL}}$), vertical absorption ($E_{\mathrm{abs}}$), vertical emission ($E_{\mathrm{em}}$), and asymmetric relaxation energies without empirical parameters:
+
+$$
+\begin{aligned}
+E_{\mathrm{ZPL}} &= E_{\mathrm{DFT,ES}}(\mathbf{R}_{\mathrm{ES}}) - E_{\mathrm{DFT,GS}}(\mathbf{R}_{\mathrm{GS}}) \\
+E_{\mathrm{abs}} &= E_{\mathrm{DFT,ES}}(\mathbf{R}_{\mathrm{GS}}) - E_{\mathrm{DFT,GS}}(\mathbf{R}_{\mathrm{GS}}), \qquad \Delta E_{\mathrm{rel,ES}} = E_{\mathrm{DFT,ES}}(\mathbf{R}_{\mathrm{GS}}) - E_{\mathrm{DFT,ES}}(\mathbf{R}_{\mathrm{ES}}) \\
+E_{\mathrm{em}} &= E_{\mathrm{DFT,ES}}(\mathbf{R}_{\mathrm{ES}}) - E_{\mathrm{DFT,GS}}(\mathbf{R}_{\mathrm{ES}}), \qquad \Delta E_{\mathrm{rel,GS}} = E_{\mathrm{DFT,GS}}(\mathbf{R}_{\mathrm{ES}}) - E_{\mathrm{DFT,GS}}(\mathbf{R}_{\mathrm{GS}}) \\
+\Delta E_{\mathrm{Stokes}} &= E_{\mathrm{abs}} - E_{\mathrm{em}} = \Delta E_{\mathrm{rel,ES}} + \Delta E_{\mathrm{rel,GS}}
+\end{aligned}
+$$
 
 ---
 
-### Stage 5: GPU $\Delta$-NEP Training
+### Stage 4 & 5: Paired $\Delta$-NEP Training & Hybrid Assembly
 
-[`DeltaTrainer`](../hydeph/delta_trainer.py) fits the $\Delta$-NEP model in GPUMD [14, 15]. Atomic environments within cutoff $r_c$ are encoded into Chebyshev radial ($q_n^i$) and Legendre angular ($q_{nl}^i$) descriptors:
+[`DeltaTrainer`](../hydeph/delta_trainer.py) and [`PairedDefectCalculator`](../hydeph/calculator.py) decompose the ground- and excited-state potential energy surfaces $S \in \{\mathrm{GS}, \mathrm{ES}\}$ into the universal foundation baseline (`nep89` [14, 15]), a constant per-atom reference energy offset $\bar{\Delta e}_S$, and a localized neural residual $\Delta V_{\mathrm{NEP}, S}$ [16, 17, 21]:
+
+$$
+\begin{aligned}
+V_{\mathrm{hybrid}, S}(\mathbf{R}) &= V_{\mathrm{base}}(\mathbf{R}) + N_{\mathrm{atoms}} \bar{\Delta e}_S + \Delta V_{\mathrm{NEP}, S}(\mathbf{R}) \\
+\mathbf{F}_{\mathrm{hybrid}, S}(\mathbf{R}) &= \mathbf{F}_{\mathrm{base}}(\mathbf{R}) + \Delta \mathbf{F}_{\mathrm{NEP}, S}(\mathbf{R})
+\end{aligned}
+$$
+
+#### (A) Mean Baseline Energy Offset Subtraction
+Raw pseudopotential DFT total energies differ from foundation potential energies by hundreds of eV per atom. Prior to training (`subtract_mean_energy_offset = True`), HyDePh removes the dataset-mean per-atom energy offset:
+
+$$
+\bar{\Delta e}_S = \frac{1}{N_{\mathrm{frames}}} \sum_{k=1}^{N_{\mathrm{frames}}} \frac{E_{\mathrm{DFT}, S}(\mathbf{R}_k) - V_{\mathrm{base}}(\mathbf{R}_k)}{N_{\mathrm{atoms}}^{(k)}}
+$$
+
+so that GPUMD trains strictly on zero-mean configurational energy fluctuations ($\sim \text{meV/atom}$) and force residuals:
+
+$$
+\Delta V_{\mathrm{target}, S}(\mathbf{R}_k) = E_{\mathrm{DFT}, S}(\mathbf{R}_k) - V_{\mathrm{base}}(\mathbf{R}_k) - N_{\mathrm{atoms}}^{(k)} \bar{\Delta e}_S, \qquad \Delta \mathbf{F}_{\mathrm{target}, S}(\mathbf{R}_k) = \mathbf{F}_{\mathrm{DFT}, S}(\mathbf{R}_k) - \mathbf{F}_{\mathrm{base}}(\mathbf{R}_k)
+$$
+
+The exact offset $\bar{\Delta e}_S$ is stored in `nep_delta_gs.offset` / `nep_delta_es.offset` and automatically restored during potential evaluation, preserving the exact adiabatic separation $E_{\mathrm{ZPL}}$ between the two hybrid surfaces.
+
+#### (B) Descriptor Encoding, SNES Optimization & Quality Gates
+Atomic environments within radial cutoff $r_c^{\mathrm{rad}}$ and angular cutoff $r_c^{\mathrm{ang}}$ are encoded into Chebyshev radial ($q_n^i$) and Legendre angular ($q_{nl}^i$) descriptors [14, 15]:
 
 $$
 q_n^i = \sum_{j \ne i} g_n(r_{ij}), \qquad q_{nl}^i = \sum_{j, k \ne i} g_n(r_{ij}) g_n(r_{ik}) P_l(\cos \theta_{ijk})
 $$
 
-A single-hidden-layer neural network predicts site energy residuals $\Delta E_i(\mathbf{q}^i)$:
+A single-hidden-layer neural network predicts site energy residuals $\Delta E_{i, S}(\mathbf{q}^i)$, and network parameters $\mathbf{w}$ are optimized on GPU via Separable Natural Evolution Strategies (SNES) [14]:
 
 $$
-\Delta E_{\mathrm{NEP}} = \sum_{i=1}^N \Delta E_i(\mathbf{q}^i), \qquad \Delta \mathbf{F}_{i, \mathrm{NEP}} = -\sum_{j} \frac{\partial \Delta E_j}{\partial \mathbf{R}_i}
+\mathcal{L}(\mathbf{w}) = \frac{\lambda_e}{N_{\mathrm{train}}} \sum_{k} \left\vert \frac{\Delta E_{\mathrm{NEP}}^{(k)} - \Delta V_{\mathrm{target}}^{(k)}}{N_{\mathrm{atoms}}^{(k)}} \right\vert^2 + \frac{\lambda_f}{3\sum_k N_{\mathrm{atoms}}^{(k)}} \sum_{k, i} \vert \Delta \mathbf{F}_{\mathrm{NEP}, i}^{(k)} - \Delta \mathbf{F}_{\mathrm{target}, i}^{(k)} \vert^2 + \lambda_{\mathrm{reg}} \Vert \mathbf{w} \Vert_2^2
 $$
 
-Weights $\mathbf{w}$ are optimized via Separable Natural Evolution Strategies (SNES) [14] by minimizing:
-
-$$
-\mathcal{L}(\mathbf{w}) = \frac{\lambda_e}{N_{\mathrm{frames}}} \sum_{k} \vert \Delta E_{\mathrm{NEP}}^{(k)} - \Delta E_{\mathrm{DFT}}^{(k)} \vert^2 + \frac{\lambda_f}{3N_{\mathrm{atoms}}} \sum_{i} \vert \Delta \mathbf{F}_{\mathrm{NEP}}^{(i)} - \Delta \mathbf{F}_{\mathrm{DFT}}^{(i)} \vert^2 + \lambda_{\mathrm{reg}} \Vert \mathbf{w} \Vert_2^2
-$$
+- **Stratified Train/Test Split & Quality Control Gates**: Candidate frames are partitioned by sample type (`franck_condon`, `core_rattle`, `foundation_md_fps`) while keeping anchor frames in the training set. [`evaluate_delta_nep_quality_control`](../hydeph/delta_trainer.py) evaluates energy/force RMSEs on both splits, checks residual forces at $\mathbf{R}_{\mathrm{GS}}$, exports parity plots (`delta_nep_parity.png`) and `delta_nep_qc_report.json`, and enforces configurable quality gates (`max_test_force_rmse_eV_A`, `max_gs_residual_force_eV_A`).
+- **Committee Ensembles**: Setting `nep_committee_size > 1` trains an ensemble of independent $\Delta$-NEP models with distinct random seeds to propagate epistemic uncertainty onto $S$ and optical lineshapes.
 
 ---
 
-### Stage 6: Normal Modes & Electron-Phonon Spectral Density
+### Stage 6A: Normal Modes, Large-Supercell Phonon Embedding & Spectral Density
 
-[`LineshapeEngine`](../hydeph/lineshape.py) computes the finite-difference Hessian around $\mathbf{R}_{\mathrm{GS}}$ and diagonalizes the mass-weighted dynamical matrix:
-
-$$
-H_{i\alpha, j\beta} = \frac{\partial^2 V_{\mathrm{hybrid}}}{\partial R_{i\alpha} \partial R_{j\beta}}, \qquad D_{i\alpha, j\beta} = \frac{H_{i\alpha, j\beta}}{\sqrt{M_i M_j}}, \qquad \sum_{j\beta} D_{i\alpha, j\beta} e_{k, j\beta} = \omega_k^2 e_{k, i\alpha}
-$$
-
-Projecting $\Delta \mathbf{R}$ onto normal mode eigenvectors $\mathbf{e}_k$ yields the mode-resolved displacement $\Delta Q_k$ and partial Huang-Rhys factor $S_k$ [5, 7, 24]:
+[`LineshapeEngine`](../hydeph/lineshape.py) computes the finite-difference Hessian around the ground-state equilibrium geometry and diagonalizes the mass-weighted dynamical matrix:
 
 $$
-\Delta Q_k = \sum_{i=1}^N \sqrt{M_i} \Delta \mathbf{R}_i \cdot \mathbf{e}_{k, i}, \qquad S_k = \frac{\omega_k}{2\hbar} (\Delta Q_k)^2, \qquad S = \sum_k S_k
+H_{i\alpha, j\beta} = \frac{\partial^2 V_{\mathrm{hybrid,GS}}}{\partial R_{i\alpha} \partial R_{j\beta}}, \qquad D_{i\alpha, j\beta} = \frac{H_{i\alpha, j\beta}}{\sqrt{M_i M_j}}, \qquad \sum_{j\beta} D_{i\alpha, j\beta} e_{k, j\beta} = \omega_k^2 e_{k, i\alpha}
 $$
 
-Gaussian smearing of width $\sigma$ bridges the discrete supercell mode spacing to form the continuous spectral density [5]:
+- **Imaginary Mode Guardrails & Localization ($\mathrm{IPR}_k$)**: Any mode with $\omega_k^2 < 0$ is flagged (raising a fail-loud error if imaginary modes exceed `max_imaginary_modes` or `imaginary_freq_tol_meV`). For every mode $k$, HyDePh computes the Inverse Participation Ratio:
+
+$$
+\mathrm{IPR}_k = \sum_{i=1}^N \left( \sum_{\alpha=x,y,z} \vert e_{k, i\alpha} \vert^2 \right)^2
+$$
+
+  which distinguishes localized defect modes ($\mathrm{IPR}_k \sim \mathcal{O}(10^{-1})$) from delocalized bulk phonons ($\mathrm{IPR}_k \sim N^{-1}$), exporting the full table to `normal_modes.csv`.
+
+- **Direct & Large-Supercell Phonon Embedding**:
+  When `phonon_supercell_repeat` is specified, HyDePh embeds the relaxed defect core into an expanded bulk supercell evaluated with the fast hybrid potential [5, 35]. Mode-resolved electron-phonon displacements $\Delta Q_k$ are obtained via either:
+  1. **Direct Displacement Projection** (`phonon_embedding_method = "displacement"`):
+     $$\Delta Q_k = \sum_{i=1}^N \sqrt{M_i} \Delta \mathbf{R}_i \cdot \mathbf{e}_{k, i}$$
+  2. **Alkauskas–Razinkovas Force Projection** (`phonon_embedding_method = "force"` [5, 35]), using the excited-state force $\mathbf{F}_i = -\nabla_i V_{\mathrm{hybrid,GS}}(\mathbf{R}_{\mathrm{ES}})$ mapped onto the phonon supercell:
+     $$\Delta Q_k = \frac{\sum_{i=1}^N M_i^{-1/2} \mathbf{F}_i \cdot \mathbf{e}_{k, i}}{\omega_k^2}$$
+
+The partial Huang-Rhys factor $S_k$ and total Huang-Rhys factor $S$ follow as [5, 7, 24]:
+
+$$
+S_k = \frac{\omega_k}{2\hbar} (\Delta Q_k)^2, \qquad S = \sum_k S_k
+$$
+
+Adaptive Gaussian smearing of width $\sigma(\hbar\omega)$ bridges the discrete supercell mode spacing to form the continuous spectral density $S(\hbar\omega)$, with post-smearing renormalization enforcing the exact sum rule $\int_0^{\infty} S(\hbar\omega) \, d(\hbar\omega) = S$:
 
 $$
 S(\hbar\omega) = \sum_k S_k \frac{1}{\sqrt{2\pi}\sigma} \exp\left[ -\frac{(\hbar\omega - \hbar\omega_k)^2}{2\sigma^2} \right]
@@ -199,97 +237,131 @@ $$
 
 ---
 
-### Stage 7: Quantum Generating Function Lineshape
+### Stage 6B: Quantum Generating Function Lineshape & $\omega^3$ Prefactor
 
-Direct evaluation of multidimensional Franck-Condon overlaps in Fermi's Golden Rule is intractable:
-
-$$
-A(E, T) = \sum_{m, n} p_m(T) \vert \langle \chi_{g, n} \vert \chi_{e, m} \rangle \vert^2 \delta(E_{\mathrm{ZPL}} - m\hbar\omega_m + n\hbar\omega_n - E)
-$$
-
-HyDePh instead Fourier-transforms the time-domain generating function $G(t) = \exp[g(t) - g(0)]$ [5, 25, 26]:
+Rather than summing multidimensional Franck-Condon overlap integrals explicitly in Fermi's Golden Rule, HyDePh Fourier-transforms the time-domain generating function $G(t, T) = \exp[g(t, T) - g(0, T)]$ [5, 25, 26]:
 
 $$
-A(E, T) = \frac{1}{2\pi\hbar} \int_{-\infty}^{\infty} dt \, \exp\left[ \frac{i(E - E_{\mathrm{ZPL}})t}{\hbar} \right] G(t) \exp\left[ -\frac{\gamma(T)\vert t \vert}{\hbar} \right]
+A(\hbar\omega - E_{\mathrm{ZPL}}, T) = \frac{1}{2\pi\hbar} \int_{-\infty}^{\infty} dt \, \exp\left[ \frac{i(\hbar\omega - E_{\mathrm{ZPL}})t}{\hbar} \right] G(t, T) \exp\left[ -\frac{\gamma(T)\vert t \vert}{\hbar} \right]
 $$
 
-where the phase function $g(t)$ integrates over the Bose-Einstein occupation $\bar{n}(\hbar\omega, T) = [\exp(\hbar\omega / k_B T) - 1]^{-1}$:
+where the cumulant phase function $g(t, T)$ integrates over the Bose-Einstein thermal occupation $\bar{n}(\hbar\omega, T) = [\exp(\hbar\omega / k_B T) - 1]^{-1}$:
 
 $$
-g(t) = \int_0^{\infty} d(\hbar\omega) \, S(\hbar\omega) \left[ (\bar{n}(\hbar\omega, T) + 1) e^{-i\omega t} + \bar{n}(\hbar\omega, T) e^{i\omega t} \right]
+g(t, T) = \int_0^{\infty} d(\hbar\omega') \, S(\hbar\omega') \left[ (\bar{n}(\hbar\omega', T) + 1) e^{-i\omega' t} + \bar{n}(\hbar\omega', T) e^{i\omega' t} \right]
 $$
 
-The Debye-Waller factor (ZPL weight) is $\mathrm{DWF}(T) = \exp[-g(0)]$, and $\gamma(T) = \gamma_0 + \alpha T^2$ accounts for acoustic phonon dephasing [6].
+- **Finite-Temperature Debye-Waller Factor**: The zero-phonon line (ZPL) optical weight is evaluated at each temperature $T$ as:
+
+$$
+\mathrm{DWF}(T) = \exp[-g(0, T)] = \exp\left( -\sum_k S_k \left[ 2\bar{n}(\hbar\omega_k, T) + 1 \right] \right)
+$$
+
+- **Homogeneous Acoustic Dephasing**: $\gamma(T) = \gamma_0 + \alpha_{\mathrm{deph}} T^2$ accounts for two-phonon Raman acoustic scattering at the defect site [6, 34], controlled by `dephasing_gamma_meV` ($\gamma_0$) and `dephasing_temperature_coefficient` ($\alpha_{\mathrm{deph}}$, default $5.5\times 10^{-5}\ \text{meV/K}^2$).
+- **Spontaneous Emission $(\hbar\omega)^3$ Prefactor**: On the absolute photon energy axis $\hbar\omega = E_{\mathrm{ZPL}} + \Delta E$, the macroscopic photoluminescence emission spectrum incorporates the Einstein spontaneous emission density-of-states prefactor [5, 6]:
+
+$$
+I_{\mathrm{PL}}(\hbar\omega, T) = \mathcal{N} \, (\hbar\omega)^3 A(\hbar\omega - E_{\mathrm{ZPL}}, T)
+$$
+
+where $\mathcal{N}$ normalizes the integrated photon flux to unity.
 
 ---
 
-### Stage 8: Finite-Temperature Anharmonic Dynamics & Dual Regimes
+### Stage 6C: Paired Cumulant Anharmonic NVE Dynamics
 
-Harmonic theory assumes static $0\ \text{K}$ parabolic potentials, missing thermal expansion and repulsive-wall stiffening ($V \sim k_3 Q^3 + k_4 Q^4$) in soft hosts [10–13]. Conversely, applying classical MD energy-gap convolution to stiff covalent hosts washes out quantized vibronic sidebands. HyDePh addresses both limits via optical-coordinate projection and coupling-regime branching.
+Static $0\ \text{K}$ harmonic theory assumes identical parabolic ground- and excited-state curvatures, missing thermal lattice expansion, cubic/quartic anharmonic wall stiffening ($V \sim k_3 Q^3 + k_4 Q^4$), and quadratic electron-phonon coupling ($\Delta V \sim \frac{1}{2} \Delta K Q^2$) [10–13]. Conversely, running thermostat-driven Langevin dynamics during spectral acquisition introduces artificial friction broadening, while naive classical energy-gap histograms wash out quantized vibronic sidebands in stiff hosts.
 
-#### (A) Mass-Weighted Optical Projection
-Unprojected velocity autocorrelation functions (VACF) are dominated by delocalized bulk phonons with $S_k \approx 0$ [27]. HyDePh isolates optically coupled vibrations by projecting atomic velocities onto the normalized mass-weighted Franck-Condon unit vector:
+Following the time-dependent cumulant formalism of Mukamel [10] and Linderälv, Erhart *et al.* (*npj Comput. Mater.* **11**, 101, 2025) [33], HyDePh implements a **unified, parameter-free microcanonical cumulant generating function** that accurately spans both stiff covalent crystals and soft ionic hosts:
 
-$$
-\mathbf{u}_{\mathrm{opt}, i} = \frac{M_i \Delta \mathbf{R}_i}{\sqrt{\sum_j M_j \vert \Delta \mathbf{R}_j \vert^2}}, \qquad v_{\mathrm{opt}}(t) = \sum_{i=1}^N \mathbf{v}_i(t) \cdot \mathbf{u}_{\mathrm{opt}, i}
-$$
+#### (A) NVT Thermalization $\to$ Multi-Trajectory NVE Production
+For each target temperature $T$:
+1. **Stochastic Langevin Equilibration**: The defect supercell is initialized at $\mathbf{R}_{\mathrm{GS}}$ with Maxwell-Boltzmann velocities and equilibrated under a Langevin thermostat (`anharmonic_equil_steps`) to sample the exact canonical configurational distribution $P(\mathbf{R}) \propto \exp[-V_{\mathrm{hybrid,GS}}(\mathbf{R})/k_B T]$ without KAM invariant-tori trapping [28, 29].
+2. **Unperturbed NVE Production Ensemble**: The thermostat is detached and $N_{\mathrm{traj}}$ independent **microcanonical (NVE) Velocity-Verlet trajectories** (`anharmonic_n_trajectories`, `anharmonic_md_steps`) are propagated on $V_{\mathrm{hybrid,GS}}(\mathbf{R})$, guaranteeing strictly conservative Hamiltonian phase-space evolution free of thermostat friction.
 
-Windowing the autocorrelation $C_{\mathrm{opt}}(t) = \langle v_{\mathrm{opt}}(t) v_{\mathrm{opt}}(0) \rangle / \langle |v_{\mathrm{opt}}(0)|^2 \rangle$ with a Hann filter $W_{\mathrm{Hann}}(t)$ gives the optically active vibrational density of states and thermal mode-softening ratio:
-
-$$
-g_{\mathrm{opt}}(\hbar\omega, T) = \int_0^{\infty} dt \, C_{\mathrm{opt}}(t) W_{\mathrm{Hann}}(t) \cos(\omega t), \qquad \alpha_{\mathrm{soft}}(T) = \frac{\Omega(T)}{\Omega_0}
-$$
-
-where $\Omega(T)$ and $\Omega_0$ are the finite-$T$ and $0\ \mathrm{K}$ effective frequencies.
-
-#### (B) Dual Coupling Regimes ($S < 10$ vs. $S \ge 10$)
-1. **Quantum Regime ($S < 10$; e.g., Diamond $\mathrm{NV}^-$, 4H-SiC divacancy, LiCl F-center)**:
-   Lineshapes are evaluated via the quantum generating function using the thermally softened spectral density and anharmonic collision damping:
+#### (B) Paired Energy-Gap Fluctuation & Autocorrelation Function
+At each NVE timestep $t_m$, both the ground-state and excited-state hybrid potentials are evaluated to obtain the instantaneous vertical transition energy gap $\Delta U(t)$ and its thermal fluctuation $\delta\Delta U(t)$ [10, 33]:
 
 $$
-S_{\mathrm{anh}}(\hbar\omega, T) = \frac{1}{\alpha_{\mathrm{soft}}(T)} S\left( \frac{\hbar\omega}{\alpha_{\mathrm{soft}}(T)} \right), \qquad \gamma_{\mathrm{total}}(T) = \gamma_{\mathrm{base}}(T) + 0.3 \sqrt{\frac{T}{10}}\ \mathrm{meV}
+\Delta U(t) = V_{\mathrm{hybrid,ES}}(\mathbf{R}(t)) - V_{\mathrm{hybrid,GS}}(\mathbf{R}(t)), \qquad \delta\Delta U(t) = \Delta U(t) - \langle \Delta U \rangle_T
 $$
 
-2. **Semiclassical Marcus Regime ($S \ge 10$; e.g., LiF F-center, $S = 23.93$)**:
-   When $\mathrm{DWF} = e^{-S} \approx 0$, HyDePh samples the vertical energy gap $\Delta U(t) = V_{\mathrm{ES}}(\mathbf{R}(t)) - V_{\mathrm{GS}}(\mathbf{R}(t))$ during MD and convolves the $0\ \text{K}$ spectrum with the thermal fluctuation distribution $P_{\mathrm{anh}}(\Delta U, T)$ of variance $\sigma_{\Delta U}^2(T)$ [10, 18]:
+*(If only a single ground-state potential is provided, HyDePh falls back to the linear force-displacement projection $\delta\Delta U(t) \approx -\mathbf{F}_{\mathrm{FC}} \cdot \delta\mathbf{R}(t)$).*
+
+The classical energy-gap autocorrelation function (ACF) is ensemble-averaged across all $N_{\mathrm{traj}}$ trajectories using FFT-accelerated cross-correlation:
 
 $$
-A_{\mathrm{anh}}(E, T) = \int d(\Delta U) \, P_{\mathrm{anh}}(\Delta U, T) \, A_{\mathrm{quant}}(E - \Delta U, T=0)
+C_{\Delta U}(t) = \frac{1}{N_{\mathrm{traj}}} \sum_{r=1}^{N_{\mathrm{traj}}} \langle \delta\Delta U^{(r)}(t + t_0) \, \delta\Delta U^{(r)}(t_0) \rangle_{t_0}
 $$
 
-#### (C) Justification of the Langevin Thermostat
-The Langevin equation $M_i \ddot{\mathbf{R}}_i = -\nabla_i V(\mathbf{R}) - \gamma_{\mathrm{lang}} M_i \dot{\mathbf{R}}_i + \mathbf{\Xi}_i(t)$ is suited to defect spectroscopy for four reasons:
-- **Exact configurational marginals**: Integrating momenta out of the stationary Fokker-Planck density yields the exact Boltzmann distribution $P(\mathbf{R}) = Z_R^{-1} \exp[-V(\mathbf{R})/k_B T]$, giving unbiased cumulants $\langle \Delta U \rangle_T$ and $\sigma_{\Delta U}^2(T)$ [10, 25].
-- **Ergodicity**: Deterministic thermostats (e.g., Nosé-Hoover) suffer from KAM invariant-tori trapping in quasi-harmonic defect cavities at low $T$, whereas stochastic white noise $\mathbf{\Xi}_i(t)$ mixes vibrational phases within $2\text{--}5\ \text{ps}$ [29].
-- **Open-bath physics**: Projecting bulk lattice phonon degrees of freedom out of the crystal Hamiltonian via the Mori-Zwanzig / Caldeira-Leggett formalism yields the Generalized Langevin Equation, which reduces to standard Langevin dynamics in the Markovian wide-band limit [28, 30, 31].
-- **Unperturbed VDOS**: With weak damping $\tau_{\mathrm{lang}} = \gamma_{\mathrm{lang}}^{-1} \ge 100\ \text{fs}$ ($\gamma_{\mathrm{lang}}/\omega_0 \le 0.05$), the oscillator frequency shift is $|\Delta\omega|/\omega_0 \approx \gamma_{\mathrm{lang}}^2 / (8\omega_0^2) < 0.03\%$ ($< 0.006\ \text{meV}$ at $20\ \text{meV}$), leaving physical mode softening $\alpha_{\mathrm{soft}}(T)$ intact.
+#### (C) Linderälv Gaussian Window, Quantum Correction & Low-T Anchor
+Finite-length NVE trajectories exhibit statistical tail noise in $C_{\Delta U}(t)$ at long lag times $t$, which produces unphysical high-frequency oscillations ("spiky" sidebands) if transformed with a raw rectangular cutoff. Following Linderälv *et al.* [33], HyDePh applies a physical Gaussian damping window in the time domain controlled by `anharmonic_acf_damping_meV` ($\gamma_{\mathrm{acf}}$, default $2.0\ \text{meV}$):
+
+$$
+W_{\mathrm{Gauss}}(t) = \exp\left[ -\frac{1}{2} \left( \frac{\gamma_{\mathrm{acf}} t}{\hbar} \right)^2 \right]
+$$
+
+Because $W_{\mathrm{Gauss}}(t) > 0$ everywhere and its Fourier transform is strictly positive, it provides uniform Gaussian spectral resolution without Gibbs ringing or negative spectral density artifacts.
+
+Transforming the windowed ACF yields the classical energy-gap fluctuation power spectrum $J_{\mathrm{cl}}(\omega)$:
+
+$$
+J_{\mathrm{cl}}(\omega) = \int_0^{\infty} dt \, C_{\Delta U}(t) \, W_{\mathrm{Gauss}}(t) \cos(\omega t)
+$$
+
+Because classical MD obeys classical equipartition ($\langle E_k \rangle = k_B T$) rather than Bose-Einstein statistics, the classical spectrum is rescaled by the symmetric harmonic quantum correction factor $\mathcal{Q}(\hbar\omega, T)$ [10, 33]:
+
+$$
+\mathcal{Q}(\hbar\omega, T) = \frac{\hbar\omega / k_B T}{2\tanh(\hbar\omega / 2 k_B T)} \xrightarrow{k_B T \ll \hbar\omega} \frac{\hbar\omega}{2 k_B T}
+$$
+
+Converting the energy-gap fluctuation spectrum into the effective Huang-Rhys spectral density and applying acoustic mode filtering $f_{\mathrm{ac}}(\omega) = 1 - \exp[-(\omega / \omega_{\mathrm{cut}})^4]$ yields:
+
+$$
+S_{\mathrm{MD}}(\hbar\omega, T) = \frac{J_{\mathrm{cl}}(\omega) \, \mathcal{Q}(\hbar\omega, T) \, f_{\mathrm{ac}}(\omega)}{(\hbar\omega)^2}
+$$
+
+- **Sum-Rule Normalization**: When `normalize_anharmonic_s = True` (default), the integrated intensity is normalized to the Franck-Condon Huang-Rhys factor $\int_0^{\infty} S_{\mathrm{MD}}(\hbar\omega, T) \, d(\hbar\omega) = S$, eliminating stochastic single-trajectory amplitude variance across temperatures while preserving all physical mode shifts $\Delta\omega_{\mathrm{anh}}(T)$, lifetime broadening, and thermal renormalization.
+- **Low-Temperature Quantum Anchor**: Below $\sim 50\ \text{K}$, classical trajectories lack quantum zero-point fluctuations ($k_B T \ll \hbar\omega_0$). HyDePh smoothly anchors $S_{\mathrm{anh}}(\hbar\omega, T) = (1 - w_{\mathrm{MD}}) S_{\mathrm{harm}}(\hbar\omega) + w_{\mathrm{MD}} S_{\mathrm{MD}}(\hbar\omega, T)$ with $w_{\mathrm{MD}} = \mathrm{clip}(T / 77\ \text{K}, 0, 1)$, recovering the exact harmonic normal-mode spectrum as $T \to 0$ and transitioning seamlessly to full MD cumulant dynamics at finite temperatures.
+
+#### (D) Unified Cumulant Generating Function Across All Coupling Regimes
+Substituting $S_{\mathrm{anh}}(\hbar\omega, T)$ directly into the second-order cumulant phase integral:
+
+$$
+g_{\mathrm{anh}}(t, T) = \int_0^{\infty} d(\hbar\omega) \, S_{\mathrm{anh}}(\hbar\omega, T) \left[ (\bar{n}(\hbar\omega, T) + 1) e^{-i\omega t} + \bar{n}(\hbar\omega, T) e^{i\omega t} \right]
+$$
+
+naturally unifies weak, intermediate, and strong electron-phonon coupling without empirical regime switching:
+- **Weak/Intermediate Coupling ($S < 10$; Diamond $\mathrm{NV}^-$, 4H-SiC $kk$-$\mathrm{VV}^0$)**: Preserves the quantized Bose-Einstein multi-phonon sideband progression and sharp room-temperature ZPL peak ($\mathrm{DWF}(T) = \exp[-g_{\mathrm{anh}}(0, T)]$), while incorporating anharmonic mode shifts and thermal broadening [33, 34].
+- **Strong Coupling / Marcus Limit ($S \ge 10$; NaCl and LiF F-centers)**: When $S \gg 1$, $\mathrm{DWF}(T) \to 0$ and the short-time stationary-phase expansion of $\exp[g_{\mathrm{anh}}(t, T) - g_{\mathrm{anh}}(0, T)]$ automatically converges to the broadened semiclassical Marcus Gaussian/skewed envelope of variance $\sigma_{\Delta U}^2(T) = \int d(\hbar\omega) \, (\hbar\omega)^2 S_{\mathrm{anh}}(\hbar\omega, T) (2\bar{n} + 1)$ [10, 18].
 
 ---
 
-### Stage 9: 1D Configuration Coordinate & Stokes Shift Analysis
+### Stage 6D: Paired 1D Configuration Coordinate & Asymmetric Stokes Shift
 
-[`ConfigurationCoordinateEngine`](../hydeph/cc_diagram.py) projects the nuclear potential energy surfaces onto the 1D mass-weighted coordinate $Q = \lambda \Delta Q$ along $\mathbf{R}(\lambda)$ [5, 6, 8, 32]:
-
-$$
-E_{\mathrm{GS}}(\lambda) = V_{\mathrm{hybrid}}(\mathbf{R}(\lambda)) - V_{\mathrm{hybrid}}(\mathbf{R}_{\mathrm{GS}}), \qquad \Delta E_{\mathrm{rel,GS}} = E_{\mathrm{GS}}(\lambda = 1)
-$$
-
-In the equal-curvature Franck-Condon model ($\Delta E_{\mathrm{rel,ES}} = \Delta E_{\mathrm{rel,GS}}$), the excited-state surface with minimum $E_{\mathrm{ZPL}}$ at $Q = \Delta Q$ is:
+[`ConfigurationCoordinateEngine`](../hydeph/cc_diagram.py) projects the paired hybrid potential energy surfaces onto the 1D mass-weighted configuration coordinate $Q = \lambda \Delta Q$ along $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda \Delta \mathbf{R}$ [5, 6, 8, 32]:
 
 $$
-E_{\mathrm{ES}}(Q) = E_{\mathrm{ZPL}} + \Delta E_{\mathrm{rel,ES}} (1 - \lambda)^2
+\begin{aligned}
+E_{\mathrm{GS}}(Q) &= V_{\mathrm{hybrid,GS}}(\mathbf{R}(\lambda)) - V_{\mathrm{hybrid,GS}}(\mathbf{R}_{\mathrm{GS}}) \\
+E_{\mathrm{ES}}(Q) &= E_{\mathrm{ZPL}} + V_{\mathrm{hybrid,ES}}(\mathbf{R}(\lambda)) - V_{\mathrm{hybrid,ES}}(\mathbf{R}_{\mathrm{ES}})
+\end{aligned}
 $$
 
-Vertical transitions yield the absorption energy, emission energy, and Stokes shift:
+Unlike equal-curvature models that assume $\Delta E_{\mathrm{rel,ES}} = \Delta E_{\mathrm{rel,GS}}$, evaluating both $\Delta V_{\mathrm{NEP,GS}}$ and $\Delta V_{\mathrm{NEP,ES}}$ along $\mathbf{R}(\lambda)$ directly resolves excited-state lattice softening or stiffening ($\hbar\Omega_{\mathrm{ES}} \ne \hbar\Omega_{\mathrm{GS}}$):
 
 $$
-E_{\mathrm{abs}} = E_{\mathrm{ZPL}} + \Delta E_{\mathrm{rel,ES}}, \qquad E_{\mathrm{em}} = E_{\mathrm{ZPL}} - \Delta E_{\mathrm{rel,GS}}, \qquad \Delta E_{\mathrm{Stokes}} = E_{\mathrm{abs}} - E_{\mathrm{em}} = 2 \Delta E_{\mathrm{rel,GS}}
+\Delta E_{\mathrm{rel,GS}} = E_{\mathrm{GS}}(Q = \Delta Q), \qquad \Delta E_{\mathrm{rel,ES}} = E_{\mathrm{ES}}(Q = 0) - E_{\mathrm{ZPL}}
 $$
 
-From the harmonic curvature $K = 2 \Delta E_{\mathrm{rel,GS}} / (\Delta Q)^2$, the effective phonon energy and 1D Huang-Rhys factor are:
+$$
+E_{\mathrm{abs}} = E_{\mathrm{ZPL}} + \Delta E_{\mathrm{rel,ES}}, \qquad E_{\mathrm{em}} = E_{\mathrm{ZPL}} - \Delta E_{\mathrm{rel,GS}}, \qquad \Delta E_{\mathrm{Stokes}} = E_{\mathrm{abs}} - E_{\mathrm{em}} = \Delta E_{\mathrm{rel,ES}} + \Delta E_{\mathrm{rel,GS}}
+$$
+
+From the state-specific harmonic curvatures $K_{S} = 2 \Delta E_{\mathrm{rel}, S} / (\Delta Q)^2$, the effective 1D phonon frequencies and Huang-Rhys factors are:
 
 $$
-\hbar\Omega \text{ (meV)} = 91.4348 \frac{\sqrt{\Delta E_{\mathrm{rel,GS}} \text{ (eV)}}}{\Delta Q \text{ (amu}^{1/2}\text{Å)}}, \qquad S_{\mathrm{1D}} = \frac{\Delta E_{\mathrm{rel,GS}}}{\hbar\Omega}
+\hbar\Omega_{S} \text{ (meV)} = 91.4348 \frac{\sqrt{\Delta E_{\mathrm{rel}, S} \text{ (eV)}}}{\Delta Q \text{ (amu}^{1/2}\text{Å)}}, \qquad S_{\mathrm{1D}, S} = \frac{\Delta E_{\mathrm{rel}, S}}{\hbar\Omega_{S}}
 $$
 
 <p align="center">
@@ -304,15 +376,16 @@ $$
   <img src="../assets/hydeph_stiff_vs_soft_benchmark.png" width="96%" alt="HyDePh Stiff vs Soft Benchmark">
 </p>
 
-- **Stiff covalent hosts (Diamond $\mathrm{NV}^-$, 4H-SiC $kk$-$\mathrm{VV}^0$)**: High Debye temperatures ($\Theta_D \approx 1200\text{--}2200\ \mathrm{K}$) mean $\hbar\omega \gg k_B T$ up to $300\ \mathrm{K}$. Classical MD equipartition ($\sigma_{\Delta U} \sim \sqrt{2 k_B T E_{\mathrm{rel}}}$) smears the spectrum into a Gaussian dome; the quantum generating function is required to resolve the sharp ZPL and discrete multi-phonon sidebands.
-- **Soft ionic hosts (LiCl and LiF F-centers)**: Low Debye temperatures ($\Theta_D \approx 420\text{--}730\ \mathrm{K}$) and large displacements ($\Delta Q = 1.63\text{--}2.39\ \mathrm{amu}^{1/2}\text{Å}$) drive cations into steep anharmonic walls. In LiCl at $77\ \mathrm{K}$, static harmonic theory predicts a $78\ \mathrm{meV}$ FWHM ($5.9\times$ narrower than the $460\ \mathrm{meV}$ experiment [13]), whereas anharmonic MD captures mode softening ($27.8 \to 19.8\ \mathrm{meV}$ vs. $19.7\ \mathrm{meV}$ exp.) and broadens the band $3.4\times$ to $265\ \mathrm{meV}$.
+- **Stiff covalent hosts (Diamond $\mathrm{NV}^-$, 4H-SiC $kk$-$\mathrm{VV}^0$)**: High Debye temperatures ($\Theta_D \approx 1200\text{--}2200\ \mathrm{K}$) mean $\hbar\omega \gg k_B T$ up to $300\ \mathrm{K}$. The paired NVE cumulant generating function with Linderälv Gaussian windowing ($\gamma_{\mathrm{acf}} = 2.0\ \mathrm{meV}$) and physical quadratic Raman dephasing ($\alpha_{\mathrm{deph}} = 5.5\times 10^{-5}\ \mathrm{meV/K}^2$) resolves both the discrete $64.6\ \mathrm{meV}$ quasi-local vibronic progression and the persistent room-temperature ZPL spike observed experimentally by Carbery *et al.* (2024) [33, 34].
+- **Soft ionic hosts (NaCl, LiCl, and LiF F-centers)**: Low Debye temperatures ($\Theta_D \approx 320\text{--}730\ \mathrm{K}$) and large Franck-Condon displacements ($\Delta Q = 1.63\text{--}2.39\ \mathrm{amu}^{1/2}\text{Å}$) place these centers in the strong electron-phonon coupling regime ($S \approx 4\text{--}24$). In NaCl ($S = 11.58$, $\Delta Q = 2.22\ \mathrm{amu}^{1/2}\text{Å}$), the ZPL is exponentially suppressed ($\mathrm{DWF} = 9.4\times 10^{-6}$ at $0\ \mathrm{K}$) and the cumulant generating function smoothly broadens the multi-phonon emission envelope from $\mathrm{FWHM} = 163.8\ \mathrm{meV}$ ($10\ \mathrm{K}$) to $263.1\ \mathrm{meV}$ ($300\ \mathrm{K}$). In LiCl ($S = 4.00$), anharmonic MD captures thermal mode softening ($27.8 \to 19.8\ \mathrm{meV}$ vs. $19.7\ \mathrm{meV}$ exp. [13]).
 
-| System | Host ($\Theta_D$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | Regime | Key Result |
-|---|---|---|---|---|---|
-| **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3.166$ | $0.627$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 4.22\%$), resolved sidebands at $-65, -135, -205\ \mathrm{meV}$ |
-| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $4.766$ | $0.812$ | Quantum ($S < 10$) | Sharp ZPL ($\mathrm{DWF} = 0.85\%$), sidebands at $-38, -76\ \mathrm{meV}$; $\mathbf{u}_{\mathrm{opt}}$ removes $100\ \mathrm{meV}$ bulk artifact |
-| **LiCl F-Center** | Rocksalt ($420\ \mathrm{K}$) | $3.999$ | $1.632$ | Quantum ($S < 10$) | Mode softens $27.8 \to 19.8\ \mathrm{meV}$ ($19.7\ \mathrm{meV}$ exp.); $3.4\times$ anharmonic broadening ($265\ \mathrm{meV}$) |
-| **LiF F-Center** | Fluorite ($730\ \mathrm{K}$) | $23.930$ | $2.391$ | Marcus ($S \ge 10$) | ZPL suppressed ($\mathrm{DWF} \approx 0$); broad Gaussian band ($\mathrm{FWHM} = 490\text{--}1101\ \mathrm{meV}$) |
+| System | Host ($\Theta_D$) | Supercell ($N_{\mathrm{atoms}}$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | Adiabatic $E_{\mathrm{ZPL}}$ | Key Spectroscopic Result |
+|---|---|---|---|---|---|---|
+| **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3\times 3\times 3$ ($215$) | $2.91$ | $0.562$ | $1.716\ \mathrm{eV}$ | Sharp ZPL ($\mathrm{DWF}_0 = 5.46\%$) visible up to $300\ \mathrm{K}$; $64.6\ \mathrm{meV}$ $a_1$ resonance & smooth sideband wing |
+| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $3\times 3\times 2$ ($142$) | $4.77$ | $0.812$ | $1.10\ \mathrm{eV}$ | Sharp ZPL ($\mathrm{DWF}_0 = 0.85\%$), resolved sidebands at $-38, -76\ \mathrm{meV}$ across basal/$c$-axis modes |
+| **LiCl F-Center** | Rocksalt ($420\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $4.00$ | $1.632$ | $2.15\ \mathrm{eV}$ | Mode softens $27.8 \to 19.8\ \mathrm{meV}$ ($19.7\ \mathrm{meV}$ exp. [13]); anharmonic broadening to $265\ \mathrm{meV}$ |
+| **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $11.58$ | $2.220$ | $1.274\ \mathrm{eV}$ | Strong coupling ($\Delta E_{\mathrm{Stokes}} = 0.671\ \mathrm{eV}$); smooth FWHM broadening $163.8 \to 263.1\ \mathrm{meV}$ ($10\text{--}300\ \mathrm{K}$) |
+| **LiF F-Center** | Rocksalt ($730\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $23.93$ | $2.391$ | $3.42\ \mathrm{eV}$ | Deep Marcus regime ($\mathrm{DWF} \approx 0$); broad Gaussian band ($\mathrm{FWHM} = 490\text{--}1101\ \mathrm{meV}$) |
 
 ---
 
@@ -350,3 +423,6 @@ $$
 30. **A. O. Caldeira and A. J. Leggett**, *"Path integral approach to degree of freedom in a dissipative quantum system"*, *Ann. Phys.* **149**, 374–456 (1983). [DOI: 10.1016/0003-4916(83)90202-6](https://doi.org/10.1016/0003-4916(83)90202-6)
 31. **H. Mori**, *"Transport, collective motion, and Brownian motion"*, *Prog. Theor. Phys.* **33**, 423–455 (1965). [DOI: 10.1143/PTP.33.423](https://doi.org/10.1143/PTP.33.423)
 32. **A. Gali**, *"Ab initio theory of point defects as single photon emitters in wide band gap semiconductors"*, *Nanophotonics* **12**, 589–609 (2023). [DOI: 10.1515/nanoph-2022-0599](https://doi.org/10.1515/nanoph-2022-0599)
+33. **C. Linderälv, N. Österbacka, J. Wiktor, and P. Erhart**, *"Optical line shapes of color centers in solids from classical autocorrelation functions"*, *npj Comput. Mater.* **11**, 101 (2025). [DOI: 10.1038/s41524-025-01565-x](https://doi.org/10.1038/s41524-025-01565-x)
+34. **W. P. Carbery, C. A. Farfan, R. Ulbricht, and D. B. Turner**, *"The phonon-modulated Jahn–Teller distortion of the nitrogen vacancy center in diamond"*, *Nat. Commun.* **15**, 8901 (2024). [DOI: 10.1038/s41467-024-52712-9](https://doi.org/10.1038/s41467-024-52712-9)
+35. **L. Razinkovas, M. W. Doherty, N. B. Manson, C. G. Van de Walle, and A. Alkauskas**, *"Vibrational and vibronic structure of isolated point defects: The nitrogen-vacancy center in diamond"*, *Phys. Rev. B* **104**, 045303 (2021). [DOI: 10.1103/PhysRevB.104.045303](https://doi.org/10.1103/PhysRevB.104.045303)
