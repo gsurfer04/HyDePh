@@ -139,8 +139,7 @@ class ToolkitConfig:
         Explicit 0-based atom index in the supercell for defect creation.
     allow_fallbacks : bool
         If False (default), raises an immediate RuntimeError upon DFT relaxation failure or
-        unresolvable ZPL instead of silently substituting heuristic displacements or default values.
-        If True, permits heuristic fallbacks with prominent warnings.
+        unresolvable ZPL. If True, permits heuristic recovery with prominent warnings.
     supercell_repeat : tuple of int
         Supercell expansion multipliers (nx, ny, nz). Default is (2, 2, 2).
         For stiff covalent hosts (e.g. Diamond, SiC), (3, 3, 3) or >= 140-200 atoms

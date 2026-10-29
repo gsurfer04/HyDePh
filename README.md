@@ -192,7 +192,7 @@ summary = run_pipeline(config)
 | `pseudopotentials` | `dict` | `None` | Element-to-pseudopotential filename map (auto-discovered if omitted). |
 | `pseudo_dir` | `str` | `None` | Directory containing Quantum ESPRESSO UPF pseudopotential files. |
 | `workspace_dir` | `str` | `"./hydeph_run"` | Workspace directory for outputs, caches, and scratch files. |
-| `allow_fallbacks` | `bool` | `False` | Fail-closed guardrail: raises `RuntimeError` immediately upon DFT failure rather than substituting unrelaxed geometries. |
+| `allow_fallbacks` | `bool` | `False` | When `False` (default), raises `RuntimeError` immediately upon DFT failure. |
 
 ### Electronic Structure & Geometry
 

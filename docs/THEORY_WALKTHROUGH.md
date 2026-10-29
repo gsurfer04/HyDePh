@@ -88,13 +88,13 @@ where $L$ is the supercell dimension and $\alpha_{\mathrm{el}}$ is the elastic d
 - **Compact covalent crystals** ($a \approx 3.5\text{--}4.5\ \text{Å}$): `(3, 3, 3)` for diamond ($215$ atoms, $L = 10.72\ \text{Å}$) or `(3, 3, 2)` for 4H-SiC ($142$ atoms, $L \approx 9.2\text{--}10.1\ \text{Å}$).
 - **Large-lattice ionic crystals** ($a > 5.5\ \text{Å}$): `(2, 2, 2)` for rocksalt alkali halides such as NaCl or LiCl ($63$ atoms, $L = 11.38\ \text{Å}$).
 
-[`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around the defect cell, locates the defect site via minimum-image coordinate matching (without assuming fixed atom ordering), and obtains the relaxed Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) geometries. Using minimum-image displacements $\Delta \mathbf{R}_{\mathrm{MIC}}$, these define the Franck-Condon displacement vector and total mass-weighted configurational displacement [5]:
+[`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around the defect cell, locates the defect site via minimum-image coordinate matching, and optimizes the Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) equilibrium geometries. Using minimum-image displacements $\Delta \mathbf{R}_{\mathrm{MIC}}$, these define the Franck-Condon displacement vector and total mass-weighted configurational displacement [5]:
 
 $$
 \Delta \mathbf{R}_i = \mathrm{MIC}(\mathbf{R}_{\mathrm{ES}, i} - \mathbf{R}_{\mathrm{GS}, i}), \qquad \Delta Q = \sqrt{\sum_{i=1}^N M_i \vert \Delta \mathbf{R}_i \vert^2}
 $$
 
-where $M_i$ is the atomic mass of site $i$. By default (`allow_fallbacks = False`), any failure in requested DFT geometry optimization raises an immediate error rather than silently substituting an unrelaxed structure, and every structural origin is recorded in `provenance.json`.
+where $M_i$ is the atomic mass of site $i$. When `allow_fallbacks = False` (default), DFT optimization failures raise an immediate `RuntimeError`, and structural origins are recorded in `provenance.json`.
 
 ---
 
@@ -239,7 +239,7 @@ $$
 
 ### Stage 6B: Quantum Generating Function Lineshape & $\omega^3$ Prefactor
 
-Rather than summing multidimensional Franck-Condon overlap integrals explicitly in Fermi's Golden Rule, HyDePh Fourier-transforms the time-domain generating function $G(t, T) = \exp[g(t, T) - g(0, T)]$ [5, 25, 26]:
+HyDePh evaluates optical lineshapes by Fourier-transforming the time-domain generating function $G(t, T) = \exp[g(t, T) - g(0, T)]$ [5, 25, 26]:
 
 $$
 A(\hbar\omega - E_{\mathrm{ZPL}}, T) = \frac{1}{2\pi\hbar} \int_{-\infty}^{\infty} dt \, \exp\left[ \frac{i(\hbar\omega - E_{\mathrm{ZPL}})t}{\hbar} \right] G(t, T) \exp\left[ -\frac{\gamma(T)\vert t \vert}{\hbar} \right]
@@ -270,9 +270,9 @@ where $\mathcal{N}$ normalizes the integrated photon flux to unity.
 
 ### Stage 6C: Paired Cumulant Anharmonic NVE Dynamics
 
-Static $0\ \text{K}$ harmonic theory assumes identical parabolic ground- and excited-state curvatures, missing thermal lattice expansion, cubic/quartic anharmonic wall stiffening ($V \sim k_3 Q^3 + k_4 Q^4$), and quadratic electron-phonon coupling ($\Delta V \sim \frac{1}{2} \Delta K Q^2$) [10–13]. Conversely, running thermostat-driven Langevin dynamics during spectral acquisition introduces artificial friction broadening, while naive classical energy-gap histograms wash out quantized vibronic sidebands in stiff hosts.
+At finite temperatures, thermal lattice expansion, cubic/quartic repulsive walls ($V \sim k_3 Q^3 + k_4 Q^4$), and state-dependent curvature shifts sample anharmonic regions of the potential energy surface [10–13].
 
-Following the time-dependent cumulant formalism of Mukamel [10] and Linderälv, Erhart *et al.* (*npj Comput. Mater.* **11**, 101, 2025) [33], HyDePh implements a **unified, parameter-free microcanonical cumulant generating function** that accurately spans both stiff covalent crystals and soft ionic hosts:
+Following the time-dependent cumulant formalism of Mukamel [10] and Linderälv, Erhart *et al.* (*npj Comput. Mater.* **11**, 101, 2025) [33], HyDePh implements a microcanonical cumulant generating function that spans both stiff covalent crystals and soft ionic hosts:
 
 #### (A) NVT Thermalization $\to$ Multi-Trajectory NVE Production
 For each target temperature $T$:
@@ -331,7 +331,7 @@ $$
 g_{\mathrm{anh}}(t, T) = \int_0^{\infty} d(\hbar\omega) \, S_{\mathrm{anh}}(\hbar\omega, T) \left[ (\bar{n}(\hbar\omega, T) + 1) e^{-i\omega t} + \bar{n}(\hbar\omega, T) e^{i\omega t} \right]
 $$
 
-naturally unifies weak, intermediate, and strong electron-phonon coupling without empirical regime switching:
+naturally spans weak, intermediate, and strong electron-phonon coupling within a single generating function:
 - **Weak/Intermediate Coupling ($S < 10$; Diamond $\mathrm{NV}^-$, 4H-SiC $kk$-$\mathrm{VV}^0$)**: Preserves the quantized Bose-Einstein multi-phonon sideband progression and sharp room-temperature ZPL peak ($\mathrm{DWF}(T) = \exp[-g_{\mathrm{anh}}(0, T)]$), while incorporating anharmonic mode shifts and thermal broadening [33, 34].
 - **Strong Coupling / Marcus Limit ($S \ge 10$; NaCl and LiF F-centers)**: When $S \gg 1$, $\mathrm{DWF}(T) \to 0$ and the short-time stationary-phase expansion of $\exp[g_{\mathrm{anh}}(t, T) - g_{\mathrm{anh}}(0, T)]$ automatically converges to the broadened semiclassical Marcus Gaussian/skewed envelope of variance $\sigma_{\Delta U}^2(T) = \int d(\hbar\omega) \, (\hbar\omega)^2 S_{\mathrm{anh}}(\hbar\omega, T) (2\bar{n} + 1)$ [10, 18].
 
@@ -348,7 +348,7 @@ E_{\mathrm{ES}}(Q) &= E_{\mathrm{ZPL}} + V_{\mathrm{hybrid,ES}}(\mathbf{R}(\lamb
 \end{aligned}
 $$
 
-Unlike equal-curvature models that assume $\Delta E_{\mathrm{rel,ES}} = \Delta E_{\mathrm{rel,GS}}$, evaluating both $\Delta V_{\mathrm{NEP,GS}}$ and $\Delta V_{\mathrm{NEP,ES}}$ along $\mathbf{R}(\lambda)$ directly resolves excited-state lattice softening or stiffening ($\hbar\Omega_{\mathrm{ES}} \ne \hbar\Omega_{\mathrm{GS}}$):
+Evaluating both $\Delta V_{\mathrm{NEP,GS}}$ and $\Delta V_{\mathrm{NEP,ES}}$ along $\mathbf{R}(\lambda)$ resolves state-dependent curvature asymmetry ($\hbar\Omega_{\mathrm{ES}} \ne \hbar\Omega_{\mathrm{GS}}$) and asymmetric relaxation energies:
 
 $$
 \Delta E_{\mathrm{rel,GS}} = E_{\mathrm{GS}}(Q = \Delta Q), \qquad \Delta E_{\mathrm{rel,ES}} = E_{\mathrm{ES}}(Q = 0) - E_{\mathrm{ZPL}}
