@@ -20,6 +20,10 @@ jobs:
           - os: windows-latest
             python-version: "3.13"
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@v4
 
@@ -40,4 +44,12 @@ jobs:
 
       - name: Run test suite with pytest
         run: |
-          python -m pytest tests -v
+          python -m pytest tests -v --tb=short 2>&1 | tee pytest_output.log
+
+      - name: Publish Pytest Summary
+        if: always()
+        run: |
+          echo "### Pytest Summary (${{ matrix.os }}, Python ${{ matrix.python-version }})" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          tail -n 100 pytest_output.log >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
