@@ -96,15 +96,15 @@ from hydeph import ToolkitConfig, run_pipeline
 
 config = ToolkitConfig(
     # Core Inputs & Paths
-    pristine_cell_path="licl_pristine_unitcell.xyz",
-    defect_cell_path="licl_defect_unitcell.xyz",
+    pristine_cell_path="nacl_pristine_unitcell.xyz",
+    defect_cell_path="nacl_defect_unitcell.xyz",
     foundation_potential_path="/path/to/nep89_20250409.txt",
     pseudopotentials={
-        "Li": "li_pbe_v1.4.uspp.F.UPF",
-        "Cl": "cl_pbe_v1.4.uspp.F.UPF",
+        "Na": "Na_ONCV_PBE-1.2.upf",
+        "Cl": "Cl_ONCV_PBE-1.2.upf",
     },
     pseudo_dir="/path/to/quantumespresso/pseudo",
-    workspace_dir="./hydeph_run",
+    workspace_dir="./nacl_run",
     allow_fallbacks=False,
 
     # Electronic Structure & Geometry
@@ -279,8 +279,7 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 | **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 10.7\ \text{Å}$ | Use $\ge 215$ atoms. $2\times 2\times 2$ (63 atoms) produces artificial $73\ \text{meV}$ multi-phonon spike combs. |
 | **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` or `(4, 4, 2)` | $142\text{--}254$ atoms | $\ge 9.2\text{--}12.3\ \text{Å}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
 | **3C-SiC** | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 13.1\ \text{Å}$ | Captures smooth quasi-local breathing mode dispersion. |
-| **Alkali Halides** (NaCl, LiCl) | Rocksalt ($\Theta_D \approx 320\text{--}420\ \mathrm{K}$) | `(2, 2, 2)` | $63$ atoms | $\ge 11.4\ \text{Å}$ | $a \approx 5.69\ \text{Å}$ means `(2, 2, 2)` already exceeds $L \ge 11\ \text{Å}$ with $< 1\ \text{GB}$ VRAM usage. |
-| **Fluorites** (LiF, $\mathrm{CaF}_2$) | Fluorite ($\Theta_D \approx 730\ \mathrm{K}$) | `(2, 2, 2)` | $95\text{--}189$ atoms | $\ge 8.0\text{--}10.9\ \text{Å}$ | Strong coupling ($S > 10$); Marcus Gaussian envelope dominates. |
+| **Alkali Halides** (NaCl) | Rocksalt ($\Theta_D \approx 320\ \mathrm{K}$) | `(2, 2, 2)` | $63$ atoms | $\ge 11.4\ \text{Å}$ | $a \approx 5.69\ \text{Å}$ means `(2, 2, 2)` already exceeds $L \ge 11\ \text{Å}$ with $< 1\ \text{GB}$ VRAM usage. |
 
 ---
 
@@ -290,9 +289,7 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 |---|---|---|---|---|---|---|
 | **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3\times 3\times 3$ ($215$) | $2.91$ | $0.562$ | $1.716\ \mathrm{eV}$ | Sharp ZPL ($\mathrm{DWF}_0 = 5.46\%$) visible up to $300\ \mathrm{K}$; $64.6\ \mathrm{meV}$ $a_1$ resonance & smooth sideband wing |
 | **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $3\times 3\times 2$ ($142$) | $4.77$ | $0.812$ | $1.10\ \mathrm{eV}$ | Sharp ZPL ($\mathrm{DWF}_0 = 0.85\%$), resolved sidebands at $-38, -76\ \mathrm{meV}$ across basal/$c$-axis modes |
-| **LiCl F-Center** | Rocksalt ($420\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $4.00$ | $1.632$ | $2.15\ \mathrm{eV}$ | Mode softens $27.8 \to 19.8\ \mathrm{meV}$ ($19.7\ \mathrm{meV}$ exp. [13]); anharmonic broadening to $265\ \mathrm{meV}$ |
 | **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $11.58$ | $2.220$ | $1.274\ \mathrm{eV}$ | Strong coupling ($\Delta E_{\mathrm{Stokes}} = 0.671\ \mathrm{eV}$); smooth FWHM broadening $163.8 \to 263.1\ \mathrm{meV}$ ($10\text{--}300\ \mathrm{K}$) |
-| **LiF F-Center** | Rocksalt ($730\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $23.93$ | $2.391$ | $3.42\ \mathrm{eV}$ | Deep Marcus regime ($\mathrm{DWF} \approx 0$); broad Gaussian band ($\mathrm{FWHM} = 490\text{--}1101\ \mathrm{meV}$) |
 
 ---
 

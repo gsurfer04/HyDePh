@@ -43,15 +43,15 @@ from hydeph import ToolkitConfig, run_pipeline
 
 config = ToolkitConfig(
     # Core Inputs & Paths
-    pristine_cell_path="pristine_unitcell.xyz",
-    defect_cell_path="defect_unitcell.xyz",
+    pristine_cell_path="nacl_pristine_unitcell.xyz",
+    defect_cell_path="nacl_defect_unitcell.xyz",
     foundation_potential_path="nep89_20250409.txt",
     pseudopotentials={
-        "Li": "li_pbe_v1.4.uspp.F.UPF",
-        "Cl": "cl_pbe_v1.4.uspp.F.UPF",
+        "Na": "Na_ONCV_PBE-1.2.upf",
+        "Cl": "Cl_ONCV_PBE-1.2.upf",
     },
     pseudo_dir="./pseudo",
-    workspace_dir="./hydeph_run",
+    workspace_dir="./nacl_run",
     allow_fallbacks=False,
 
     # Electronic Structure & Geometry
