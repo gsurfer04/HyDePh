@@ -278,7 +278,6 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 |---|---|---|---|---|---|
 | **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 10.7\ \text{Å}$ | Use $\ge 215$ atoms. $2\times 2\times 2$ (63 atoms) produces artificial $73\ \text{meV}$ multi-phonon spike combs. |
 | **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` or `(4, 4, 2)` | $142\text{--}254$ atoms | $\ge 9.2\text{--}12.3\ \text{Å}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
-| **3C-SiC** | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 13.1\ \text{Å}$ | Captures smooth quasi-local breathing mode dispersion. |
 | **Alkali Halides** (NaCl) | Rocksalt ($\Theta_D \approx 320\ \mathrm{K}$) | `(2, 2, 2)` | $63$ atoms | $\ge 11.4\ \text{Å}$ | $a \approx 5.69\ \text{Å}$ means `(2, 2, 2)` already exceeds $L \ge 11\ \text{Å}$ with $< 1\ \text{GB}$ VRAM usage. |
 
 ---
