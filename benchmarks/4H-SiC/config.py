@@ -1,6 +1,5 @@
 from hydeph import ToolkitConfig, run_pipeline
 
-# Configure with the 5 core inputs for color-center calculation
 config = ToolkitConfig(
     # INPUT
     pristine_cell_path="pristine.xyz",
@@ -12,12 +11,24 @@ config = ToolkitConfig(
         "C": "C_ONCV_PBE-1.2.upf",
     },
     pseudo_dir=r"/home/jamesc/HyDePhTest/pseudo",
-    workspace_dir="hydeph_run",
+    workspace_dir="hydeph_run_65ry",
     allow_fallbacks=False,
     
-    # ELECTRONIC STRUCTURE & GEOMETRY
+    # ELECTRONIC STRUCTURE & GEOMETRY (HIGH CONVERGENCE 65 Ry)
     charge=0,
     spin_multiplicity=3,
+    ecutwfc=65.0,
+    ecutrho=260.0,
+    mixing_beta=0.20,
+    
+    # DELTA-SCF EXCITATION & PAIRED DELTA-NEP
+    excited_state_method="delta_scf",
+    paired_delta_nep=True,
+    dft_es_candidates="all",
+    delta_scf_homo_band=285,
+    delta_scf_lumo_band=286,
+    delta_scf_lumo_degeneracy=2,
+    delta_scf_spin_channel=1,
     
     # SAMPLING & RESUMPTION
     temperatures=[10.0, 77.0, 150.0, 300.0],
@@ -34,9 +45,7 @@ config = ToolkitConfig(
     # SPECTROSCOPY, GRAPHING & 1D CONFIGURATION COORDINATE
     temperature_plot_mode="both",
     show_harmonic_in_anharmonic=True,
-    zpl_energy_eV=1.027412,
 )
 
 if __name__ == "__main__":
-    # Run end-to-end turnkey pipeline
     summary = run_pipeline(config)

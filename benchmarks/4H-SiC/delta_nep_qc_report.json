@@ -1,14 +1,14 @@
 {
   "qc_passed": true,
-  "train_energy_rmse_meV_atom": 0.7908776422736519,
-  "train_force_rmse_eV_A": 0.11303279678771376,
-  "test_energy_rmse_meV_atom": 0.6763835025760669,
-  "test_force_rmse_eV_A": 0.131709818320673,
-  "gs_residual_force_max_eV_A": 0.007641643776699736,
-  "fc_path_energy_max_err_meV": 41.51083202305017,
-  "delta_erel_dft_eV": 0.09216646109052817,
-  "delta_erel_hybrid_eV": 0.12542129989378736,
-  "delta_erel_error_meV": 33.25483880325919,
+  "train_energy_rmse_meV_atom": 1.0023581552575127,
+  "train_force_rmse_eV_A": 0.11414630110550346,
+  "test_energy_rmse_meV_atom": 0.8932213749188063,
+  "test_force_rmse_eV_A": 0.14097057928837395,
+  "gs_residual_force_max_eV_A": 0.007449870498669492,
+  "fc_path_energy_max_err_meV": 16.879850583791267,
+  "delta_erel_dft_eV": 0.10443131305873976,
+  "delta_erel_hybrid_eV": 0.0875514624749485,
+  "delta_erel_error_meV": 16.879850583791267,
   "thresholds": {
     "max_test_force_rmse_eV_A": 0.15,
     "max_gs_residual_force_eV_A": 0.05

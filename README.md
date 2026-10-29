@@ -287,7 +287,7 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 | System | Host ($\Theta_D$) | Supercell ($N_{\mathrm{atoms}}$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | Adiabatic $E_{\mathrm{ZPL}}$ | Key Spectroscopic Result |
 |---|---|---|---|---|---|---|
 | **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3\times 3\times 3$ ($215$) | $2.91$ | $0.562$ | $1.716\ \mathrm{eV}$ | Sharp ZPL ($\mathrm{DWF}_0 = 5.46\%$) visible up to $300\ \mathrm{K}$; $64.6\ \mathrm{meV}$ $a_1$ resonance & smooth sideband wing |
-| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $3\times 3\times 2$ ($142$) | $4.77$ | $0.812$ | $1.10\ \mathrm{eV}$ | Sharp ZPL ($\mathrm{DWF}_0 = 0.85\%$), resolved sidebands at $-38, -76\ \mathrm{meV}$ across basal/$c$-axis modes |
+| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $3\times 3\times 2$ ($142$) | $4.65$ | $1.651$ | $1.609\ \mathrm{eV}$ | Intermediate coupling ($\mathrm{DWF}_0 = 0.96\%$); resolved sidebands at $-38, -76\ \mathrm{meV}$ across basal/$c$-axis modes |
 | **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $11.58$ | $2.220$ | $1.274\ \mathrm{eV}$ | Strong coupling ($\Delta E_{\mathrm{Stokes}} = 0.671\ \mathrm{eV}$); smooth FWHM broadening $163.8 \to 263.1\ \mathrm{meV}$ ($10\text{--}300\ \mathrm{K}$) |
 
 ---

@@ -1,15 +1,15 @@
 {
-  "timestamp_utc": "2026-10-29T11:41:48.743412+00:00",
+  "timestamp_utc": "2026-10-29T20:11:42.702420+00:00",
   "hydeph_version": "0.7.0",
   "python_version": "3.14.8 | packaged by Anaconda, Inc. | (main, Oct  1 2026, 20:26:14) [GCC 14.3.0]",
   "ase_version": "3.29.0",
   "allow_fallbacks": false,
-  "total_walltime_s": 728.8181087970734,
+  "total_walltime_s": 9046.918543815613,
   "origins": {
-    "gs_source": "unknown",
+    "gs_source": "dft",
     "es_source": "unknown",
-    "zpl_source": "user_configured",
-    "zpl_energy_eV": 1.027412
+    "zpl_source": "delta_scf_adiabatic",
+    "zpl_energy_eV": 1.6092812334245536
   },
   "input_files": {
     "pristine_cell_path": {
@@ -36,8 +36,8 @@
     }
   },
   "dft_parameters": {
-    "ecutwfc": 40.0,
-    "ecutrho": 320.0,
+    "ecutwfc": 65.0,
+    "ecutrho": 260.0,
     "conv_thr": null,
     "spin_multiplicity": 3,
     "tot_charge": 0.0,
@@ -53,12 +53,12 @@
       "sha256": "75168ece02e840e4a32644f982b78d43cba697f5b64b4c8134ab66c7a8c28be1"
     },
     "delta_pot_gs": {
-      "path": "hydeph_run/nep_delta_gs.txt",
-      "sha256": "685e457a4c0cb3638d00874c56dcf32f9df2c073a6d47f3c29806e44f0e17f0f"
+      "path": "hydeph_run_65ry/nep_delta_gs.txt",
+      "sha256": "00c8fa5b2f16f585d4a547a1a52cd4ce56d52718ed36d61e65869163b0d344a0"
     },
     "delta_pot_es": {
-      "path": null,
-      "sha256": null
+      "path": "hydeph_run_65ry/nep_delta_es.txt",
+      "sha256": "e53d5d0efec3c5eb68ce9bfa9f486ba28707057710f9062f1e690b02b2c3e581"
     }
   }
 }
