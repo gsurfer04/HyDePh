@@ -24,12 +24,19 @@ config = ToolkitConfig(
     temperatures=[10.0, 77.0, 150.0, 300.0],
     n_workers_qe=1,
     
+    # LINESHAPE & DEPHASING (Physical quadratic dephasing preserving ZPL visibility across T)
+    zpl_energy_eV=2.125214,
+    dephasing_gamma_meV=1.5,
+    dephasing_temperature_coefficient=5.5e-5,
     temperature_plot_mode="both",
     show_harmonic_in_anharmonic=True,
     
-    # Enable finite-temperature anharmonic MD sampling
+    # Enable finite-temperature anharmonic MD sampling (Linderälv et al. Gaussian ACF windowing)
     enable_anharmonic=True,
-    anharmonic_md_steps=2000,
+    anharmonic_md_steps=1500,
+    anharmonic_thermalization_steps=400,
+    anharmonic_n_trajectories=1,
+    anharmonic_acf_damping_meV=2.0,
 )
 
 if __name__ == "__main__":

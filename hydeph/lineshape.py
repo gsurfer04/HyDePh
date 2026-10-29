@@ -576,7 +576,7 @@ class LineshapeEngine:
         for T in tqdm(self.config.temperatures, desc="Harmonic lineshapes", unit="T", leave=False):
             user_gamma = self.config.dephasing_gamma_meV
             base_gamma = 1.5 if user_gamma is None else float(user_gamma)
-            coeff = getattr(self.config, "dephasing_temperature_coefficient", 0.0)
+            coeff = getattr(self.config, "dephasing_temperature_coefficient", 5.5e-5)
             gamma = base_gamma + coeff * (T ** 2)
 
             eg, a_norm = compute_quantum_lineshape(
@@ -698,13 +698,17 @@ class LineshapeEngine:
                 headers = ["hw_meV", "S_harmonic_per_eV"]
                 anh_temps = [T for T in self.config.temperatures if anharmonic_dict and T in anharmonic_dict]
                 for T in anh_temps:
+                    headers.append(f"S_anharmonic_{T}K_per_eV")
                     headers.append(f"VDOS_{T}K")
                 writer.writerow(headers)
 
                 for idx, (hw, s) in enumerate(zip(hw_grid, s_cont)):
                     row = [f"{hw:.4f}", f"{s:.6f}"]
                     for T in anh_temps:
+                        s_t = anharmonic_dict[T].get("s_anh")
+                        s_val = s_t[idx] if s_t is not None else s
                         vdos = anharmonic_dict[T]["vdos"]
+                        row.append(f"{s_val:.6f}")
                         row.append(f"{vdos[idx]:.6f}")
                     writer.writerow(row)
 
@@ -803,96 +807,122 @@ class LineshapeEngine:
             logger.info("    [i] Anharmonic Delta U(t) driven by displaced ground-state potential V_GS(R+Delta R) - V_GS(R)")
 
         anharmonic_dict = {}
+        n_trajectories = max(1, int(getattr(self.config, "anharmonic_n_trajectories", 1)))
+
         for T in self.config.temperatures:
             t0 = time.time()
-            at = at_gs.copy()
-            at.calc = self.calc
+            all_du_series = []
+            all_v_opt_series = []
+            t_equil_list = []
 
-            # 1. Thermalization with Langevin dynamics (NVT)
-            n_therm = getattr(self.config, "anharmonic_thermalization_steps", 400)
-            if n_therm > 0:
-                try:
-                    from ase.md.velocitydistribution import thermalize_momenta
-                    thermalize_momenta(at, temperature_K=T)
-                except ImportError:
-                    MaxwellBoltzmannDistribution(at, temperature_K=T)
+            for traj_idx in range(n_trajectories):
+                at = at_gs.copy()
+                at.calc = self.calc
+
+                # 1. Thermalization with Langevin dynamics (NVT)
+                n_therm = getattr(self.config, "anharmonic_thermalization_steps", 400)
+                if n_therm > 0:
+                    try:
+                        from ase.md.velocitydistribution import thermalize_momenta
+                        thermalize_momenta(at, temperature_K=T)
+                    except ImportError:
+                        MaxwellBoltzmannDistribution(at, temperature_K=T)
+                    Stationary(at)
+                    if not np.any(at.pbc):
+                        ZeroRotation(at)
+                    if traj_idx == 0:
+                        logger.info(
+                            f"    [MD T = {T:g} K] Phase 1/2: NVT Langevin thermalization ({n_therm} steps, target T = {T:g} K)..."
+                        )
+                    dyn_therm = Langevin(at, dt_fs * units.fs, temperature_K=T, friction=0.01 / units.fs, fixcm=False, logfile=None)
+                    t_therm_samples = []
+                    dyn_therm.attach(lambda: t_therm_samples.append(at.get_temperature()), interval=max(1, n_therm // 10))
+                    dyn_therm.run(n_therm)
+                    t_equil = float(np.mean(t_therm_samples[-5:])) if t_therm_samples else T
+                else:
+                    t_equil = T
+                t_equil_list.append(t_equil)
+
+                # 2. Production dynamics: VelocityVerlet (NVE) eliminates artificial friction broadening
+                if traj_idx == 0:
+                    traj_desc = f" ({n_trajectories} trajectories)" if n_trajectories > 1 else ""
+                    logger.info(
+                        f"    [MD T = {T:g} K] Phase 2/2: NVE VelocityVerlet production ({n_steps} steps, equilibrated T = {t_equil:.1f} K){traj_desc}..."
+                    )
                 Stationary(at)
                 if not np.any(at.pbc):
                     ZeroRotation(at)
-                logger.info(
-                    f"    [MD T = {T:g} K] Phase 1/2: NVT Langevin thermalization ({n_therm} steps, target T = {T:g} K)..."
-                )
-                dyn_therm = Langevin(at, dt_fs * units.fs, temperature_K=T, friction=0.01 / units.fs, fixcm=False, logfile=None)
-                t_therm_samples = []
-                dyn_therm.attach(lambda: t_therm_samples.append(at.get_temperature()), interval=max(1, n_therm // 10))
-                dyn_therm.run(n_therm)
-                t_equil = float(np.mean(t_therm_samples[-5:])) if t_therm_samples else T
-            else:
-                t_equil = T
+                dyn = VelocityVerlet(at, dt_fs * units.fs, logfile=None)
 
-            # 2. Production dynamics: VelocityVerlet (NVE) eliminates artificial friction broadening
-            logger.info(
-                f"    [MD T = {T:g} K] Phase 2/2: NVE VelocityVerlet production ({n_steps} steps, equilibrated T = {t_equil:.1f} K)..."
-            )
-            Stationary(at)
-            if not np.any(at.pbc):
-                ZeroRotation(at)
-            dyn = VelocityVerlet(at, dt_fs * units.fs, logfile=None)
+                du_list = []
+                v_opt_list = []
 
-            du_list = []
-            v_opt_list = []
+                def step_observer():
+                    v = at.get_velocities()
+                    v_opt = float(np.sum(v * u_opt))
+                    v_opt_list.append(v_opt)
 
-            def step_observer():
-                v = at.get_velocities()
-                v_opt = float(np.sum(v * u_opt))
-                v_opt_list.append(v_opt)
+                    ug = at.get_potential_energy()
+                    at_disp.positions = at.positions + dr_fc
+                    at_disp.cell = at.cell
+                    ue = at_disp.get_potential_energy()
+                    du_list.append((ue - ug) * 1000.0)
 
-                ug = at.get_potential_energy()
-                at_disp.positions = at.positions + dr_fc
-                at_disp.cell = at.cell
-                ue = at_disp.get_potential_energy()
-                du_list.append((ue - ug) * 1000.0)
+                dyn.attach(step_observer, interval=2)
+                desc_str = f"Anharmonic MD ({T:g} K)" if n_trajectories == 1 else f"Anharmonic MD ({T:g} K traj {traj_idx+1}/{n_trajectories})"
+                pbar = tqdm(total=n_steps, desc=desc_str, unit="step", leave=False)
+                step_chunk = 50
+                steps_done = 0
+                while steps_done < n_steps:
+                    this_chunk = min(step_chunk, n_steps - steps_done)
+                    dyn.run(this_chunk)
+                    steps_done += this_chunk
+                    pbar.update(this_chunk)
+                pbar.close()
 
-            dyn.attach(step_observer, interval=2)
-            pbar = tqdm(total=n_steps, desc=f"Anharmonic MD ({T:g} K)", unit="step", leave=False)
-            step_chunk = 50
-            steps_done = 0
-            while steps_done < n_steps:
-                this_chunk = min(step_chunk, n_steps - steps_done)
-                dyn.run(this_chunk)
-                steps_done += this_chunk
-                pbar.update(this_chunk)
-            pbar.close()
+                all_du_series.append(np.array(du_list, dtype=float))
+                all_v_opt_series.append(np.array(v_opt_list, dtype=float))
 
-            du = np.array(du_list, dtype=float)
-            if len(du) > 10:
-                from scipy.signal import detrend
-                du_fluc = detrend(du)
-                mad = np.median(np.abs(du_fluc - np.median(du_fluc)))
-                valid = np.abs(du_fluc) < 4.0 * max(mad, 10.0)
-                if np.sum(valid) > 10:
-                    sigma_du = float(np.std(du_fluc[valid]))
+            t_equil = float(np.mean(t_equil_list)) if t_equil_list else T
+
+            # Combine energy gap fluctuations across trajectories
+            all_du_fluc = []
+            for du_arr in all_du_series:
+                if len(du_arr) > 10:
+                    from scipy.signal import detrend
+                    du_fl = detrend(du_arr)
+                    mad = np.median(np.abs(du_fl - np.median(du_fl)))
+                    valid = np.abs(du_fl) < 4.0 * max(mad, 10.0)
+                    all_du_fluc.append(du_fl[valid] if np.sum(valid) > 10 else du_fl)
+                elif len(du_arr) > 1:
+                    all_du_fluc.append(du_arr - np.mean(du_arr))
                 else:
-                    sigma_du = float(np.std(du_fluc))
-            elif len(du) > 1:
-                sigma_du = float(np.std(du))
-            else:
-                sigma_du = 0.0
-
-            # Compute VACF VDOS for multi-panel spectrum
-            v_arr = np.array(v_opt_list, dtype=float)
-            n_v = len(v_arr)
-            n_half = max(1, n_v // 2)
-            acf_full = correlate(v_arr, v_arr, mode="full")[n_v - 1 : n_v - 1 + n_half]
-            vacf = acf_full / np.arange(n_v, n_v - n_half, -1, dtype=float)
-            vacf /= (vacf[0] + 1e-12)
+                    all_du_fluc.append(du_arr)
+            sigma_du = float(np.std(np.concatenate(all_du_fluc))) if all_du_fluc else 0.0
 
             dt_vacf = 2.0 * dt_fs
+
+            # Compute VACF VDOS for multi-panel spectrum with trajectory averaging
+            acf_v_list = []
+            for v_opt_arr in all_v_opt_series:
+                n_v = len(v_opt_arr)
+                n_half = max(1, n_v // 2)
+                acf_full = correlate(v_opt_arr, v_opt_arr, mode="full")[n_v - 1 : n_v - 1 + n_half]
+                vacf_sub = acf_full / np.arange(n_v, n_v - n_half, -1, dtype=float)
+                vacf_sub /= (vacf_sub[0] + 1e-12)
+                acf_v_list.append(vacf_sub)
+
+            vacf = np.mean(acf_v_list, axis=0) if acf_v_list else np.zeros(1)
             t_vacf = np.arange(len(vacf), dtype=float) * dt_vacf
             denom = t_vacf[-1] if len(t_vacf) > 1 and t_vacf[-1] > 0 else 1.0
             hann = 0.5 * (1.0 + np.cos(np.pi * t_vacf / denom))
 
-            weights_t = vacf * hann * dt_vacf
+            # Linderälv et al. (npj Comput. Mater. 11, 101, 2025, Eq. 12) Gaussian ACF damping window:
+            gamma_acf = float(getattr(self.config, "anharmonic_acf_damping_meV", 2.0))
+            gamma_acf_fs = (gamma_acf / 1000.0) / HBAR_EV_FS
+            acf_window_v = np.exp(-0.5 * (gamma_acf_fs * t_vacf) ** 2)
+
+            weights_t = vacf * acf_window_v * hann * dt_vacf
             if len(weights_t) > 1:
                 weights_t[0] *= 0.5
                 weights_t[-1] *= 0.5
@@ -902,16 +932,25 @@ class LineshapeEngine:
 
             if is_cumulant:
                 # Energy-gap cumulant approach: C(tau) = <delta Delta U(tau) delta Delta U(0)>
-                du_demean = du - np.mean(du)
-                n_du = len(du_demean)
-                n_half_du = max(1, n_du // 2)
-                acf_du_full = correlate(du_demean, du_demean, mode="full")[n_du - 1 : n_du - 1 + n_half_du]
-                acf_du = acf_du_full / np.arange(n_du, n_du - n_half_du, -1, dtype=float)
+                acf_du_list = []
+                for du_arr in all_du_series:
+                    du_demean = du_arr - np.mean(du_arr)
+                    n_du = len(du_demean)
+                    n_half_du = max(1, n_du // 2)
+                    acf_full = correlate(du_demean, du_demean, mode="full")[n_du - 1 : n_du - 1 + n_half_du]
+                    acf_norm = acf_full / np.arange(n_du, n_du - n_half_du, -1, dtype=float)
+                    acf_du_list.append(acf_norm)
 
+                acf_du = np.mean(acf_du_list, axis=0) if acf_du_list else np.zeros(1)
                 t_du = np.arange(len(acf_du), dtype=float) * dt_vacf
+
+                # Linderälv et al. (npj Comput. Mater. 11, 101, 2025, Eq. 12) Gaussian ACF damping window:
+                # \tilde{C}_cl(t) = C_cl(t) * exp(-0.5 * (gamma_acf * t / hbar)^2)
+                acf_window_du = np.exp(-0.5 * (gamma_acf_fs * t_du) ** 2)
+
                 denom_du = t_du[-1] if len(t_du) > 1 and t_du[-1] > 0 else 1.0
                 hann_du = 0.5 * (1.0 + np.cos(np.pi * t_du / denom_du))
-                weights_du = acf_du * hann_du * dt_vacf
+                weights_du = acf_du * acf_window_du * hann_du * dt_vacf
                 if len(weights_du) > 1:
                     weights_du[0] *= 0.5
                     weights_du[-1] *= 0.5
@@ -932,16 +971,26 @@ class LineshapeEngine:
                 # Below the lowest non-zero acoustic phonon frequency of the crystal, S(hw) must vanish physically.
                 hw_cutoff = max(3.0, 0.3 * omega_0)
                 filter_acoustic = 1.0 - np.exp(- (hw_grid / hw_cutoff) ** 4)
-                s_anh = (j_quant * filter_acoustic) / (hw_grid ** 2 + 1e-6)
+                s_md = (j_quant * filter_acoustic) / (hw_grid ** 2 + 1e-6)
 
-                int_s_anh = float(trapz_fn(s_anh, hw_grid))
+                int_s_md = float(trapz_fn(s_md, hw_grid))
+                if int_s_md > 0 and total_S > 0:
+                    s_md *= (total_S / int_s_md)
+                s_md *= 1000.0  # eV^-1
+
+                # Low-temperature quantum anchor:
+                # Below ~50 K, classical MD lacks quantum zero-point fluctuations (kBT << hbar*omega).
+                # Seamlessly anchor to the exact harmonic normal-mode spectral function s_cont as T -> 0:
+                w_md = float(np.clip(T / 77.0, 0.0, 1.0))
+                s_anh = (1.0 - w_md) * s_cont + w_md * s_md
+
+                int_s_anh = float(trapz_fn(s_anh / 1000.0, hw_grid))
                 if int_s_anh > 0 and total_S > 0:
                     s_anh *= (total_S / int_s_anh)
-                s_anh *= 1000.0  # eV^-1
 
                 user_gamma = self.config.dephasing_gamma_meV
                 base_gamma = 1.5 if user_gamma is None else float(user_gamma)
-                coeff = getattr(self.config, "dephasing_temperature_coefficient", 0.0)
+                coeff = getattr(self.config, "dephasing_temperature_coefficient", 5.5e-5)
                 gamma = base_gamma + coeff * (T ** 2)
 
                 eg_out, a_anh = compute_quantum_lineshape(
@@ -1005,6 +1054,7 @@ class LineshapeEngine:
                 "sigma_du": sigma_du,
                 "fwhm_meV": fwhm_meV,
                 "vdos": vdos,
+                "s_anh": s_anh if is_cumulant else None,
                 "omega_T": omega_T,
                 "alpha_soft": alpha_soft,
                 "regime": "cumulant" if is_cumulant else ("quantum" if is_quantum else "semiclassical"),
@@ -1013,6 +1063,7 @@ class LineshapeEngine:
                 "md_strategy": "NVT_thermalization_to_NVE_production",
                 "n_nvt_steps": n_therm,
                 "n_nve_steps": n_steps,
+                "n_trajectories": n_trajectories,
                 "target_T_K": float(T),
                 "equilibrated_T_K": float(t_equil),
                 "walltime_s": time.time() - t0,
@@ -1165,16 +1216,24 @@ class LineshapeEngine:
         temp_colors = {T: _COLOR_CYCLE[i % len(_COLOR_CYCLE)] for i, T in enumerate(self.config.temperatures)}
 
         ax = axs[0]
-        s_norm = s_cont / np.max(s_cont) if np.max(s_cont) > 0 else s_cont
+        s_0k_max = float(np.max(s_cont)) if np.max(s_cont) > 0 else 1.0
+        s_norm = s_cont / s_0k_max
 
         if anharmonic_dict:
             for T in self.config.temperatures:
                 if T in anharmonic_dict:
                     col = temp_colors.get(T, '#1f77b4')
-                    vdos = anharmonic_dict[T]["vdos"]
+                    s_t = anharmonic_dict[T].get("s_anh")
                     t_str = f"{int(T)} K" if float(T).is_integer() else f"{T} K"
-                    ax.fill_between(hw_grid, 0, vdos, color=col, alpha=0.22, label=f'Anharmonic VDOS ({t_str})')
-                    ax.plot(hw_grid, vdos, color=col, lw=2.0)
+                    if s_t is not None:
+                        dens = s_t / s_0k_max
+                        lbl = f'Thermal $S(\\hbar\\omega)$ ({t_str})'
+                    else:
+                        vdos = anharmonic_dict[T]["vdos"]
+                        dens = vdos / np.max(vdos) if np.max(vdos) > 0 else vdos
+                        lbl = f'Anharmonic VDOS ({t_str})'
+                    ax.fill_between(hw_grid, 0, dens, color=col, alpha=0.18, label=lbl)
+                    ax.plot(hw_grid, dens, color=col, lw=2.0)
 
             if show_harmonic:
                 ax.plot(hw_grid, s_norm, color='black', lw=2.2, linestyle='--', label=r'Harmonic $S(\hbar\omega)$ ($0\ \mathrm{K}$)')
@@ -1247,7 +1306,8 @@ class LineshapeEngine:
         """Plots per-temperature figures of phonon densities and lineshapes."""
         show_harmonic = self.config.show_harmonic_in_anharmonic
         prefix = self.config.individual_figure_prefix
-        s_norm = s_cont / np.max(s_cont) if np.max(s_cont) > 0 else s_cont
+        s_0k_max = float(np.max(s_cont)) if np.max(s_cont) > 0 else 1.0
+        s_norm = s_cont / s_0k_max
 
         temp_colors = {T: _COLOR_CYCLE[i % len(_COLOR_CYCLE)] for i, T in enumerate(self.config.temperatures)}
 
@@ -1267,9 +1327,16 @@ class LineshapeEngine:
             hw_xlim, hw_ylim = self.get_smart_phonon_limits(hw_grid, s_norm, anharmonic_dict=vdos_sub)
 
             if anharmonic_dict and T in anharmonic_dict:
-                vdos = anharmonic_dict[T]["vdos"]
-                ax.fill_between(hw_grid, 0, vdos, color=col, alpha=0.28, label=f'Anharmonic VDOS ({t_str})')
-                ax.plot(hw_grid, vdos, color=col, lw=2.2)
+                s_t = anharmonic_dict[T].get("s_anh")
+                if s_t is not None:
+                    dens = s_t / s_0k_max
+                    lbl = f'Thermal $S(\\hbar\\omega)$ ({t_str})'
+                else:
+                    vdos = anharmonic_dict[T]["vdos"]
+                    dens = vdos / np.max(vdos) if np.max(vdos) > 0 else vdos
+                    lbl = f'Anharmonic VDOS ({t_str})'
+                ax.fill_between(hw_grid, 0, dens, color=col, alpha=0.25, label=lbl)
+                ax.plot(hw_grid, dens, color=col, lw=2.2)
                 if show_harmonic:
                     ax.plot(hw_grid, s_norm, color='black', lw=2.0, linestyle='--', label=r'Harmonic $S(\hbar\omega)$ ($0\ \mathrm{K}$)')
             else:

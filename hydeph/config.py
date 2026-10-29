@@ -407,12 +407,14 @@ class ToolkitConfig:
     individual_shared_x: bool = False
     phonon_smearing_meV: Optional[float] = None
     dephasing_gamma_meV: Optional[float] = 1.5
-    dephasing_temperature_coefficient: float = 0.0
+    dephasing_temperature_coefficient: float = 5.5e-5
     time_window_tau_fs: Optional[float] = None
     max_imaginary_modes: int = 0
     phonon_supercell_repeat: Optional[Tuple[int, int, int]] = None
     phonon_embedding_method: str = "displacement"  # "displacement" or "force"
     export_normal_modes: bool = True
+    anharmonic_n_trajectories: int = 1
+    anharmonic_acf_damping_meV: float = 2.0
     calculate_pl_intensity: bool = True
     finite_size_acoustic_cutoff: bool = True
     lineshape_n_points: int = 1500
@@ -811,6 +813,10 @@ class ToolkitConfig:
             raise ValueError(
                 f"Invalid dephasing_temperature_coefficient: {self.dephasing_temperature_coefficient}. Must be >= 0."
             )
+        if int(self.anharmonic_n_trajectories) < 1:
+            raise ValueError(f"Invalid anharmonic_n_trajectories: {self.anharmonic_n_trajectories}. Must be >= 1.")
+        if float(self.anharmonic_acf_damping_meV) <= 0.0:
+            raise ValueError(f"Invalid anharmonic_acf_damping_meV: {self.anharmonic_acf_damping_meV}. Must be > 0.")
         if self.time_window_tau_fs is not None and float(self.time_window_tau_fs) <= 0.0:
             raise ValueError(f"Invalid time_window_tau_fs: {self.time_window_tau_fs}. Must be > 0 fs.")
         if int(self.max_imaginary_modes) < 0:

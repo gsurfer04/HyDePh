@@ -306,6 +306,7 @@ def test_label_excited_state_frames_caching(tmp_path, monkeypatch):
         workspace_dir=str(tmp_path / "ws_es_label"),
         pseudopotentials={"C": str(upf)},
         spin_multiplicity=1,
+        pw_exe="pw.exe",
     )
     qe = QERunner(cfg)
 

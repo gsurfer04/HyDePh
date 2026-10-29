@@ -126,3 +126,45 @@ def test_backward_compatible_regimes(tmp_path):
     engine_semi = LineshapeEngine(cfg, calc)
     res_semi = engine_semi.run_anharmonic_sampling(at_gs, at_es, hw_grid, s_cont, total_S=1.5)
     assert res_semi[50.0]["regime"] == "semiclassical"
+
+
+def test_multi_trajectory_and_linderalv_acf_windowing(tmp_path):
+    """Verify multi-trajectory ensemble sampling and Linderälv Gaussian ACF windowing."""
+    pristine_file = tmp_path / "pristine.xyz"
+    pristine = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[4, 4, 4], pbc=True)
+    import ase.io
+    ase.io.write(str(pristine_file), pristine)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "ws"),
+        temperatures=[77.0, 300.0],
+        anharmonic_md_steps=20,
+        anharmonic_thermalization_steps=10,
+        anharmonic_n_trajectories=2,
+        anharmonic_acf_damping_meV=2.0,
+        dephasing_temperature_coefficient=5.5e-5,
+    )
+
+    calc_gs = MockPairedCalc(k=5.0, offset_eV=0.0)
+    calc_es = MockPairedCalc(k=5.0, offset_eV=2.0)
+    engine = LineshapeEngine(cfg, calc_gs)
+    engine.calc_es = calc_es
+
+    at_gs = pristine.copy()
+    at_es = pristine.copy()
+    at_es.positions[1] += [0.05, 0.05, 0.05]
+
+    hw_grid = np.linspace(1.0, 100.0, 100)
+    s_cont = np.exp(-0.5 * ((hw_grid - 50.0) / 10.0) ** 2) * 1000.0
+
+    res = engine.run_anharmonic_sampling(at_gs, at_es, hw_grid, s_cont, total_S=2.0)
+    assert 77.0 in res and 300.0 in res
+    assert res[77.0]["n_trajectories"] == 2
+    assert res[300.0]["n_trajectories"] == 2
+    assert "s_anh" in res[77.0] and res[77.0]["s_anh"] is not None
+    a_300 = res[300.0]["lineshape"]
+    eg = res[300.0]["energies"]
+    zpl_idx = np.argmin(np.abs(eg))
+    assert a_300[zpl_idx] > 0.0
