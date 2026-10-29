@@ -12,28 +12,29 @@ config = ToolkitConfig(
         "C": "C_ONCV_PBE-1.2.upf",
     },
     pseudo_dir=r"/home/jamesc/HyDePhTest/pseudo",
+    workspace_dir="hydeph_run",
+    allow_fallbacks=False,
     
     # ELECTRONIC STRUCTURE & GEOMETRY
-    
     charge=0,
     spin_multiplicity=3,
     
     # SAMPLING & RESUMPTION
-    
     temperatures=[10.0, 77.0, 150.0, 300.0],
     max_dft_frames=40,
     enable_anharmonic=True,
     anharmonic_md_steps=1500,
+    anharmonic_acf_damping_meV=2.0,
+    dephasing_temperature_coefficient=5.5e-5,
+    max_test_force_rmse_eV_A=0.15,
     
     # DNEP ARCHITECTURE HYPERPARAMETERS
-    
     nep_steps=15000,
     
     # SPECTROSCOPY, GRAPHING & 1D CONFIGURATION COORDINATE
-    
     temperature_plot_mode="both",
     show_harmonic_in_anharmonic=True,
-    zpl_energy_eV=None
+    zpl_energy_eV=1.027412,
 )
 
 if __name__ == "__main__":
