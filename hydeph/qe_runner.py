@@ -1557,8 +1557,12 @@ class QERunner:
         out_es_xyz = os.path.join(calc_base, "labeled_frames_es.xyz")
 
         if constrained_occupations is None:
-            gs_out = os.path.join(calc_base, "qe_gs_relax", "pw.out")
-            gap_info = parse_qe_band_gap(gs_out) if os.path.isfile(gs_out) else None
+            gs_candidates = [
+                os.path.join(calc_base, "qe_gs_relax", "pw.out"),
+                os.path.join(calc_base, "dft_calculations", "frame_000_fc_00", "pw.out"),
+            ]
+            gs_out = next((p for p in gs_candidates if os.path.isfile(p)), None)
+            gap_info = parse_qe_band_gap(gs_out) if gs_out else None
 
             unique_syms = sorted(list(set(at_gs.get_chemical_symbols())))
             z_vals = {}
