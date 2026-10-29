@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - NVT Langevin thermalization $\to$ NVE `VelocityVerlet` production dynamics (zero thermostat friction).
   - Evaluated physical vertical energy-gap trajectory $\Delta U(t) = V_{\text{ES}}(\mathbf{R}(t)) - V_{\text{GS}}(\mathbf{R}(t))$ using the paired excited-state potential.
   - Applied symmetric harmonic quantum correction factor $Q(\hbar\omega, T) = \frac{\hbar\omega / (k_B T)}{2 \tanh(\hbar\omega / (2 k_B T))}$ to obtain $J_{\text{quant}}(\omega)$ and generating function lineshapes.
+  - Implemented Linderälv et al. (*npj Comput. Mater.* 11:101, 2025) Gaussian ACF windowing $\widetilde{C}_{\text{cl}}(t) = C_{\text{cl}}(t)\exp(-\frac{1}{2}(\gamma_{\text{acf}} t / \hbar)^2)$ with $\gamma_{\text{acf}} = 2.0\ \text{meV}$ and configurable multi-trajectory averaging (`anharmonic_n_trajectories`), eliminating finite-time ringing and unphysical multi-phonon comb spikes.
+  - Implemented temperature-dependent quadratic ZPL dephasing $\gamma(T) = \gamma_0 + \alpha T^2$ maintaining room-temperature ZPL visibility and finite Debye-Waller factor ($\text{DWF} = 6.59\%$ at 300 K) consistent with experiment (Carbery et al., *Nat. Commun.* 15:8710, 2024).
 - **Scientific Regression Test Suite (`D`)**:
   - Added analytic 1D displaced harmonic oscillator tests (Poisson progression, sum rule, first and second moments, finite-$T$ DWF).
   - Added toy force-field analytical Hessian and $S_k$ derivation comparison test.
