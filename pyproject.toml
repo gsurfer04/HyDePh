@@ -10,10 +10,9 @@ authors = [
 ]
 description = "HyDePh: High-Definition Hybrid Defect Photoluminescence & Anharmonic Spectroscopy"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -32,6 +31,7 @@ dependencies = [
     "ase>=3.22.0,<4",
     "calorine>=2.3.0",
     "pyyaml>=6.0",
+    "tqdm>=4.60.0",
 ]
 
 [project.optional-dependencies]

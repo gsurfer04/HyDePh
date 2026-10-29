@@ -20,8 +20,26 @@ from .defect_builder import mic_displacement
 try:
     from tqdm import tqdm
 except ImportError:
-    def tqdm(iterable, *args, **kwargs):
-        return iterable
+    class _DummyPbar:
+        def __init__(self, iterable=None, *args, **kwargs):
+            self.iterable = iterable if iterable is not None else []
+        def __iter__(self):
+            return iter(self.iterable)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def update(self, *args, **kwargs):
+            pass
+        def close(self):
+            pass
+        def set_postfix(self, *args, **kwargs):
+            pass
+        def set_description(self, *args, **kwargs):
+            pass
+
+    def tqdm(iterable=None, *args, **kwargs):
+        return _DummyPbar(iterable, *args, **kwargs)
 
 logger = logging.getLogger(__name__)
 
