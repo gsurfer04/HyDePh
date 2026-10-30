@@ -339,6 +339,8 @@ class LineshapeEngine:
             at_gs, dr, f_es_mode = embed_phonon_supercell(
                 at_gs, at_es, self.config, self.calc, calc_es=calc_es_opt
             )
+            at_es = at_gs.copy()
+            at_es.positions += dr
             m = at_gs.get_masses()
             dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
         else:

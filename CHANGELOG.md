@@ -5,6 +5,19 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **4H-SiC $kk$-$\mathrm{VV}^0$ Divacancy Benchmark Reproduction**:
+  - Full-scale turnkey reproduction and validation against first-principles hybrid-DFT calculations and experimental photoluminescence spectra from Jin *et al.* (*Phys. Rev. Materials* **5**, 084603, 2021).
+  - Resolved all three attested literature phonon sideband features: Peak 1 at $-34\ \mathrm{meV}$ (breathing mode), Peak 2 at $-73\ \mathrm{meV}$ (localized defect mode), and Peak 3 at $-96\ \mathrm{meV}$ (bulk optical band edge).
+  - Preserved distinct, prominent Zero-Phonon Line (ZPL) peak at $300\ \mathrm{K}$ through $(5\times 5\times 2)$ Alkauskas large-supercell phonon embedding, eliminating artificial zone-boundary folding combs and multi-phonon replica inflation.
+  - Added digitized literature curves (`jin_et_al_digitized_kk_10K.csv`) and comparative overlay benchmarks (`hydeph_vs_jin_benchmark.png`).
+
+### Fixed
+- **Large-Supercell Embedding in Anharmonic Lineshape Engine**:
+  - Resolved atomic shape broadcasting mismatch when passing embedded ground-state structures to finite-temperature anharmonic MD by updating `at_es` in the embedded coordinate system.
+
 ## [0.7.0] - 2026-10-27
 
 ### Added
