@@ -8,7 +8,8 @@
 #SBATCH --job-name=hydeph_array
 #SBATCH --account=${CINECA_ACCOUNT:-cin_staff}
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_prod
+# Note: --qos is omitted by default so Slurm uses your account's default QoS (e.g. boost_qos_lprod).
+# For short debug jobs (<= 30 min), use: #SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

@@ -17,12 +17,14 @@
 
 ACCOUNT="${CINECA_ACCOUNT:-cin_staff}"
 TIME_LIMIT="01:00:00"
-QOS="boost_qos_prod"
+QOS_OPT=""
 
 for arg in "$@"; do
     if [ "$arg" == "--debug" ] || [ "$arg" == "-d" ]; then
-        QOS="boost_qos_dbg"
+        QOS_OPT="--qos=boost_qos_dbg"
         TIME_LIMIT="00:30:00"
+    elif [[ "$arg" =~ ^--qos= ]]; then
+        QOS_OPT="$arg"
     elif [[ "$arg" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
         TIME_LIMIT="$arg"
     fi
@@ -32,7 +34,7 @@ echo "==========================================================================
 echo " Requesting Interactive Leonardo Booster Allocation (salloc)"
 echo " Account:   ${ACCOUNT}"
 echo " Partition: boost_usr_prod"
-echo " QOS:       ${QOS}"
+echo " QOS:       ${QOS_OPT:-default (omitted)}"
 echo " Resources: 1 Node, 4x NVIDIA A100 GPUs, 32 CPUs (8 per GPU)"
 echo " Walltime:  ${TIME_LIMIT}"
 echo "=============================================================================="
@@ -45,7 +47,7 @@ echo "==========================================================================
 salloc \
     --account="${ACCOUNT}" \
     --partition=boost_usr_prod \
-    --qos="${QOS}" \
+    ${QOS_OPT} \
     --nodes=1 \
     --ntasks-per-node=4 \
     --cpus-per-task=8 \

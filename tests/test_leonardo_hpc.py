@@ -37,7 +37,7 @@ def test_cluster_profiles():
     assert booster.gpus_per_node == 4
     assert booster.cpus_per_node == 32
     assert booster.partition == "boost_usr_prod"
-    assert booster.qos == "boost_qos_prod"
+    assert booster.qos is None
     assert booster.has_gpu is True
     assert "q-e/7.2" in booster.default_modules
     assert "cuda/11.8" in booster.default_modules
@@ -145,7 +145,7 @@ def test_slurm_job_array_script_generation(tmp_path):
     assert "#SBATCH --array=0-39%16" in script
     assert "#SBATCH --account=cin_test_01" in script
     assert "#SBATCH --partition=boost_usr_prod" in script
-    assert "#SBATCH --qos=boost_qos_prod" in script
+    assert "--qos" not in script
     assert "#SBATCH --gres=gpu:1" in script
     assert "module load q-e/7.2" in script
     assert "module load cuda/11.8" in script
@@ -165,7 +165,7 @@ def test_salloc_command_generation():
         debug=False,
     )
     assert cmd_booster.startswith("salloc -A cin_interactive_01 -p boost_usr_prod")
-    assert "--qos=boost_qos_prod" in cmd_booster
+    assert "--qos" not in cmd_booster
     assert "--gres=gpu:4" in cmd_booster
     assert "--nodes=1" in cmd_booster
     assert "--ntasks-per-node=4" in cmd_booster
@@ -239,7 +239,7 @@ def test_toolkit_config_hpc_extensions(tmp_path):
     assert cfg.cluster_profile == "leonardo_booster"
     assert cfg.slurm_account == "cin_project_123"
     assert cfg.slurm_partition == "boost_usr_prod"
-    assert cfg.slurm_qos == "boost_qos_prod"
+    assert cfg.slurm_qos is None
     assert "q-e/7.2" in cfg.slurm_modules
     assert cfg.parallel_hessian is True
     assert cfg.parallel_hessian_workers == 8

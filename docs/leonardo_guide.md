@@ -63,8 +63,13 @@ When you run `salloc`, Slurm queues your request and reserves compute resources 
    ```
    *Equivalent raw Slurm command:*
    ```bash
-   salloc -A $CINECA_ACCOUNT -p boost_usr_prod --qos=boost_qos_prod \
+   # Omit --qos so Slurm applies your account's default QoS (e.g. boost_qos_lprod):
+   salloc -A $CINECA_ACCOUNT -p boost_usr_prod \
        --nodes=1 --ntasks-per-node=4 --cpus-per-task=8 --gres=gpu:4 --time=01:00:00
+
+   # Or for fast debug queue (max 30 min):
+   salloc -A $CINECA_ACCOUNT -p boost_usr_prod --qos=boost_qos_dbg \
+       --nodes=1 --ntasks-per-node=4 --cpus-per-task=8 --gres=gpu:4 --time=00:30:00
    ```
 
 2. **Execute HyDePh Inside the `salloc` Allocation**:
