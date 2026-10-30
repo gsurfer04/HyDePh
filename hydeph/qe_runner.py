@@ -1242,6 +1242,7 @@ class QERunner:
         timeout_s: Optional[float] = None,
         occupations_mode: Optional[str] = None,
         constrained_occupations: Optional[Union[List[List[float]], Tuple[List[float], ...]]] = None,
+        worker_idx: Optional[int] = None,
     ) -> Atoms:
         """Runs or reuses a cached single-point QE calculation for `atoms` in `calc_dir`."""
         os.makedirs(calc_dir, exist_ok=True)
@@ -1312,6 +1313,14 @@ class QERunner:
             "VECLIB_MAXIMUM_THREADS": omp_threads,
             "NUMEXPR_NUM_THREADS": "1",
         })
+        if worker_idx is not None and getattr(self.config, "gpu_pinning", False):
+            try:
+                from .hpc.slurm_dispatcher import get_pinned_worker_env
+                gpus = getattr(self.config, "slurm_gpus_per_node", 4)
+                env = get_pinned_worker_env(worker_idx, gpus_per_node=gpus, cpus_per_worker=int(omp_threads), base_env=env)
+            except Exception as exc:
+                logger.debug(f"Could not apply worker GPU pinning: {exc}")
+
         if os.path.isabs(self.pw_exe):
             pw_dir = os.path.dirname(self.pw_exe)
             if pw_dir:
@@ -1328,6 +1337,12 @@ class QERunner:
         )
 
         e_ev, f_ev_a = parse_qe_output(pw_out)
+        if e_ev is not None and f_ev_a is not None and len(f_ev_a) == len(atoms):
+            try:
+                from .hpc.slurm_dispatcher import mark_frame_done
+                mark_frame_done(calc_dir, {"energy_eV": e_ev})
+            except Exception:
+                pass
         if e_ev is None or f_ev_a is None or len(f_ev_a) != len(atoms):
             tail_msg = ""
             if os.path.isfile(pw_out):
@@ -1751,7 +1766,8 @@ class QERunner:
             stype = entry["sample_type"]
 
             t0 = time.time()
-            logger.info(f"\n    ---> [ES {step_num}/{len(pending)}] Calculating {label} ({stype}) in {os.path.basename(cdir)}...")
+            worker_id = (step_num - 1) % eff_workers
+            logger.info(f"\n    ---> [ES {step_num}/{len(pending)}] Calculating {label} ({stype}) in {os.path.basename(cdir)} (worker {worker_id})...")
             try:
                 at_labeled = self.label_single_frame(
                     fr,
@@ -1759,6 +1775,7 @@ class QERunner:
                     retry=False,
                     occupations_mode="from_input",
                     constrained_occupations=constrained_occupations,
+                    worker_idx=worker_id,
                 )
                 at_labeled.info["electronic_state"] = "excited"
                 at_labeled.info["sample_type"] = stype
@@ -1986,9 +2003,10 @@ class QERunner:
             stype = entry["sample_type"]
 
             t0 = time.time()
-            logger.info(f"\n    ---> [{step_num}/{len(to_calculate)}] Calculating {label} ({stype}) in {os.path.basename(cdir)}...")
+            worker_id = (step_num - 1) % eff_workers
+            logger.info(f"\n    ---> [{step_num}/{len(to_calculate)}] Calculating {label} ({stype}) in {os.path.basename(cdir)} (worker {worker_id})...")
             try:
-                labeled_fr = self.label_single_frame(fr, cdir, retry=False)
+                labeled_fr = self.label_single_frame(fr, cdir, retry=False, worker_idx=worker_id)
                 labeled_fr.info["qe_status"] = "converged"
                 dt = time.time() - t0
                 with state_lock:

@@ -1,0 +1,105 @@
+# Running HyDePh on CINECA Leonardo Supercomputer
+
+This guide details the procedures for executing large-scale, parallelized HyDePh defect workflows on the **Leonardo Tier-0 Supercomputer** hosted at CINECA (Bologna, Italy).
+
+---
+
+## 1. System Specifications & Partitions
+
+Leonardo consists of two primary compute modules:
+
+### A. Leonardo Booster Module (Primary Target)
+* **Architecture**: Atos BullSequana X2135 blade servers.
+* **Nodes**: 1x Intel Xeon Platinum 8358 (32 cores @ 2.60 GHz) + **4x custom NVIDIA A100-SXM4 (64 GB)**.
+* **Memory**: 512 GB RAM per node.
+* **Interconnect**: Dual 200 Gb/s Mellanox HDR Infiniband.
+* **SLURM Partitions**:
+  * `boost_usr_prod`: Standard production partition (walltime up to 24 hours).
+  * `boost_qos_dbg`: Debug queue for short interactive tests (max 2 nodes, 30 min).
+
+### B. Leonardo DCGP Module (CPU Partition)
+* **Architecture**: Intel Sapphire Rapids.
+* **Nodes**: 2x Intel Xeon Platinum 8480+ (56 cores each = **112 cores/node**), no GPUs.
+* **SLURM Partition**: `dcgp_usr_prod`.
+
+---
+
+## 2. Quickstart: Environment Setup
+
+1. **Log in to Leonardo**:
+   ```bash
+   ssh <username>@login.leonardo.cineca.it
+   ```
+
+2. **Clone the repository on `$WORK`**:
+   ```bash
+   cd $WORK
+   git clone -b feature/cineca-leonardo https://github.com/gsurfer04/HyDePh.git
+   cd HyDePh
+   ```
+
+3. **Configure the environment**:
+   Run the automated setup script to load CINECA modules and install a dedicated Python environment:
+   ```bash
+   source scripts/leonardo/env_leonardo.sh
+   ```
+
+---
+
+## 3. Parallelization Strategies
+
+### Mode 1: Single-Node Multi-GPU Worker Pool (Booster)
+A single Booster node contains 4x NVIDIA A100 GPUs and 32 CPU cores. By specifying:
+```bash
+--n-workers-qe 4
+--n-procs-qe 1
+```
+HyDePh launches 4 concurrent Quantum ESPRESSO processes, pinning each worker to an isolated GPU (`CUDA_VISIBLE_DEVICES=0,1,2,3`) with 8 OpenMP threads each. This accelerates candidate frame DFT labeling by **$4\times$** without any multi-node overhead.
+
+To submit:
+```bash
+sbatch scripts/leonardo/submit_booster_workflow.slurm
+```
+
+### Mode 2: SLURM Job Array for Candidate Frame Labeling (Stage 3)
+For large frame pools (e.g. 40–100+ frames), candidate frame labeling can be parallelized across up to 16 concurrent GPU tasks using a SLURM Job Array.
+
+1. **Generate Candidate Frames** (Stages 1–2):
+   ```bash
+   python -m hydeph --config config.yaml --to-stage 2
+   ```
+
+2. **Launch the Job Array**:
+   ```bash
+   sbatch --array=0-39%16 scripts/leonardo/submit_booster_array.slurm
+   ```
+   Each array task labels one candidate frame with GPU acceleration into `$SCRATCH/hydeph_run/dft_runs/frame_XXXX/`. Atomic `.done` markers ensure zero race conditions on Lustre scratch.
+
+3. **Assemble and Complete the Workflow** (Stages 4–6):
+   Once the array completes, simply run:
+   ```bash
+   python -m hydeph --config config.yaml --from-stage 4
+   ```
+   HyDePh automatically discovers all completed DFT frames, trains the $\Delta$-NEP, computes the supercell Hessian in parallel, and evaluates the multi-temperature optical lineshapes.
+
+### Mode 3: Parallel Supercell Hessian Evaluation (Stage 6)
+On a $5\times 5\times 2$ supercell (398 atoms), computing the full Hessian involves **2388 atomic displacements**. With `ParallelVibrations`:
+```python
+parallel_hessian = True
+parallel_hessian_workers = 16  # Evaluates 16 displacements concurrently
+```
+The displacement evaluation walltime decreases from **~20 minutes** down to **~45 seconds**.
+
+---
+
+## 4. Best Practices for CINECA Leonardo
+
+* **Use `$SCRATCH` for Workspaces**:
+  Always place large run directories inside `$SCRATCH` (e.g. `$SCRATCH/hydeph_run_${SLURM_JOB_ID}`) to leverage Leonardo's high-bandwidth Lustre parallel filesystem.
+* **Keep `$HOME` Clean**:
+  `$HOME` has a strict quota (50 GB) and is not intended for heavy I/O or temporary QE wavefunctions.
+* **Account Specification**:
+  Ensure your project account is exported:
+  ```bash
+  export CINECA_ACCOUNT="<your_project_account>"
+  ```

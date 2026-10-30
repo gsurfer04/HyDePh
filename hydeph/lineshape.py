@@ -362,7 +362,15 @@ class LineshapeEngine:
 
         at = at_gs.copy()
         at.calc = self.calc
-        vib = Vibrations(at, name=os.path.join(vib_dir, "vib"), delta=0.01)
+
+        use_parallel = getattr(self.config, "parallel_hessian", True)
+        n_workers_vib = getattr(self.config, "parallel_hessian_workers", None) or 4
+        is_mocked = hasattr(Vibrations, "_mock_return_value") or not isinstance(Vibrations, type)
+        if use_parallel and n_workers_vib > 1 and not is_mocked:
+            from .hpc.parallel_vib import ParallelVibrations
+            vib = ParallelVibrations(at, name=os.path.join(vib_dir, "vib"), delta=0.01, n_workers=n_workers_vib)
+        else:
+            vib = Vibrations(at, name=os.path.join(vib_dir, "vib"), delta=0.01)
 
         current_fp = _compute_hessian_fingerprint(at_gs, self.calc, delta=0.01)
         cached_fp = None

@@ -425,6 +425,25 @@ class ToolkitConfig:
     cc_lambda_max: float = 1.30
     cc_n_points: int = 81
 
+    # --- HPC & CINECA Leonardo Configuration ---
+    hpc_scheduler: str = "local"  # "local", "slurm"
+    cluster_profile: str = "auto"  # "auto", "leonardo_booster", "leonardo_dcgp", "generic_slurm"
+    slurm_account: Optional[str] = field(
+        default_factory=lambda: os.environ.get("CINECA_ACCOUNT", os.environ.get("SLURM_ACCOUNT", None))
+    )
+    slurm_partition: Optional[str] = None
+    slurm_qos: Optional[str] = None
+    slurm_nodes: int = 1
+    slurm_gpus_per_node: int = 4
+    slurm_cpus_per_task: int = 8
+    slurm_modules: List[str] = field(default_factory=list)
+    gpu_pinning: bool = True
+    parallel_hessian: bool = True
+    parallel_hessian_workers: Optional[int] = None
+    scratch_dir: Optional[str] = field(
+        default_factory=lambda: os.environ.get("SCRATCH", None)
+    )
+
     def __post_init__(self):
         if str(self.dft_es_candidates).lower() not in ("all", "fc_path"):
             raise ValueError(
@@ -477,6 +496,20 @@ class ToolkitConfig:
                 f"[i] zpl_energy_eV={self.zpl_energy_eV} <= 0; auto-deriving ZPL from potential surfaces."
             )
             self.zpl_energy_eV = None
+
+        # Resolve HPC & Leonardo cluster defaults
+        if str(self.hpc_scheduler).lower() == "slurm" or str(self.cluster_profile).lower() != "auto":
+            from .hpc.cluster_profiles import get_cluster_profile
+            prof = get_cluster_profile(self.cluster_profile)
+            if self.slurm_partition is None:
+                self.slurm_partition = prof.partition
+            if self.slurm_qos is None and prof.qos:
+                self.slurm_qos = prof.qos
+            if not self.slurm_modules and prof.default_modules:
+                self.slurm_modules = list(prof.default_modules)
+
+        if self.parallel_hessian and self.parallel_hessian_workers is None:
+            self.parallel_hessian_workers = max(1, min(16, os.cpu_count() or 4))
 
     def __repr__(self) -> str:
         """Returns a readable representation highlighting only non-default fields."""
