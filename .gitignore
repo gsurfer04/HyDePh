@@ -81,4 +81,9 @@ nep.restart
 .DS_Store
 Thumbs.db
 
+# Test packages & archives for HPC transfer
+*.tar.gz
+*.zip
+test_package_*/
+
 bible.tend-prose.md
