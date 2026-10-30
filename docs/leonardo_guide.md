@@ -48,31 +48,76 @@ Leonardo consists of two primary compute modules:
 
 ## 3. Execution & Parallelization Modes
 
-### Mode 1: Interactive Execution via `salloc` (CINECA Recommended)
-According to official CINECA documentation ([CINECA HPC Scheduler](https://docs.hpc.cineca.it/hpc/hpc_scheduler.html) and [Leonardo User Guide](https://docs.hpc.cineca.it/hpc/leonardo.html)), **`salloc` is recommended over `srun` for interactive sessions**.
+### Mode 1: Unattended Batch Submission via `sbatch` (Recommended for Busy Queues)
+When the cluster queue is congested or wait times are unpredictable, **batch submission is the most reliable approach**. You submit the job and can immediately close your SSH connection or shut down your laptop. Slurm handles queue waiting, allocation, and execution completely in the background.
 
-When you run `salloc`, Slurm queues your request and reserves compute resources (nodes, GPUs, cores). Once granted, your terminal session enters an interactive allocation context:
+```bash
+# Using the helper script:
+bash scripts/leonardo/submit_booster_batch.sh
 
-1. **Request an Interactive Booster Allocation**:
+# Or directly with sbatch:
+sbatch scripts/leonardo/submit_booster_workflow.slurm
+
+# Or submit to the fast debug queue (up to 30 min walltime):
+bash scripts/leonardo/submit_booster_batch.sh --debug
+```
+
+A single Booster node contains 4x NVIDIA A100 GPUs and 32 CPU cores. By specifying `--n-workers-qe 4 --n-procs-qe 1`, HyDePh launches 4 concurrent Quantum ESPRESSO processes, pinning each worker to an isolated GPU (`CUDA_VISIBLE_DEVICES=0,1,2,3`) with 8 OpenMP threads each. This accelerates candidate frame DFT labeling by **$4\times$** without any multi-node overhead.
+
+To monitor or manage your batch job:
+```bash
+# Check queue status
+squeue -u $USER
+
+# Stream live output
+tail -f hydeph_*.out
+
+# Cancel job if needed
+scancel <JOB_ID>
+```
+
+> [!TIP]
+> **Email Notifications**: Add `#SBATCH --mail-type=ALL` and `#SBATCH --mail-user=your.email@domain.com` to `submit_booster_workflow.slurm` to receive automatic notifications when your job starts and completes.
+
+---
+
+### Mode 2: Interactive Execution via `salloc` + `tmux` (Disconnect Protection)
+Official CINECA documentation ([CINECA HPC Scheduler](https://docs.hpc.cineca.it/hpc/hpc_scheduler.html) and [Leonardo User Guide](https://docs.hpc.cineca.it/hpc/leonardo.html)) recommends `salloc` over `srun` for interactive sessions.
+
+However, standard interactive allocations require keeping the SSH connection open. If the queue wait is long or your connection drops, Slurm cancels the request or kills the allocation.
+
+To prevent this, **run `salloc` inside a persistent `tmux` session on the login node**:
+
+1. **Start `tmux` on the login node**:
    ```bash
-   # Standard production allocation (e.g. 1 hour, 1 node, 4 A100 GPUs)
-   bash scripts/leonardo/interactive_booster.sh 01:00:00
+   tmux new -s hydeph
+   ```
 
-   # Or for rapid testing on the debug queue (30 min limit):
+2. **Request an Interactive Booster Allocation**:
+   ```bash
+   # Standard production allocation (e.g. 2 hours):
+   bash scripts/leonardo/interactive_booster.sh 02:00:00
+
+   # Or for rapid testing on the debug queue (30 min limit, near-zero wait time):
    bash scripts/leonardo/interactive_booster.sh --debug
    ```
-   *Equivalent raw Slurm command:*
+   *Equivalent raw Slurm command (omitting --qos so Slurm applies your account default):*
    ```bash
-   # Omit --qos so Slurm applies your account's default QoS (e.g. boost_qos_lprod):
    salloc -A $CINECA_ACCOUNT -p boost_usr_prod \
-       --nodes=1 --ntasks-per-node=4 --cpus-per-task=8 --gres=gpu:4 --time=01:00:00
-
-   # Or for fast debug queue (max 30 min):
-   salloc -A $CINECA_ACCOUNT -p boost_usr_prod --qos=boost_qos_dbg \
-       --nodes=1 --ntasks-per-node=4 --cpus-per-task=8 --gres=gpu:4 --time=00:30:00
+       --nodes=1 --ntasks-per-node=4 --cpus-per-task=8 --gres=gpu:4 --time=02:00:00
    ```
 
-2. **Execute HyDePh Inside the `salloc` Allocation**:
+3. **Detach safely while waiting in queue**:
+   Press `Ctrl` + `b`, then press `d`.
+   You can now safely log out or close your laptop. Slurm keeps your position in the queue.
+
+4. **Reattach anytime later**:
+   ```bash
+   ssh <username>@login.leonardo.cineca.it
+   tmux attach -t hydeph
+   ```
+
+5. **Execute HyDePh Inside the `salloc` Allocation**:
    Once granted, you are placed in an interactive subshell:
    ```bash
    # 1. Activate environment
@@ -84,24 +129,20 @@ When you run `salloc`, Slurm queues your request and reserves compute resources 
        --n-workers-qe 4 \
        --n-procs-qe 1
    ```
-   *Important*: Direct CPU execution commands outside `srun` run in the login shell context; HyDePh's `QERunner` and `ParallelVibrations` automatically dispatch GPU and multi-core tasks to the reserved compute resources using isolated `CUDA_VISIBLE_DEVICES` pinning and OpenMP threading.
 
-3. **Release Allocation**:
+6. **Release Allocation**:
    When finished, type `exit` to terminate the allocation and stop billing your project budget.
 
 ---
 
-### Mode 2: Batch Submission via `sbatch` (Booster Master Job)
-A single Booster node contains 4x NVIDIA A100 GPUs and 32 CPU cores. By specifying:
+### Mode 3: Rapid Verification via the Debug Queue (`boost_qos_dbg`)
+Leonardo maintains dedicated nodes for the debug queue (`boost_qos_dbg`). If you want to verify your environment or test your workflow without waiting in the production queue:
 ```bash
---n-workers-qe 4
---n-procs-qe 1
-```
-HyDePh launches 4 concurrent Quantum ESPRESSO processes, pinning each worker to an isolated GPU (`CUDA_VISIBLE_DEVICES=0,1,2,3`) with 8 OpenMP threads each. This accelerates candidate frame DFT labeling by **$4\times$** without any multi-node overhead.
+# Interactive debug session (max 30 min):
+bash scripts/leonardo/interactive_booster.sh --debug
 
-To submit:
-```bash
-sbatch scripts/leonardo/submit_booster_workflow.slurm
+# Or unattended debug batch job:
+bash scripts/leonardo/submit_booster_batch.sh --debug
 ```
 
 ---
