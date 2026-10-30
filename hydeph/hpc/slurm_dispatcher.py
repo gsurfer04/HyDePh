@@ -247,3 +247,66 @@ echo "[HPC Array] Task $SLURM_ARRAY_TASK_ID completed successfully at $(date)"
             logger.info(f"[+] Saved SLURM job array script to: {script_output_path}")
 
         return script_content
+
+    def generate_salloc_command(
+        self,
+        nodes: int = 1,
+        time_limit: str = "01:00:00",
+        debug: bool = False,
+    ) -> str:
+        """Generates an interactive resource allocation command using salloc for the active profile."""
+        return generate_salloc_command(
+            profile=self.profile,
+            account=self.account,
+            nodes=nodes,
+            time_limit=time_limit,
+            debug=debug,
+        )
+
+
+def generate_salloc_command(
+    profile: Optional[ClusterProfile] = None,
+    account: Optional[str] = None,
+    nodes: int = 1,
+    time_limit: str = "01:00:00",
+    debug: bool = False,
+) -> str:
+    """Generates an interactive resource allocation command using salloc, adhering to CINECA Leonardo guidance.
+
+    On CINECA clusters like Leonardo, salloc is officially recommended over srun for interactive sessions.
+    The scheduler allocates the requested compute nodes; commands executed inside the allocation session
+    subsequently dispatch parallel tasks to compute nodes using srun.
+
+    Parameters
+    ----------
+    profile : ClusterProfile, optional
+        Target cluster profile (default: LEONARDO_BOOSTER).
+    account : str, optional
+        CINECA project account identifier (e.g. 'cin_staff').
+    nodes : int
+        Number of compute nodes to reserve (default: 1).
+    time_limit : str
+        Walltime allocation limit (e.g. '01:00:00' or '00:30:00').
+    debug : bool
+        If True, selects the short debug QOS ('boost_qos_dbg' on Booster).
+
+    Returns
+    -------
+    str
+        The formatted salloc command string.
+    """
+    prof = profile or get_cluster_profile("leonardo_booster")
+    acct = account or os.environ.get("CINECA_ACCOUNT") or os.environ.get("SLURM_ACCOUNT") or "cin_staff"
+
+    qos = "boost_qos_dbg" if debug and "booster" in prof.name else prof.qos
+    qos_part = f"--qos={qos} " if qos else ""
+    gres_part = f"--gres=gpu:{prof.gpus_per_node} " if prof.has_gpu else ""
+    ntasks_node = prof.gpus_per_node if prof.has_gpu else max(1, prof.cpus_per_node // prof.default_cpus_per_task)
+
+    return (
+        f"salloc -A {acct} -p {prof.partition} {qos_part}"
+        f"--nodes={nodes} --ntasks-per-node={ntasks_node} "
+        f"--cpus-per-task={prof.default_cpus_per_task} {gres_part}"
+        f"--time={time_limit}"
+    ).strip()
+

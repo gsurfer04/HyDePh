@@ -153,6 +153,45 @@ def test_slurm_job_array_script_generation(tmp_path):
     assert "python -m hydeph.hpc.array_worker" in script
 
 
+def test_salloc_command_generation():
+    """Tests salloc command generation for interactive Leonardo sessions."""
+    from hydeph.hpc.slurm_dispatcher import generate_salloc_command
+
+    cmd_booster = generate_salloc_command(
+        profile=LEONARDO_BOOSTER,
+        account="cin_interactive_01",
+        nodes=1,
+        time_limit="02:00:00",
+        debug=False,
+    )
+    assert cmd_booster.startswith("salloc -A cin_interactive_01 -p boost_usr_prod")
+    assert "--qos=boost_qos_prod" in cmd_booster
+    assert "--gres=gpu:4" in cmd_booster
+    assert "--nodes=1" in cmd_booster
+    assert "--ntasks-per-node=4" in cmd_booster
+    assert "--cpus-per-task=8" in cmd_booster
+    assert "--time=02:00:00" in cmd_booster
+
+    cmd_dbg = generate_salloc_command(
+        profile=LEONARDO_BOOSTER,
+        account="cin_interactive_01",
+        nodes=1,
+        time_limit="00:30:00",
+        debug=True,
+    )
+    assert "--qos=boost_qos_dbg" in cmd_dbg
+
+    cmd_dcgp = generate_salloc_command(
+        profile=LEONARDO_DCGP,
+        account="cin_interactive_01",
+        nodes=1,
+        time_limit="01:00:00",
+    )
+    assert "-p dcgp_usr_prod" in cmd_dcgp
+    assert "--gres=gpu" not in cmd_dcgp
+    assert "--cpus-per-task=16" in cmd_dcgp
+
+
 def test_parallel_vibrations_numerical_equivalence(tmp_path):
     """Tests that ParallelVibrations produces identical eigenfrequencies to standard ASE Vibrations."""
     # Create simple dimer system with EMT calculator

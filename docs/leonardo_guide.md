@@ -46,9 +46,47 @@ Leonardo consists of two primary compute modules:
 
 ---
 
-## 3. Parallelization Strategies
+## 3. Execution & Parallelization Modes
 
-### Mode 1: Single-Node Multi-GPU Worker Pool (Booster)
+### Mode 1: Interactive Execution via `salloc` (CINECA Recommended)
+According to official CINECA documentation ([CINECA HPC Scheduler](https://docs.hpc.cineca.it/hpc/hpc_scheduler.html) and [Leonardo User Guide](https://docs.hpc.cineca.it/hpc/leonardo.html)), **`salloc` is recommended over `srun` for interactive sessions**.
+
+When you run `salloc`, Slurm queues your request and reserves compute resources (nodes, GPUs, cores). Once granted, your terminal session enters an interactive allocation context:
+
+1. **Request an Interactive Booster Allocation**:
+   ```bash
+   # Standard production allocation (e.g. 1 hour, 1 node, 4 A100 GPUs)
+   bash scripts/leonardo/interactive_booster.sh 01:00:00
+
+   # Or for rapid testing on the debug queue (30 min limit):
+   bash scripts/leonardo/interactive_booster.sh --debug
+   ```
+   *Equivalent raw Slurm command:*
+   ```bash
+   salloc -A $CINECA_ACCOUNT -p boost_usr_prod --qos=boost_qos_prod \
+       --nodes=1 --ntasks-per-node=4 --cpus-per-task=8 --gres=gpu:4 --time=01:00:00
+   ```
+
+2. **Execute HyDePh Inside the `salloc` Allocation**:
+   Once granted, you are placed in an interactive subshell:
+   ```bash
+   # 1. Activate environment
+   source scripts/leonardo/env_leonardo.sh
+
+   # 2. Launch HyDePh across the 4 allocated GPUs
+   python -m hydeph \
+       --config config.yaml \
+       --n-workers-qe 4 \
+       --n-procs-qe 1
+   ```
+   *Important*: Direct CPU execution commands outside `srun` run in the login shell context; HyDePh's `QERunner` and `ParallelVibrations` automatically dispatch GPU and multi-core tasks to the reserved compute resources using isolated `CUDA_VISIBLE_DEVICES` pinning and OpenMP threading.
+
+3. **Release Allocation**:
+   When finished, type `exit` to terminate the allocation and stop billing your project budget.
+
+---
+
+### Mode 2: Batch Submission via `sbatch` (Booster Master Job)
 A single Booster node contains 4x NVIDIA A100 GPUs and 32 CPU cores. By specifying:
 ```bash
 --n-workers-qe 4
@@ -61,7 +99,9 @@ To submit:
 sbatch scripts/leonardo/submit_booster_workflow.slurm
 ```
 
-### Mode 2: SLURM Job Array for Candidate Frame Labeling (Stage 3)
+---
+
+### Mode 3: SLURM Job Array for Candidate Frame Labeling (Stage 3)
 For large frame pools (e.g. 40–100+ frames), candidate frame labeling can be parallelized across up to 16 concurrent GPU tasks using a SLURM Job Array.
 
 1. **Generate Candidate Frames** (Stages 1–2):

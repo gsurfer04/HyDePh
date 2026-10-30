@@ -17,6 +17,7 @@ from .slurm_dispatcher import (
     get_pinned_worker_env,
     mark_frame_done,
     is_frame_done,
+    generate_salloc_command,
 )
 from .parallel_vib import ParallelVibrations
 
@@ -35,5 +36,6 @@ __all__ = [
     "get_pinned_worker_env",
     "mark_frame_done",
     "is_frame_done",
+    "generate_salloc_command",
     "ParallelVibrations",
 ]
