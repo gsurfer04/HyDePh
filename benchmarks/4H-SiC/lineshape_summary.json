@@ -1,13 +1,13 @@
 {
-  "total_S": 1.4786239481934695,
-  "total_S_discrete": 1.4786239481934695,
-  "total_S_integrated": 1.4786239481934698,
-  "dwf_zero_temp": 0.22795114525313198,
+  "total_S": 2.9243250550734405,
+  "total_S_discrete": 2.9243250550734405,
+  "total_S_integrated": 2.9243250550734405,
+  "dwf_zero_temp": 0.053700924850515266,
   "dwf_temperatures": {
-    "10.0": 0.22795114504517422,
-    "77.0": 0.22549597760006185,
-    "150.0": 0.2065768808045698,
-    "300.0": 0.1384237036055362
+    "10.0": 0.05370092484790954,
+    "77.0": 0.052087371296934824,
+    "150.0": 0.03925271323736899,
+    "300.0": 0.01169982261858847
   },
   "n_normal_modes": 1191,
   "n_imaginary_modes": 0,
@@ -17,55 +17,5 @@
     77.0,
     150.0,
     300.0
-  ],
-  "anharmonic": {
-    "10.0": {
-      "regime": "cumulant",
-      "md_strategy": "NVT_thermalization_to_NVE_production",
-      "n_nvt_steps": 400,
-      "n_nve_steps": 2500,
-      "target_T_K": 10.0,
-      "equilibrated_T_K": 10.03179546990899,
-      "fwhm_meV": 2.8770857057244257,
-      "sigma_du": 12.594789991980377,
-      "alpha_soft": 1.0,
-      "omega_T": 65.20000317951063
-    },
-    "77.0": {
-      "regime": "cumulant",
-      "md_strategy": "NVT_thermalization_to_NVE_production",
-      "n_nvt_steps": 400,
-      "n_nve_steps": 2500,
-      "target_T_K": 77.0,
-      "equilibrated_T_K": 76.01386478779003,
-      "fwhm_meV": 3.2880979493993436,
-      "sigma_du": 40.39974620341427,
-      "alpha_soft": 1.0,
-      "omega_T": 65.20000317951063
-    },
-    "150.0": {
-      "regime": "cumulant",
-      "md_strategy": "NVT_thermalization_to_NVE_production",
-      "n_nvt_steps": 400,
-      "n_nve_steps": 2500,
-      "target_T_K": 150.0,
-      "equilibrated_T_K": 137.85302316784134,
-      "fwhm_meV": 5.343159167774047,
-      "sigma_du": 50.15488793048904,
-      "alpha_soft": 1.0,
-      "omega_T": 65.20000317951063
-    },
-    "300.0": {
-      "regime": "cumulant",
-      "md_strategy": "NVT_thermalization_to_NVE_production",
-      "n_nvt_steps": 400,
-      "n_nve_steps": 2500,
-      "target_T_K": 300.0,
-      "equilibrated_T_K": 285.31263985208926,
-      "fwhm_meV": 108.09622008650479,
-      "sigma_du": 84.15393390653855,
-      "alpha_soft": 1.0,
-      "omega_T": 65.20000317951063
-    }
-  }
+  ]
 }
