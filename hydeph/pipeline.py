@@ -126,7 +126,9 @@ def run_pipeline(
     n_procs_qe: Optional[int] = None,
     n_workers_qe: Optional[int] = None,
     from_stage: int = 1,
+    to_stage: Optional[int] = None,
     force_stage: Optional[Union[int, str, List[Any]]] = None,
+    prepare_dft_inputs: bool = False,
 ) -> Dict[str, Any]:
     """Runs the complete Delta-NEP defect workflow and returns a summary dictionary.
 
@@ -142,8 +144,13 @@ def run_pipeline(
         Override concurrent QE worker pools.
     from_stage : int
         Stage to resume execution from (1..6, default 1).
+    to_stage : int, optional
+        Stage to stop execution at (1..6, default 6).
     force_stage : int or str or list, optional
         Stages to force re-execution even if cached artifacts exist.
+    prepare_dft_inputs : bool
+        Whether to pre-generate all Quantum ESPRESSO pw.in input files and standalone
+        SLURM scripts in Stage 2.
 
     Returns
     -------
@@ -155,6 +162,7 @@ def run_pipeline(
     eff_n_procs = n_procs_qe if n_procs_qe is not None else config.n_procs_qe
     eff_n_workers = n_workers_qe if n_workers_qe is not None else config.n_workers_qe
     from_stage = int(from_stage) if from_stage is not None else 1
+    eff_to_stage = int(to_stage) if to_stage is not None else 6
     force_stages = parse_stage_arg(force_stage)
 
     # Configure centralized logging to file and console
@@ -174,6 +182,8 @@ def run_pipeline(
     logger.info(f"Pseudopotentials: {config.pseudopotentials}")
     if from_stage > 1:
         logger.info(f"Resuming workflow from Stage {from_stage}")
+    if eff_to_stage < 6:
+        logger.info(f"Stopping workflow after Stage {eff_to_stage}")
     if force_stages:
         logger.info(f"Forcing re-execution of Stage(s): {sorted(list(force_stages))}")
     logger.info("=" * 78)
@@ -219,6 +229,16 @@ def run_pipeline(
         dq_fc = float(np.sqrt(np.sum(m[:, None] * (dq_vec ** 2))))
         logger.info(f"[+] Loaded relaxed GS ({len(at_gs)} atoms) and ES (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
 
+    if eff_to_stage <= 1:
+        logger.info(f"\n[+] Pipeline stopped after Stage 1 as requested (--to-stage {eff_to_stage}).")
+        return {
+            "workspace_dir": config.workspace_dir,
+            "at_gs": at_gs,
+            "at_es": at_es,
+            "dq_fc": dq_fc,
+            "stage": 1,
+        }
+
     # -------------------------------------------------------------------------
     # [STEP 2/6] Representative Frame Generation Protocol
     # -------------------------------------------------------------------------
@@ -239,6 +259,31 @@ def run_pipeline(
             )
         candidate_frames = ase.io.read(cand_xyz, index=":")
         logger.info(f"[+] Loaded {len(candidate_frames)} candidate frames from {cand_xyz}")
+
+    # Pre-generate DFT input decks and standalone SLURM runner scripts if stopping at stage 2 or requested
+    if eff_to_stage == 2 or prepare_dft_inputs or getattr(config, "prepare_dft_inputs", False):
+        logger.info("\n[-] Pre-generating Quantum ESPRESSO pw.in input decks and standalone SLURM scripts...")
+        qe.prepare_all_dft_inputs(candidate_frames, at_gs=at_gs)
+
+    if eff_to_stage <= 2:
+        logger.info(f"\n[+] Pipeline stopped after Stage 2 as requested (--to-stage {eff_to_stage}).")
+        logger.info("=" * 78)
+        logger.info("      NEXT STEPS FOR DECOUPLED HPC EXECUTION:")
+        logger.info("=" * 78)
+        logger.info("1. Submit pure Quantum ESPRESSO calculations to the compute nodes:")
+        logger.info("   • Standard batch job (4 A100 GPUs): sbatch submit_dft_pure_qe.slurm")
+        logger.info("   • Debug queue (fast 30-min run):   sbatch --qos=boost_qos_dbg submit_dft_pure_qe.slurm")
+        logger.info("   (Zero Python / Conda required on the compute nodes!)")
+        logger.info("")
+        logger.info("2. Once DFT calculations complete, resume post-processing on the login node:")
+        logger.info(f"   python -m hydeph run {config.workspace_dir}/config.yaml --from-stage 4")
+        logger.info("=" * 78)
+        return {
+            "workspace_dir": config.workspace_dir,
+            "candidate_frames": candidate_frames,
+            "dq_fc": dq_fc,
+            "stage": 2,
+        }
 
     # -------------------------------------------------------------------------
     # [STEP 3/6] High-Fidelity DFT Labeling (Quantum ESPRESSO)
@@ -337,17 +382,38 @@ def run_pipeline(
     else:
         logger.info(f"\n[STEP 3/6] Skipping DFT Labeling (resuming from stage {from_stage})...")
         if not os.path.isfile(labeled_xyz):
-            raise FileNotFoundError(
-                f"Cannot resume from stage {from_stage}: Labeled frames file '{labeled_xyz}' not found. "
-                "Run stage 3 first or set --from-stage 3."
-            )
-        labeled_frames = ase.io.read(labeled_xyz, index=":")
-        logger.info(f"[+] Loaded {len(labeled_frames)} DFT-labeled GS frames from {labeled_xyz}")
-        if os.path.isfile(labeled_es_xyz):
-            labeled_frames_es = ase.io.read(labeled_es_xyz, index=":")
-            logger.info(f"[+] Loaded {len(labeled_frames_es)} DFT-labeled ES frames from {labeled_es_xyz}")
+            dft_calc_dir = os.path.join(config.workspace_dir, "dft_calculations")
+            if os.path.isdir(dft_calc_dir):
+                logger.info(f"    [i] '{labeled_xyz}' not found, but '{dft_calc_dir}' exists.")
+                logger.info("    [i] Ingesting completed DFT calculation outputs from disk...")
+                cand_frames_to_ingest = candidate_frames if 'candidate_frames' in locals() else (
+                    ase.io.read(cand_xyz, index=":") if os.path.isfile(cand_xyz) else []
+                )
+                labeled_frames, labeled_frames_es = qe.ingest_completed_calculations(
+                    cand_frames_to_ingest, at_gs=at_gs
+                )
+            else:
+                raise FileNotFoundError(
+                    f"Cannot resume from stage {from_stage}: Neither '{labeled_xyz}' nor '{dft_calc_dir}' was found. "
+                    "Run stages 1-3 first or set --from-stage 3."
+                )
         else:
-            labeled_frames_es = []
+            labeled_frames = ase.io.read(labeled_xyz, index=":")
+            logger.info(f"[+] Loaded {len(labeled_frames)} DFT-labeled GS frames from {labeled_xyz}")
+            if os.path.isfile(labeled_es_xyz):
+                labeled_frames_es = ase.io.read(labeled_es_xyz, index=":")
+                logger.info(f"[+] Loaded {len(labeled_frames_es)} DFT-labeled ES frames from {labeled_es_xyz}")
+            else:
+                labeled_frames_es = []
+
+    if eff_to_stage <= 3:
+        logger.info(f"\n[+] Pipeline stopped after Stage 3 as requested (--to-stage {eff_to_stage}).")
+        return {
+            "workspace_dir": config.workspace_dir,
+            "labeled_frames": labeled_frames,
+            "labeled_frames_es": labeled_frames_es,
+            "stage": 3,
+        }
 
     # -------------------------------------------------------------------------
     # [STEP 4/6] Delta Baseline Extraction & GPU GPUMD Training
@@ -388,6 +454,15 @@ def run_pipeline(
             logger.info(f"[+] Reusing existing trained ES Delta-NEP: {delta_pot_es_path}")
         else:
             delta_pot_es_path = None
+
+    if eff_to_stage <= 4:
+        logger.info(f"\n[+] Pipeline stopped after Stage 4 as requested (--to-stage {eff_to_stage}).")
+        return {
+            "workspace_dir": config.workspace_dir,
+            "delta_potential": delta_pot_path,
+            "delta_potential_es": delta_pot_es_path,
+            "stage": 4,
+        }
 
     # -------------------------------------------------------------------------
     # [STEP 5/6] Assembling Hybrid Defect Potential (V_base + Delta_V)
@@ -466,6 +541,15 @@ def run_pipeline(
         workspace_dir=config.workspace_dir,
         config=config,
     )
+
+    if eff_to_stage <= 5:
+        logger.info(f"\n[+] Pipeline stopped after Stage 5 as requested (--to-stage {eff_to_stage}).")
+        return {
+            "workspace_dir": config.workspace_dir,
+            "hybrid_calc": hybrid_calc,
+            "qc_report": qc_report,
+            "stage": 5,
+        }
 
     # -------------------------------------------------------------------------
     # [STEP 6/6] Normal Modes & Multi-Temperature Optical Lineshapes
@@ -553,6 +637,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Resume pipeline execution from specified stage (1..6)",
     )
     p_run.add_argument(
+        "--to-stage",
+        type=int,
+        default=6,
+        choices=range(1, 7),
+        help="Stop pipeline execution at specified stage (1..6)",
+    )
+    p_run.add_argument(
+        "--stage",
+        type=int,
+        default=None,
+        choices=range(1, 7),
+        help="Execute only the specified stage (shortcut for --from-stage N --to-stage N)",
+    )
+    p_run.add_argument(
+        "--prepare-dft",
+        action="store_true",
+        help="Pre-generate all Quantum ESPRESSO pw.in input files and standalone SLURM scripts",
+    )
+    p_run.add_argument(
         "--force-stage",
         type=str,
         default=None,
@@ -596,10 +699,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.workers is not None:
             cfg.n_workers_qe = args.workers
 
+        from_st = args.from_stage
+        to_st = args.to_stage
+        if args.stage is not None:
+            from_st = args.stage
+            to_st = args.stage
+
         run_pipeline(
             cfg,
-            from_stage=args.from_stage,
+            from_stage=from_st,
+            to_stage=to_st,
             force_stage=args.force_stage,
+            prepare_dft_inputs=args.prepare_dft,
         )
         return 0
 

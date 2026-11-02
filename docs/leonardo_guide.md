@@ -48,7 +48,50 @@ Leonardo consists of two primary compute modules:
 
 ## 3. Execution & Parallelization Modes
 
-### Mode 1: Unattended Batch Submission via `sbatch` (Recommended for Busy Queues)
+### Mode 1: Decoupled Staged HPC Execution (Recommended — Zero Python on Compute Nodes)
+Getting Python virtual environments or Conda activated reliably across non-interactive compute node Slurm jobs can be awkward. 
+
+In this recommended workflow, **only native Quantum ESPRESSO (`pw.x`) runs on compute nodes**. The pre-processing (geometry & frame sampling) and post-processing ($\Delta$-NEP training, hybrid potential assembly, lineshapes) run directly on the login node!
+
+#### Phase 1: Pre-Processing on Login Node
+Run stages 1 and 2 directly on the login node (fast, takes ~20 seconds, no GPU allocation needed):
+```bash
+python -m hydeph run config.yaml --to-stage 2
+```
+This automatically:
+* Constructs defect supercells and relaxes ground/excited states with the foundation potential.
+* Samples candidate snapshot configurations along the optical coordinate.
+* Pre-generates all Quantum ESPRESSO `pw.in` input files in `dft_calculations/` and `dft_calculations_es/`.
+* Writes the pure bash/SLURM runner script `submit_dft_pure_qe.slurm`.
+
+#### Phase 2: Pure Quantum ESPRESSO on Compute Nodes
+Submit the heavy DFT calculations to the Leonardo Booster compute nodes:
+```bash
+# Standard 4-GPU Booster batch job:
+sbatch submit_dft_pure_qe.slurm
+
+# Or fast debug queue (up to 30 min walltime):
+sbatch --qos=boost_qos_dbg submit_dft_pure_qe.slurm
+```
+* **Pure native CINECA modules**: Uses `module load profile/chem-phys` and `module load q-e/7.2`.
+* **Zero Python required**: Compute nodes do not need Python or Conda!
+* **Multi-GPU pinning**: Automatically runs 4 concurrent calculations pinned across the 4x A100 GPUs (`CUDA_VISIBLE_DEVICES=0,1,2,3`).
+* Disconnect safely; monitor with `squeue -u $USER`.
+
+#### Phase 3: Post-Processing & Optical Lineshapes on Login Node
+Once the DFT batch job completes:
+```bash
+python -m hydeph run config.yaml --from-stage 4
+```
+HyDePh will automatically:
+* Ingest all converged `pw.out` files from disk into `labeled_dft_frames.xyz`.
+* Train the $\Delta$-NEP models (Stage 4).
+* Assemble the hybrid potential (Stage 5).
+* Compute supercell vibrations and multi-temperature optical lineshapes (Stage 6).
+
+---
+
+### Mode 2: Unattended Single-Sweep Batch Submission via `sbatch`
 When the cluster queue is congested or wait times are unpredictable, **batch submission is the most reliable approach**. You submit the job and can immediately close your SSH connection or shut down your laptop. Slurm handles queue waiting, allocation, and execution completely in the background.
 
 ```bash

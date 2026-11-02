@@ -254,3 +254,182 @@ def test_toolkit_config_hpc_extensions(tmp_path):
     assert cfg_restored.hpc_scheduler == "slurm"
     assert cfg_restored.slurm_account == "cin_project_123"
     assert cfg_restored.slurm_partition == "boost_usr_prod"
+
+
+def test_prepare_all_dft_inputs_and_slurm_scripts(tmp_path):
+    """Tests that prepare_all_dft_inputs generates pw.in decks and standalone SLURM runner scripts."""
+    from hydeph.qe_runner import QERunner
+
+    ws = str(tmp_path / "ws_dft_prep")
+    os.makedirs(ws, exist_ok=True)
+
+    pristine_xyz = str(tmp_path / "pristine.xyz")
+    Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True).write(pristine_xyz)
+
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    c_upf = os.path.join(pseudo_dir, "C.upf")
+    with open(c_upf, "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_xyz,
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        cluster_profile="leonardo_booster",
+        slurm_account="cin_staff",
+        spin_multiplicity=1,
+    )
+    qe = QERunner(cfg, pw_exe="pw.x")
+
+    # Create 2 candidate frames
+    at1 = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    at1.info["sample_type"] = "franck_condon"
+    at1.info["frame_id"] = "fc_00"
+    at1.info["candidate_index"] = 0
+    at1.info["lambda"] = 0.0
+
+    at2 = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.5)], cell=[10, 10, 10], pbc=True)
+    at2.info["sample_type"] = "franck_condon"
+    at2.info["frame_id"] = "fc_01"
+    at2.info["candidate_index"] = 1
+    at2.info["lambda"] = 1.0
+
+    frames = [at1, at2]
+    prep = qe.prepare_all_dft_inputs(frames, at_gs=at1)
+
+    assert prep["n_gs_frames"] == 2
+    assert os.path.isfile(os.path.join(ws, "dft_calculations", "frame_000_fc_00", "pw.in"))
+    assert os.path.isfile(os.path.join(ws, "dft_calculations", "frame_001_fc_01", "pw.in"))
+
+    # Verify standalone SLURM script
+    slurm_script = os.path.join(ws, "submit_dft_pure_qe.slurm")
+    assert os.path.isfile(slurm_script)
+    with open(slurm_script, "r") as f:
+        content = f.read()
+    assert "module load q-e/7.2" in content
+    assert "CUDA_VISIBLE_DEVICES" in content
+    assert "pw.x" in content
+    # No python invocation required for execution on compute node!
+    assert not any(line.strip().startswith("python ") for line in content.splitlines())
+
+    # Verify array script and list
+    array_script = os.path.join(ws, "submit_dft_array_pure_qe.slurm")
+    assert os.path.isfile(array_script)
+    list_file = os.path.join(ws, "dft_frames_list.txt")
+    assert os.path.isfile(list_file)
+
+
+def test_ingest_completed_calculations(tmp_path):
+    """Tests ingesting completed pw.out calculations from disk without executing pw.x."""
+    from hydeph.qe_runner import QERunner
+
+    ws = str(tmp_path / "ws_ingest")
+    os.makedirs(ws, exist_ok=True)
+
+    pristine_xyz = str(tmp_path / "pristine_ingest.xyz")
+    Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True).write(pristine_xyz)
+
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    c_upf = os.path.join(pseudo_dir, "C.upf")
+    with open(c_upf, "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    pot_file = str(tmp_path / "nep.txt")
+    with open(pot_file, "w") as f:
+        f.write("dummy nep foundation potential")
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_xyz,
+        foundation_potential_path=pot_file,
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=1,
+        pw_exe="pw.x",
+    )
+    qe = QERunner(cfg, pw_exe="pw.x")
+
+    at1 = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    at1.info["sample_type"] = "franck_condon"
+    at1.info["frame_id"] = "fc_00"
+    at1.info["candidate_index"] = 0
+    at1.info["lambda"] = 0.0
+
+    # Write pw.in and mock converged pw.out
+    calc_dir = os.path.join(ws, "dft_calculations", "frame_000_fc_00")
+    os.makedirs(calc_dir, exist_ok=True)
+    pw_in = os.path.join(calc_dir, "pw.in")
+    from hydeph.qe_runner import write_qe_input
+    write_qe_input(at1, pw_in, cfg)
+
+    pw_out = os.path.join(calc_dir, "pw.out")
+    mock_pw_out = """
+     Program PWSCF v.7.2 starts
+     !    total energy              =     -22.50000000 Ry
+     Forces acting on atoms (cartesian axes, Ry/au):
+     atom    1 type  1   force =     0.00000000    0.00000000    0.01000000
+     atom    2 type  1   force =     0.00000000    0.00000000   -0.01000000
+     Total force =     0.014142     Total SCF correction =     0.000001
+     the Fermi energy is    -3.5000 ev
+     JOB DONE.
+"""
+    with open(pw_out, "w") as f:
+        f.write(mock_pw_out)
+
+    labeled_gs, labeled_es = qe.ingest_completed_calculations([at1], at_gs=at1)
+    assert len(labeled_gs) == 1
+    assert labeled_gs[0].info["qe_status"] == "converged"
+    assert pytest.approx(labeled_gs[0].info["energy"], 1e-3) == -22.5 * 13.6056980659
+    assert labeled_gs[0].arrays["forces"].shape == (2, 3)
+
+    out_xyz = os.path.join(ws, "labeled_dft_frames.xyz")
+    assert os.path.isfile(out_xyz)
+
+
+def test_run_pipeline_to_stage(tmp_path):
+    """Tests that run_pipeline stops cleanly at requested stage."""
+    from unittest.mock import patch
+    from hydeph.pipeline import run_pipeline
+
+    ws = str(tmp_path / "ws_pipe_stage")
+    os.makedirs(ws, exist_ok=True)
+
+    pristine_xyz = str(tmp_path / "pristine_p.xyz")
+    Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True).write(pristine_xyz)
+
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    c_upf = os.path.join(pseudo_dir, "C.upf")
+    with open(c_upf, "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    pot_file = str(tmp_path / "nep.txt")
+    with open(pot_file, "w") as f:
+        f.write("dummy nep foundation potential")
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_xyz,
+        foundation_potential_path=pot_file,
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=1,
+        pw_exe="pw.x",
+    )
+
+    with patch("hydeph.pipeline.DefectBuilder") as mock_builder_cls:
+        mock_builder = mock_builder_cls.return_value
+        at_gs = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+        at_es = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.5)], cell=[10, 10, 10], pbc=True)
+        mock_builder.build_supercell_and_defect.return_value = (at_gs, at_gs)
+        mock_builder.relax_ground_state.return_value = at_gs
+        mock_builder.generate_excited_state_geometry.return_value = (at_es, 0.5)
+
+        res1 = run_pipeline(cfg, to_stage=1)
+        assert res1["stage"] == 1
+        assert "candidate_frames" not in res1
+
+

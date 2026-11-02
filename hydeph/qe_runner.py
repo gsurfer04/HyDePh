@@ -2142,3 +2142,435 @@ class QERunner:
         summary_str = ", ".join(f"{k}: {v}" for k, v in sorted(final_types.items()))
         logger.info(f"\n[+] DFT Labeling Complete: {len(final_labeled)} total frames ({summary_str}) -> {out_xyz}")
         return final_labeled
+
+    def prepare_all_dft_inputs(
+        self,
+        candidate_frames: List[Atoms],
+        at_gs: Optional[Atoms] = None,
+        calc_dir_base: Optional[str] = None,
+        write_slurm_scripts: bool = True,
+    ) -> Dict[str, Any]:
+        """Prepares Quantum ESPRESSO pw.in input files and standalone SLURM batch scripts.
+
+        Enables fully decoupled HPC execution:
+        - Login node runs pre-processing & generates all pw.in files (no GPU needed).
+        - Compute node runs pure pw.x via SLURM (no Python or Conda needed on compute nodes).
+        - Login node resumes post-processing, Delta-NEP training, and lineshapes.
+
+        Parameters
+        ----------
+        candidate_frames : List[Atoms]
+            Candidate geometries to be labeled.
+        at_gs : Atoms, optional
+            Reference relaxed ground-state structure.
+        calc_dir_base : str, optional
+            Base workspace directory (defaults to config.workspace_dir).
+        write_slurm_scripts : bool
+            Whether to generate standalone SLURM runner scripts (submit_dft_pure_qe.slurm).
+
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing input paths, counts, and SLURM script paths.
+        """
+        calc_base = calc_dir_base or self.config.workspace_dir
+        os.makedirs(calc_base, exist_ok=True)
+        dft_dir = os.path.join(calc_base, "dft_calculations")
+        os.makedirs(dft_dir, exist_ok=True)
+
+        logger.info(f"[-] Generating Quantum ESPRESSO input decks for {len(candidate_frames)} candidate frames in {dft_dir}...")
+
+        prepared_gs = []
+        for idx, fr in enumerate(candidate_frames):
+            cand_idx = fr.info.get("candidate_index", idx)
+            frame_id = fr.info.get("frame_id") or fr.info.get("label") or f"frame_{cand_idx:02d}"
+            frame_dir = os.path.join(dft_dir, f"frame_{cand_idx:03d}_{frame_id}")
+            os.makedirs(os.path.join(frame_dir, "tmp"), exist_ok=True)
+            pw_in = os.path.join(frame_dir, "pw.in")
+            write_qe_input(fr, pw_in, self.config)
+            prepared_gs.append(frame_dir)
+
+        # Handle optical excited state frames if paired Delta-NEP is requested
+        prepared_es = []
+        if getattr(self.config, "paired_delta_nep", True) and getattr(self.config, "excited_state_method", "delta_scf") == "delta_scf":
+            dft_es_dir = os.path.join(calc_base, "dft_calculations_es")
+            os.makedirs(dft_es_dir, exist_ok=True)
+
+            es_cand_mode = getattr(self.config, "dft_es_candidates", "all").lower()
+            if es_cand_mode == "fc_path":
+                es_targets = [f for f in candidate_frames if f.info.get("sample_type") == "franck_condon"]
+            else:
+                es_targets = list(candidate_frames)
+
+            ref_structure = at_gs if at_gs is not None else candidate_frames[0]
+            unique_syms = sorted(list(set(ref_structure.get_chemical_symbols())))
+            z_vals = {}
+            for s in unique_syms:
+                upf = self.config.pseudopotentials.get(s, "")
+                if upf:
+                    p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
+                    z_vals[s] = inspect_upf_metadata(p).get("z_valence")
+
+            if all(v is not None for v in z_vals.values()):
+                nelec_total = int(round(sum(z_vals[s] for s in ref_structure.get_chemical_symbols()) - float(self.config.tot_charge)))
+            else:
+                nelec_total = len(ref_structure) * 4
+
+            tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
+            if (nelec_total % 2) != (tot_mag % 2):
+                if nelec_total % 2 != 0:
+                    valid_mag = 1 if tot_mag <= 0 else (tot_mag if tot_mag % 2 != 0 else tot_mag + 1)
+                else:
+                    valid_mag = 0 if tot_mag <= 0 else (tot_mag if tot_mag % 2 == 0 else tot_mag + 1)
+                tot_mag = valid_mag
+
+            n_occ_max = (nelec_total + abs(tot_mag)) // 2
+            spin_chan = getattr(self.config, "delta_scf_spin_channel", 2) or 2
+            homo_b = getattr(self.config, "delta_scf_homo_band", n_occ_max) or n_occ_max
+            lumo_b = getattr(self.config, "delta_scf_lumo_band", n_occ_max + 1) or (n_occ_max + 1)
+            lumo_deg = max(1, int(getattr(self.config, "delta_scf_lumo_degeneracy", 1) or 1))
+            nbnd = max(lumo_b + lumo_deg - 1, homo_b + 1, n_occ_max) + 8
+
+            constrained_occupations = build_delta_scf_occupations(
+                nelec=nelec_total,
+                tot_magnetization=tot_mag,
+                nbnd=nbnd,
+                homo_band=homo_b,
+                lumo_band=lumo_b,
+                spin_channel=spin_chan,
+                lumo_degeneracy=lumo_deg,
+            )
+
+            for i, fr in enumerate(es_targets):
+                cand_idx = fr.info.get("candidate_index", i)
+                frame_id = fr.info.get("frame_id") or fr.info.get("label") or f"frame_{cand_idx:02d}"
+                frame_dir_es = os.path.join(dft_es_dir, f"frame_es_{cand_idx:03d}_{frame_id}")
+                os.makedirs(os.path.join(frame_dir_es, "tmp"), exist_ok=True)
+                pw_in = os.path.join(frame_dir_es, "pw.in")
+                write_qe_input(
+                    fr,
+                    pw_in,
+                    self.config,
+                    occupations_mode="from_input",
+                    constrained_occupations=constrained_occupations,
+                )
+                prepared_es.append(frame_dir_es)
+
+        logger.info(f"[+] Prepared {len(prepared_gs)} GS pw.in files in {dft_dir}")
+        if prepared_es:
+            logger.info(f"[+] Prepared {len(prepared_es)} ES Delta-SCF pw.in files in {dft_es_dir}")
+
+        slurm_script_path = None
+        array_script_path = None
+        list_file_path = None
+
+        if write_slurm_scripts:
+            # 1. Standalone 4-GPU Slurm script for Leonardo Booster
+            acct = getattr(self.config, "slurm_account", "") or os.environ.get("CINECA_ACCOUNT", "cin_staff")
+            slurm_content = f"""#!/bin/bash
+# ==============================================================================
+# Standalone Quantum ESPRESSO DFT Runner on CINECA Leonardo Booster
+# ==============================================================================
+# Executes candidate frame DFT calculations across 4x NVIDIA A100 GPUs.
+# This script does NOT require Python or any Conda environment on compute nodes!
+# ==============================================================================
+#SBATCH --job-name=hydeph_pw_dft
+#SBATCH --account={acct}
+#SBATCH --partition=boost_usr_prod
+# Note: --qos is omitted by default so Slurm uses your account default QoS (e.g. boost_qos_lprod).
+# For short debug jobs (<= 30 min), use: #SBATCH --qos=boost_qos_dbg
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:4
+#SBATCH --time=04:00:00
+#SBATCH --output=hydeph_dft_%j.out
+#SBATCH --error=hydeph_dft_%j.err
+
+set -e
+
+echo "=============================================================================="
+echo " Starting Pure Quantum ESPRESSO Calculations on CINECA Leonardo Booster"
+echo " Host: $(hostname) | Job ID: $SLURM_JOB_ID | Start: $(date)"
+echo "=============================================================================="
+
+module purge
+module load profile/chem-phys
+module load q-e/7.2
+module load cuda/11.8
+
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+PW_CMD="pw.x"
+
+# Collect all frame directories containing pw.in
+DIRS=()
+if [ -d "dft_calculations" ]; then
+    while IFS= read -r d; do
+        DIRS+=("$d")
+    done < <(find dft_calculations -mindepth 1 -maxdepth 1 -type d | sort)
+fi
+if [ -d "dft_calculations_es" ]; then
+    while IFS= read -r d; do
+        DIRS+=("$d")
+    done < <(find dft_calculations_es -mindepth 1 -maxdepth 1 -type d | sort)
+fi
+
+TOTAL=${{#DIRS[@]}}
+echo "[+] Total candidate frame directories: $TOTAL"
+
+MAX_CONCURRENT=4
+RUNNING=0
+
+for i in "${{!DIRS[@]}}"; do
+    DIR="${{DIRS[$i]}}"
+    IN_FILE="$DIR/pw.in"
+    OUT_FILE="$DIR/pw.out"
+
+    if [ ! -f "$IN_FILE" ]; then
+        continue
+    fi
+
+    # Skip already converged calculations
+    if [ -f "$OUT_FILE" ] && grep -q "JOB DONE." "$OUT_FILE" 2>/dev/null && ! grep -q "convergence NOT achieved" "$OUT_FILE" 2>/dev/null; then
+        echo "[SKIP] Frame $((i+1))/$TOTAL ($DIR) is already converged."
+        continue
+    fi
+
+    GPU_ID=$(( i % MAX_CONCURRENT ))
+    echo "[RUN]  Frame $((i+1))/$TOTAL ($DIR) on GPU $GPU_ID..."
+
+    (
+        export CUDA_VISIBLE_DEVICES=$GPU_ID
+        cd "$DIR"
+        $PW_CMD -in pw.in > pw.out 2>&1
+    ) &
+
+    RUNNING=$((RUNNING + 1))
+    if [ $RUNNING -ge $MAX_CONCURRENT ]; then
+        wait -n 2>/dev/null || wait
+        RUNNING=$((RUNNING - 1))
+    fi
+done
+
+wait
+echo "=============================================================================="
+echo " All DFT calculations finished at $(date)"
+echo " Resume post-processing on login node with:"
+echo "     python -m hydeph run config.yaml --from-stage 4"
+echo "=============================================================================="
+"""
+            slurm_script_path = os.path.join(calc_base, "submit_dft_pure_qe.slurm")
+            with open(slurm_script_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(slurm_content)
+
+            # 2. Frame list for SLURM Job Array
+            all_dirs_rel = [os.path.relpath(d, calc_base) for d in (prepared_gs + prepared_es)]
+            list_file_path = os.path.join(calc_base, "dft_frames_list.txt")
+            with open(list_file_path, "w", encoding="utf-8", newline="\n") as f:
+                for d in all_dirs_rel:
+                    f.write(f"{d}\n")
+
+            array_content = f"""#!/bin/bash
+# ==============================================================================
+# CINECA Leonardo Booster: Pure QE Job Array Script
+# ==============================================================================
+# Usage:
+#   sbatch --array=0-$(($(wc -l < dft_frames_list.txt) - 1))%16 submit_dft_array_pure_qe.slurm
+# ==============================================================================
+#SBATCH --job-name=hydeph_pw_array
+#SBATCH --account={acct}
+#SBATCH --partition=boost_usr_prod
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --time=01:00:00
+#SBATCH --output=hydeph_array_%A_%a.out
+#SBATCH --error=hydeph_array_%A_%a.err
+
+set -e
+
+module purge
+module load profile/chem-phys
+module load q-e/7.2
+module load cuda/11.8
+
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+DIR=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" dft_frames_list.txt)
+if [ -z "$DIR" ] || [ ! -d "$DIR" ]; then
+    echo "[!] Error: No directory found at line $((SLURM_ARRAY_TASK_ID + 1)) of dft_frames_list.txt"
+    exit 1
+fi
+
+echo "[+] Array Task $SLURM_ARRAY_TASK_ID running in $DIR on $(hostname)..."
+cd "$DIR"
+pw.x -in pw.in > pw.out 2>&1
+echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished at $(date)"
+"""
+            array_script_path = os.path.join(calc_base, "submit_dft_array_pure_qe.slurm")
+            with open(array_script_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(array_content)
+
+            logger.info(f"[+] Written pure QE batch script: {slurm_script_path}")
+            logger.info(f"[+] Written pure QE array script: {array_script_path}")
+
+        return {
+            "n_gs_frames": len(prepared_gs),
+            "n_es_frames": len(prepared_es),
+            "gs_dirs": prepared_gs,
+            "es_dirs": prepared_es,
+            "slurm_script": slurm_script_path,
+            "array_script": array_script_path,
+            "list_file": list_file_path,
+        }
+
+    def ingest_completed_calculations(
+        self,
+        candidate_frames: List[Atoms],
+        at_gs: Optional[Atoms] = None,
+        calc_dir_base: Optional[str] = None,
+    ) -> Tuple[List[Atoms], List[Atoms]]:
+        """Ingests completed Quantum ESPRESSO calculations from disk without executing `pw.x`.
+
+        Parses converged energies, forces, and electronic band gaps from `dft_calculations/`
+        and `dft_calculations_es/`, writes `labeled_dft_frames.xyz` and `labeled_frames_es.xyz`,
+        and updates `at_gs` info.
+
+        Parameters
+        ----------
+        candidate_frames : List[Atoms]
+            Original candidate geometries.
+        at_gs : Atoms, optional
+            Reference ground state structure to update with DFT ground state properties.
+        calc_dir_base : str, optional
+            Workspace root directory (defaults to config.workspace_dir).
+
+        Returns
+        -------
+        Tuple[List[Atoms], List[Atoms]]
+            `(labeled_frames_gs, labeled_frames_es)`
+        """
+        calc_base = calc_dir_base or self.config.workspace_dir
+        dft_dir = os.path.join(calc_base, "dft_calculations")
+        dft_es_dir = os.path.join(calc_base, "dft_calculations_es")
+        out_xyz = os.path.join(calc_base, "labeled_dft_frames.xyz")
+        out_es_xyz = os.path.join(calc_base, "labeled_frames_es.xyz")
+
+        logger.info(f"[-] Ingesting completed DFT calculations from {dft_dir}...")
+
+        # 1. Ingest Ground State frames
+        labeled_gs: List[Atoms] = []
+        missing_gs: List[str] = []
+
+        for idx, fr in enumerate(candidate_frames):
+            cand_idx = fr.info.get("candidate_index", idx)
+            frame_id = fr.info.get("frame_id") or fr.info.get("label") or f"frame_{cand_idx:02d}"
+            stype = fr.info.get("sample_type", "unknown")
+
+            cdir, is_done = find_frame_calc_dir(dft_dir, cand_idx, frame_id, fr, config=self.config)
+            pw_out = os.path.join(cdir, "pw.out")
+
+            if is_done and os.path.isfile(pw_out):
+                e_ev, f_ev_a = parse_qe_output(pw_out)
+                if e_ev is not None and f_ev_a is not None and len(f_ev_a) == len(fr):
+                    at = fr.copy()
+                    at.calc = None
+                    at.info["energy"] = e_ev
+                    at.arrays["forces"] = f_ev_a
+                    at.info["qe_status"] = "converged"
+                    at.info["sample_type"] = stype
+                    if "lambda" in fr.info:
+                        at.info["lambda"] = fr.info["lambda"]
+                    gap_info = parse_qe_band_gap(pw_out)
+                    if gap_info:
+                        for k, v in gap_info.items():
+                            at.info[f"dft_{k}"] = v
+                    labeled_gs.append(at)
+                    continue
+
+            missing_gs.append(f"{frame_id} ({os.path.basename(cdir)})")
+
+        if missing_gs:
+            logger.warning(
+                f"[!] Notice: {len(missing_gs)}/{len(candidate_frames)} GS frames are not yet converged or missing."
+            )
+            if len(missing_gs) <= 5:
+                logger.warning(f"    Missing: {', '.join(missing_gs)}")
+
+        if not labeled_gs:
+            raise FileNotFoundError(
+                f"No converged Quantum ESPRESSO calculations found in '{dft_dir}'. "
+                "Please run the compute job (e.g. sbatch submit_dft_pure_qe.slurm) before resuming Stage 4."
+            )
+
+        # Write labeled_dft_frames.xyz
+        for f in labeled_gs:
+            f.calc = None
+        tmp_xyz = out_xyz + ".tmp"
+        ase.io.write(tmp_xyz, labeled_gs, format="extxyz")
+        os.replace(tmp_xyz, out_xyz)
+        logger.info(f"[+] Ingested {len(labeled_gs)} converged GS frames -> {out_xyz}")
+
+        # Attach DFT properties to at_gs if present
+        if at_gs is not None:
+            gs_cand = next(
+                (f for f in labeled_gs if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4),
+                labeled_gs[0] if labeled_gs else None,
+            )
+            if gs_cand is not None:
+                if "energy" in gs_cand.info:
+                    at_gs.info["energy"] = float(gs_cand.info["energy"])
+                for k in ("dft_gap_eV", "dft_homo_eV", "dft_lumo_eV", "dft_fermi_eV"):
+                    if k in gs_cand.info:
+                        at_gs.info[k] = float(gs_cand.info[k])
+
+        # 2. Ingest Excited State frames if dft_calculations_es exists
+        labeled_es: List[Atoms] = []
+        if os.path.isdir(dft_es_dir):
+            logger.info(f"[-] Ingesting optical excited-state (Delta-SCF) calculations from {dft_es_dir}...")
+            es_cand_mode = getattr(self.config, "dft_es_candidates", "all").lower()
+            if es_cand_mode == "fc_path":
+                es_targets = [f for f in candidate_frames if f.info.get("sample_type") == "franck_condon"]
+            else:
+                es_targets = list(candidate_frames)
+
+            for i, fr in enumerate(es_targets):
+                cand_idx = fr.info.get("candidate_index", i)
+                frame_id = fr.info.get("frame_id") or fr.info.get("label") or f"frame_{cand_idx:02d}"
+                stype = fr.info.get("sample_type", "franck_condon")
+
+                cdir_es = os.path.join(dft_es_dir, f"frame_es_{cand_idx:03d}_{frame_id}")
+                pw_out = os.path.join(cdir_es, "pw.out")
+                if os.path.isfile(pw_out):
+                    try:
+                        with open(pw_out, "r", encoding="utf-8", errors="replace") as pf:
+                            content = pf.read()
+                        if "JOB DONE." in content and "convergence NOT achieved" not in content:
+                            e_ev, f_ev_a = parse_qe_output(pw_out)
+                            if e_ev is not None and f_ev_a is not None and len(f_ev_a) == len(fr):
+                                at = fr.copy()
+                                at.calc = None
+                                at.info["energy"] = e_ev
+                                at.arrays["forces"] = f_ev_a
+                                at.info["electronic_state"] = "excited"
+                                at.info["sample_type"] = stype
+                                at.info["qe_status"] = "converged"
+                                if "lambda" in fr.info:
+                                    at.info["lambda"] = fr.info["lambda"]
+                                labeled_es.append(at)
+                    except Exception:
+                        pass
+
+            if labeled_es:
+                for f in labeled_es:
+                    f.calc = None
+                tmp_es_xyz = out_es_xyz + ".tmp"
+                ase.io.write(tmp_es_xyz, labeled_es, format="extxyz")
+                os.replace(tmp_es_xyz, out_es_xyz)
+                logger.info(f"[+] Ingested {len(labeled_es)} converged ES frames -> {out_es_xyz}")
+
+        return labeled_gs, labeled_es
