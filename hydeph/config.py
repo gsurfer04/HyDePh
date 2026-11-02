@@ -597,6 +597,26 @@ class ToolkitConfig:
 
         return cls.from_dict(data)
 
+    @classmethod
+    def load_from_yaml(cls, path: str) -> ToolkitConfig:
+        """Loads configuration from a YAML file (convenience alias for from_file)."""
+        return cls.from_file(path)
+
+    @classmethod
+    def from_yaml(cls, path: str) -> ToolkitConfig:
+        """Loads configuration from a YAML file (convenience alias for from_file)."""
+        return cls.from_file(path)
+
+    @classmethod
+    def load_from_json(cls, path: str) -> ToolkitConfig:
+        """Loads configuration from a JSON file (convenience alias for from_file)."""
+        return cls.from_file(path)
+
+    @classmethod
+    def from_json(cls, path: str) -> ToolkitConfig:
+        """Loads configuration from a JSON file (convenience alias for from_file)."""
+        return cls.from_file(path)
+
     def get_system_elements(self) -> List[str]:
         """Detect all unique chemical elements present in configured structures and defect settings."""
         elements: Set[str] = set()
