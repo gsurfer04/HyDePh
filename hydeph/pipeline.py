@@ -214,11 +214,37 @@ def run_pipeline(
     else:
         logger.info(f"\n[STEP 1/6] Skipping Defect Construction (resuming from stage {from_stage})...")
         if not os.path.isfile(gs_xyz):
-            raise FileNotFoundError(
-                f"Cannot resume from stage {from_stage}: Relaxed ground state '{gs_xyz}' not found. "
-                "Run stage 1 first or set --from-stage 1."
-            )
+            cand_gs = [
+                "relaxed_gs.xyz",
+                os.path.join(".", "relaxed_gs.xyz"),
+            ]
+            if config.pristine_cell_path:
+                cand_gs.append(os.path.join(os.path.dirname(config.pristine_cell_path), "relaxed_gs.xyz"))
+            found_gs = next((p for p in cand_gs if os.path.isfile(p)), None)
+            if found_gs:
+                logger.info(f"[+] Discovered pre-relaxed ground state at '{found_gs}', copying to '{gs_xyz}'")
+                os.makedirs(config.workspace_dir, exist_ok=True)
+                shutil.copy2(found_gs, gs_xyz)
+            else:
+                raise FileNotFoundError(
+                    f"Cannot resume from stage {from_stage}: Relaxed ground state '{gs_xyz}' not found. "
+                    "Run stage 1 first or set --from-stage 1."
+                )
         at_gs = ase.io.read(gs_xyz)
+        if not os.path.isfile(es_xyz):
+            cand_es = [
+                "relaxed_es.xyz",
+                os.path.join(".", "relaxed_es.xyz"),
+            ]
+            if getattr(config, "excited_cell_path", None):
+                cand_es.insert(0, config.excited_cell_path)
+            if config.pristine_cell_path:
+                cand_es.append(os.path.join(os.path.dirname(config.pristine_cell_path), "relaxed_es.xyz"))
+            found_es = next((p for p in cand_es if os.path.isfile(p)), None)
+            if found_es:
+                logger.info(f"[+] Discovered pre-relaxed excited state at '{found_es}', copying to '{es_xyz}'")
+                os.makedirs(config.workspace_dir, exist_ok=True)
+                shutil.copy2(found_es, es_xyz)
         if os.path.isfile(es_xyz):
             at_es = ase.io.read(es_xyz)
         else:

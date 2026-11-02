@@ -387,20 +387,35 @@ class DefectBuilder:
         force = force_relax or self.config.force_resample
         center = self.vac_pos if self.vac_pos is not None else get_defect_center(defect_sc)
 
-        if not force and os.path.isfile(gs_path) and os.path.getsize(gs_path) > 0:
-            try:
-                cached_gs = ase.io.read(gs_path)
-                if (
-                    len(cached_gs) == len(defect_sc)
-                    and cached_gs.get_chemical_symbols() == defect_sc.get_chemical_symbols()
-                ):
-                    cached_gs.info["defect_center"] = np.asarray(center, dtype=float)
-                    if "gs_source" not in cached_gs.info:
-                        cached_gs.info["gs_source"] = "cached"
-                    logger.info(f"[i] Reusing existing relaxed ground state from {gs_path}")
-                    return cached_gs
-            except Exception:
-                pass
+        # Check candidate paths for pre-relaxed ground state (workspace, current dir, pristine dir)
+        candidates = [gs_path]
+        if self.config.workspace_dir != ".":
+            candidates.extend(["relaxed_gs.xyz", os.path.join(".", "relaxed_gs.xyz")])
+        if self.config.pristine_cell_path:
+            p_dir = os.path.dirname(self.config.pristine_cell_path)
+            if p_dir:
+                candidates.append(os.path.join(p_dir, "relaxed_gs.xyz"))
+
+        for cand in candidates:
+            if not force and os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                try:
+                    cached_gs = ase.io.read(cand)
+                    if (
+                        len(cached_gs) == len(defect_sc)
+                        and cached_gs.get_chemical_symbols() == defect_sc.get_chemical_symbols()
+                    ):
+                        cached_gs.info["defect_center"] = np.asarray(center, dtype=float)
+                        if "gs_source" not in cached_gs.info:
+                            cached_gs.info["gs_source"] = "cached"
+                        if os.path.abspath(cand) != os.path.abspath(gs_path):
+                            logger.info(f"[+] Discovered pre-relaxed ground state at '{cand}', caching to {gs_path}")
+                            os.makedirs(self.config.workspace_dir, exist_ok=True)
+                            shutil.copy2(cand, gs_path)
+                        else:
+                            logger.info(f"[i] Reusing existing relaxed ground state from {gs_path}")
+                        return cached_gs
+                except Exception:
+                    pass
 
         gs_method = getattr(self.config, "ground_state_relax_method", "auto").lower()
         es_method = getattr(self.config, "excited_state_method", "spin_proxy").lower()
@@ -493,25 +508,41 @@ class DefectBuilder:
             logger.info(f"[+] Loaded Optical Excited State from file (Franck-Condon Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
             return at_es, dq_fc
 
-        if not force and os.path.isfile(es_path) and os.path.getsize(es_path) > 0:
-            try:
-                cached_es = ase.io.read(es_path)
-                if (
-                    len(cached_es) == len(at_gs)
-                    and cached_es.get_chemical_symbols() == at_gs.get_chemical_symbols()
-                ):
-                    dr_fc = mic_displacement(cached_es.positions, at_gs.positions, at_gs.cell)
-                    cached_es.positions = at_gs.positions + dr_fc
-                    cached_es.info["defect_center"] = np.asarray(center, dtype=float)
-                    if "es_source" not in cached_es.info:
-                        cached_es.info["es_source"] = "cached"
-                    m = at_gs.get_masses()
-                    dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
-                    if dq_fc > 1e-5:
-                        logger.info(f"[i] Reusing existing relaxed excited state from {es_path} (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
-                        return cached_es, dq_fc
-            except Exception:
-                pass
+        es_candidates = [es_path]
+        if self.config.workspace_dir != ".":
+            es_candidates.extend(["relaxed_es.xyz", os.path.join(".", "relaxed_es.xyz")])
+        if self.config.pristine_cell_path:
+            p_dir = os.path.dirname(self.config.pristine_cell_path)
+            if p_dir:
+                es_candidates.append(os.path.join(p_dir, "relaxed_es.xyz"))
+
+        for cand_es in es_candidates:
+            if not force and os.path.isfile(cand_es) and os.path.getsize(cand_es) > 0:
+                try:
+                    cached_es = ase.io.read(cand_es)
+                    if (
+                        len(cached_es) == len(at_gs)
+                        and cached_es.get_chemical_symbols() == at_gs.get_chemical_symbols()
+                    ):
+                        dr_fc = mic_displacement(cached_es.positions, at_gs.positions, at_gs.cell)
+                        cached_es.positions = at_gs.positions + dr_fc
+                        cached_es.info["defect_center"] = np.asarray(center, dtype=float)
+                        if "es_source" not in cached_es.info:
+                            cached_es.info["es_source"] = "cached"
+                        m = at_gs.get_masses()
+                        dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
+                        if dq_fc > 1e-5:
+                            if os.path.abspath(cand_es) != os.path.abspath(es_path):
+                                os.makedirs(self.config.workspace_dir, exist_ok=True)
+                                tmp_es = es_path + ".tmp.xyz"
+                                ase.io.write(tmp_es, cached_es, format="extxyz")
+                                os.replace(tmp_es, es_path)
+                                logger.info(f"[+] Discovered pre-relaxed excited state at '{cand_es}', caching to {es_path} (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
+                            else:
+                                logger.info(f"[i] Reusing existing relaxed excited state from {es_path} (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
+                            return cached_es, dq_fc
+                except Exception:
+                    pass
 
         es_method = getattr(self.config, "excited_state_method", "delta_scf").lower()
 
