@@ -2289,12 +2289,25 @@ class QERunner:
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-cd "$SCRIPT_DIR"
+WORK_DIR="${{SLURM_SUBMIT_DIR:-$PWD}}"
+cd "$WORK_DIR"
+
+# Locate workspace directory where dft_calculations lives
+WORKSPACE_DIR=""
+for cand in "$WORK_DIR" "$WORK_DIR/output_4h_sic_kk"; do
+    if [ -d "$cand/dft_calculations" ]; then
+        WORKSPACE_DIR="$(cd "$cand" && pwd)"
+        break
+    fi
+done
+if [ -n "$WORKSPACE_DIR" ]; then
+    cd "$WORKSPACE_DIR"
+fi
 
 echo "=============================================================================="
 echo " Starting Pure Quantum ESPRESSO Calculations on CINECA Leonardo Booster"
 echo " Host: $(hostname) | Job ID: $SLURM_JOB_ID | Start: $(date)"
+echo " Working Dir: $PWD"
 echo "=============================================================================="
 
 module purge
@@ -2314,14 +2327,14 @@ export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # Resolve pseudo directory and symlink into calculation workspace
 PSEUDO_DIR=""
-for cand in "$SCRIPT_DIR/pseudo" "$SCRIPT_DIR/../pseudo" "$PWD/pseudo" "$PWD/../pseudo"; do
+for cand in "$PWD/pseudo" "$PWD/../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo"; do
     if [ -d "$cand" ]; then
         PSEUDO_DIR="$(cd "$cand" && pwd)"
         break
     fi
 done
-if [ -n "$PSEUDO_DIR" ] && [ ! -e "$SCRIPT_DIR/pseudo" ]; then
-    ln -sfn "$PSEUDO_DIR" "$SCRIPT_DIR/pseudo"
+if [ -n "$PSEUDO_DIR" ] && [ ! -e "$PWD/pseudo" ]; then
+    ln -sfn "$PSEUDO_DIR" "$PWD/pseudo"
 fi
 
 PW_CMD="pw.x"
@@ -2419,13 +2432,13 @@ echo "==========================================================================
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-cd "$SCRIPT_DIR"
+WORK_DIR="${{SLURM_SUBMIT_DIR:-$PWD}}"
+cd "$WORK_DIR"
 
 echo "=============================================================================="
 echo " [HPC Array] Task $SLURM_ARRAY_TASK_ID on $(hostname) at $(date)"
 echo " Job ID: $SLURM_ARRAY_JOB_ID | Task ID: $SLURM_ARRAY_TASK_ID"
-echo " Working Dir: $PWD"
+echo " Submit Dir: $WORK_DIR"
 echo "=============================================================================="
 
 module purge
@@ -2443,9 +2456,9 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-# Locate dft_frames_list.txt across candidate paths
+# Locate dft_frames_list.txt across candidate paths relative to submit directory
 LIST_FILE=""
-for cand in "dft_frames_list.txt" "$SCRIPT_DIR/dft_frames_list.txt" "$SCRIPT_DIR/output_4h_sic_kk/dft_frames_list.txt" "$PWD/output_4h_sic_kk/dft_frames_list.txt" "$SCRIPT_DIR/../dft_frames_list.txt" "$PWD/../dft_frames_list.txt"; do
+for cand in "$WORK_DIR/dft_frames_list.txt" "$WORK_DIR/output_4h_sic_kk/dft_frames_list.txt" "$WORK_DIR/../dft_frames_list.txt"; do
     if [ -f "$cand" ]; then
         LIST_FILE="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
         break
@@ -2453,13 +2466,18 @@ for cand in "dft_frames_list.txt" "$SCRIPT_DIR/dft_frames_list.txt" "$SCRIPT_DIR
 done
 
 if [ -z "$LIST_FILE" ]; then
-    echo "[!] Error: 'dft_frames_list.txt' not found in $PWD or $SCRIPT_DIR!"
+    echo "[!] Error: 'dft_frames_list.txt' not found relative to submit dir ($WORK_DIR)!"
     echo "    Make sure you have executed Stage 2 first on the login node:"
     echo "        python run_test.py --to-stage 2"
     exit 1
 fi
 
+WORKSPACE_DIR="$(dirname "$LIST_FILE")"
+cd "$WORKSPACE_DIR"
+
 echo "[+] Using frame list: $LIST_FILE"
+echo "[+] Workspace directory: $WORKSPACE_DIR"
+
 RAW_DIR=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$LIST_FILE")
 # Normalize slashes in case of Windows formatting
 RAW_DIR=$(echo "$RAW_DIR" | tr '\\\\' '/')
@@ -2469,10 +2487,9 @@ if [ -z "$RAW_DIR" ]; then
     exit 1
 fi
 
-# Locate the target frame directory across candidate locations
+# Locate the target frame directory containing pw.in
 DIR=""
-LIST_DIR="$(dirname "$LIST_FILE")"
-for cand in "$RAW_DIR" "$LIST_DIR/$RAW_DIR" "$SCRIPT_DIR/$RAW_DIR" "$PWD/$RAW_DIR" "$SCRIPT_DIR/output_4h_sic_kk/$RAW_DIR" "$PWD/output_4h_sic_kk/$RAW_DIR"; do
+for cand in "$WORKSPACE_DIR/$RAW_DIR" "$WORK_DIR/$RAW_DIR" "$RAW_DIR"; do
     if [ -d "$cand" ] && [ -f "$cand/pw.in" ]; then
         DIR="$(cd "$cand" && pwd)"
         break
@@ -2481,13 +2498,13 @@ done
 
 if [ -z "$DIR" ]; then
     echo "[!] Error: Target directory '$RAW_DIR' with pw.in not found!"
-    echo "    Searched relative to $LIST_DIR, $SCRIPT_DIR, and $PWD"
+    echo "    Checked relative to $WORKSPACE_DIR and $WORK_DIR"
     exit 1
 fi
 
 # Resolve pseudo directory and ensure it is accessible inside the target frame directory
 PSEUDO_DIR=""
-for cand in "$SCRIPT_DIR/pseudo" "$SCRIPT_DIR/../pseudo" "$PWD/pseudo" "$PWD/../pseudo" "$LIST_DIR/pseudo" "$LIST_DIR/../pseudo"; do
+for cand in "$WORKSPACE_DIR/pseudo" "$WORKSPACE_DIR/../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo"; do
     if [ -d "$cand" ]; then
         PSEUDO_DIR="$(cd "$cand" && pwd)"
         break
