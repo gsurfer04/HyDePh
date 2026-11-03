@@ -2289,19 +2289,40 @@ class QERunner:
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo "=============================================================================="
 echo " Starting Pure Quantum ESPRESSO Calculations on CINECA Leonardo Booster"
 echo " Host: $(hostname) | Job ID: $SLURM_JOB_ID | Start: $(date)"
 echo "=============================================================================="
 
 module purge
-module load profile/chem-phys
-module load q-e/7.2
-module load cuda/11.8
+# Standard CINECA Leonardo Booster modules for GPU-accelerated Quantum ESPRESSO
+if module is-avail quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas 2>/dev/null; then
+    module load quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas
+    module load cuda/12.6
+else
+    module load profile/chem-phys
+    module load q-e/7.2
+    module load cuda/11.8
+fi
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+# Resolve pseudo directory and symlink into calculation workspace
+PSEUDO_DIR=""
+for cand in "$SCRIPT_DIR/pseudo" "$SCRIPT_DIR/../pseudo" "$PWD/pseudo" "$PWD/../pseudo"; do
+    if [ -d "$cand" ]; then
+        PSEUDO_DIR="$(cd "$cand" && pwd)"
+        break
+    fi
+done
+if [ -n "$PSEUDO_DIR" ] && [ ! -e "$SCRIPT_DIR/pseudo" ]; then
+    ln -sfn "$PSEUDO_DIR" "$SCRIPT_DIR/pseudo"
+fi
 
 PW_CMD="pw.x"
 
@@ -2339,13 +2360,18 @@ for i in "${{!DIRS[@]}}"; do
         continue
     fi
 
+    # Ensure pseudo directory is accessible from within frame directory
+    if [ -n "$PSEUDO_DIR" ] && [ ! -e "$DIR/pseudo" ]; then
+        ln -sfn "$PSEUDO_DIR" "$DIR/pseudo"
+    fi
+
     GPU_ID=$(( i % MAX_CONCURRENT ))
     echo "[RUN]  Frame $((i+1))/$TOTAL ($DIR) on GPU $GPU_ID..."
 
     (
         export CUDA_VISIBLE_DEVICES=$GPU_ID
         cd "$DIR"
-        $PW_CMD -in pw.in > pw.out 2>&1
+        srun --overlap --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --cpu-bind=cores $PW_CMD -in pw.in > pw.out 2>&1
     ) &
 
     RUNNING=$((RUNNING + 1))
@@ -2366,8 +2392,8 @@ echo "==========================================================================
             with open(slurm_script_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(slurm_content)
 
-            # 2. Frame list for SLURM Job Array
-            all_dirs_rel = [os.path.relpath(d, calc_base) for d in (prepared_gs + prepared_es)]
+            # 2. Frame list for SLURM Job Array (enforce forward slashes for Linux compatibility)
+            all_dirs_rel = [os.path.relpath(d, calc_base).replace("\\", "/") for d in (prepared_gs + prepared_es)]
             list_file_path = os.path.join(calc_base, "dft_frames_list.txt")
             with open(list_file_path, "w", encoding="utf-8", newline="\n") as f:
                 for d in all_dirs_rel:
@@ -2393,23 +2419,56 @@ echo "==========================================================================
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+echo "=============================================================================="
+echo " [HPC Array] Task $SLURM_ARRAY_TASK_ID on $(hostname) at $(date)"
+echo " Job ID: $SLURM_ARRAY_JOB_ID | Task ID: $SLURM_ARRAY_TASK_ID"
+echo " Working Dir: $PWD"
+echo "=============================================================================="
+
 module purge
-module load profile/chem-phys
-module load q-e/7.2
-module load cuda/11.8
+# Standard CINECA Leonardo Booster modules for GPU-accelerated Quantum ESPRESSO
+if module is-avail quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas 2>/dev/null; then
+    module load quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas
+    module load cuda/12.6
+else
+    module load profile/chem-phys
+    module load q-e/7.2
+    module load cuda/11.8
+fi
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 DIR=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" dft_frames_list.txt)
 if [ -z "$DIR" ] || [ ! -d "$DIR" ]; then
-    echo "[!] Error: No directory found at line $((SLURM_ARRAY_TASK_ID + 1)) of dft_frames_list.txt"
+    echo "[!] Error: Directory '$DIR' not found (line $((SLURM_ARRAY_TASK_ID + 1)) of dft_frames_list.txt)"
     exit 1
 fi
 
-echo "[+] Array Task $SLURM_ARRAY_TASK_ID running in $DIR on $(hostname)..."
+# Resolve pseudo directory and ensure it is accessible inside the target frame directory
+PSEUDO_DIR=""
+for cand in "$SCRIPT_DIR/pseudo" "$SCRIPT_DIR/../pseudo" "$PWD/pseudo" "$PWD/../pseudo"; do
+    if [ -d "$cand" ]; then
+        PSEUDO_DIR="$(cd "$cand" && pwd)"
+        break
+    fi
+done
+if [ -n "$PSEUDO_DIR" ] && [ ! -e "$DIR/pseudo" ]; then
+    ln -sfn "$PSEUDO_DIR" "$DIR/pseudo"
+fi
+
+echo "[+] Launching QE in $DIR..."
+echo "[+] Visible GPU: $CUDA_VISIBLE_DEVICES | CPUs per task: $SLURM_CPUS_PER_TASK"
 cd "$DIR"
-pw.x -in pw.in > pw.out 2>&1
-echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished at $(date)"
+
+# Launch using srun with core binding (required for HPC-X / OpenMPI under Slurm)
+srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --cpu-bind=cores pw.x -in pw.in > pw.out 2>&1
+
+echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
 """
             array_script_path = os.path.join(calc_base, "submit_dft_array_pure_qe.slurm")
             with open(array_script_path, "w", encoding="utf-8", newline="\n") as f:
