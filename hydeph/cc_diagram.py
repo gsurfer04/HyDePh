@@ -180,6 +180,7 @@ class ConfigurationCoordinateEngine:
                     stacklevel=2,
                 )
 
+        es_surface_mode = "equal_curvature_harmonic"
         if calc_es is not None:
             at_es_eval = at_gs.copy()
             at_es_eval.calc = calc_es
@@ -188,21 +189,45 @@ class ConfigurationCoordinateEngine:
                 at_es_eval.set_positions(pos_gs + lam * dr)
                 e_val_es = float(at_es_eval.get_potential_energy()) - v_ref
                 e_es_list.append(e_val_es)
-            e_es = np.array(e_es_list, dtype=float)
+            e_es_eval = np.array(e_es_list, dtype=float)
 
             idx_0 = int(np.argmin(np.abs(lambdas - 0.0)))
             idx_1 = int(np.argmin(np.abs(lambdas - 1.0)))
-            e_rel_es_eV = float(e_es[idx_0] - e_es[idx_1])
-            e_rel_es_meV = e_rel_es_eV * 1000.0
+            e_rel_cand_eV = float(e_es_eval[idx_0] - e_es_eval[idx_1])
 
-            if e_zpl == 0.0 and zpl_source == "relative_reference_0eV":
-                e_zpl = float(e_es[idx_1])
-                zpl_source = "paired_potential_surface"
-            elif e_zpl is not None:
-                e_es = (e_es - e_es[idx_1]) + e_zpl
-
-            e_abs_eV = float(e_es[idx_0])
-            e_em_eV = e_zpl - e_rel_gs_eV
+            # Physical validation: bound Franck-Condon excited state requires Delta E_rel,ES > 0
+            if e_rel_cand_eV <= 0.005:
+                warnings.warn(
+                    f"Excited-state potential energy surface evaluated with calc_es is inverted or unstable "
+                    f"(Delta E_rel,ES = {e_rel_cand_eV*1000.0:.1f} meV <= 0). This indicates electronic state "
+                    f"mismatch in Delta-SCF DFT frames or ML potential extrapolation along Q. "
+                    f"Falling back to physical harmonic Franck-Condon excited state (equal curvature).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                logger.warning(
+                    f"    [!] Warning: calc_es produced inverted ES surface (Delta E_rel,ES = {e_rel_cand_eV*1000.0:.1f} meV <= 0). "
+                    f"Falling back to harmonic Franck-Condon model."
+                )
+                e_rel_es_eV = e_rel_gs_eV
+                e_rel_es_meV = e_rel_gs_meV
+                e_es = e_zpl + e_rel_es_eV * (1.0 - lambdas)**2
+                e_abs_eV = e_zpl + e_rel_es_eV
+                e_em_eV = e_zpl - e_rel_gs_eV
+                es_surface_mode = "harmonic_fc_fallback"
+            else:
+                e_rel_es_eV = e_rel_cand_eV
+                e_rel_es_meV = e_rel_es_eV * 1000.0
+                if e_zpl == 0.0 and zpl_source == "relative_reference_0eV":
+                    e_zpl = float(e_es_eval[idx_1])
+                    zpl_source = "paired_potential_surface"
+                elif e_zpl is not None:
+                    e_es = (e_es_eval - e_es_eval[idx_1]) + e_zpl
+                else:
+                    e_es = e_es_eval
+                e_abs_eV = float(e_es[idx_0])
+                e_em_eV = e_zpl - e_rel_gs_eV
+                es_surface_mode = "paired_calc_es"
         else:
             # Equal-curvature Franck-Condon excited state: E_ES(lambda) = E_ZPL + Delta E_rel,ES * (1 - lambda)^2
             e_rel_es_eV = e_rel_gs_eV
@@ -210,6 +235,7 @@ class ConfigurationCoordinateEngine:
             e_es = e_zpl + e_rel_es_eV * (1.0 - lambdas)**2
             e_abs_eV = e_zpl + e_rel_es_eV
             e_em_eV = e_zpl - e_rel_gs_eV
+            es_surface_mode = "equal_curvature_harmonic"
         stokes_shift_eV = e_abs_eV - e_em_eV
         stokes_shift_meV = stokes_shift_eV * 1000.0
 
@@ -247,6 +273,7 @@ class ConfigurationCoordinateEngine:
             "s_factor_1d": s_factor_1d,
             "k_curvature_gs": k_fit_eV_amu_A2,
             "dft_gap_eV": at_gs.info.get("dft_gap_eV"),
+            "es_surface_mode": es_surface_mode,
         }
 
         self.last_results = results
@@ -387,6 +414,10 @@ class ConfigurationCoordinateEngine:
         ax.grid(True, linestyle=':', alpha=0.5)
         ax.legend(frameon=True, loc='upper left', framealpha=0.92, fontsize=8.8)
 
+        mode_str = ""
+        if cc_results.get("es_surface_mode") == "harmonic_fc_fallback":
+            mode_str = "\n  • Model: Harmonic FC fallback"
+
         summary_text = (
             "Stokes & Franck-Condon Parameters:\n"
             f"  • $\\Delta Q = {dq_total:.4f}\\ \\mathrm{{amu}}^{{1/2}}\\mathrm{{Å}}$\n"
@@ -395,6 +426,7 @@ class ConfigurationCoordinateEngine:
             f"  • $\\Delta E_{{\\mathrm{{rel,ES}}}} = {e_rel_es_meV:.1f}\\ \\mathrm{{meV}}$\n"
             f"  • $\\Delta E_{{\\mathrm{{Stokes}}}} = {stokes_shift_meV:.1f}\\ \\mathrm{{meV}}$\n"
             f"  • $\\hbar\\Omega = {hbar_omega_meV:.1f}\\ \\mathrm{{meV}}$, $S = {s_factor:.2f}$"
+            f"{mode_str}"
         )
         ax.text(0.97, 0.97, summary_text, transform=ax.transAxes,
                 fontsize=8.6, va='top', ha='right',

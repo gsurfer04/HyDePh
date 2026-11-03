@@ -428,6 +428,21 @@ def test_configuration_coordinate_engine(tmp_path):
     assert res_zero["zpl_source"] == "kohn_sham_eigenvalues"
     assert pytest.approx(res_zero["e_zpl_eV"], rel=1e-3) == expected_auto_zpl
 
+    # 9. Test defensive fallback when calc_es produces an inverted surface
+    inv_calc = MagicMock()
+    def calc_pe_inv(atoms=None):
+        at = atoms if atoms is not None else inv_calc.atoms
+        dr = at.positions - at_gs.positions
+        return -100.0 + 5.0 * np.linalg.norm(dr)
+
+    inv_calc.get_potential_energy = MagicMock(side_effect=calc_pe_inv)
+    with pytest.warns(UserWarning, match="inverted or unstable"):
+        res_inv = engine.calculate_cc_curve(at_gs, at_es, zpl_energy_eV=2.0, calc_es=inv_calc)
+    assert res_inv["es_surface_mode"] == "harmonic_fc_fallback"
+    assert res_inv["delta_e_rel_es_eV"] > 0
+    assert res_inv["e_abs_eV"] > res_inv["e_zpl_eV"] > res_inv["e_em_eV"]
+    assert res_inv["stokes_shift_eV"] > 0
+
 
 def test_parse_qe_band_gap(tmp_path):
     """Verifies parsing of Kohn-Sham band gaps from Quantum ESPRESSO outputs."""
