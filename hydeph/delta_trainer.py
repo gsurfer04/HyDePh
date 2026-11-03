@@ -80,10 +80,26 @@ def resolve_nep_executable(nep_exe: Optional[str] = None) -> str:
         found = shutil.which("nep") or shutil.which("nep.exe")
         if found:
             return found
-        for p in ["/usr/local/bin/nep", "/usr/bin/nep"]:
-            if os.path.isfile(p):
-                return p
-        return "/usr/local/bin/nep"
+        user_home = os.path.expanduser("~")
+        work_dir = os.environ.get("WORK", "")
+        conda_dir = os.environ.get("CONDA_PREFIX", "")
+        candidates = [
+            os.path.join(user_home, "bin", "nep"),
+            os.path.join(user_home, ".local", "bin", "nep"),
+            os.path.join(user_home, "GPUMD", "src", "nep"),
+            os.path.join(user_home, "gpumd", "src", "nep"),
+            os.path.join(work_dir, "GPUMD", "src", "nep") if work_dir else "",
+            os.path.join(work_dir, "gpumd", "src", "nep") if work_dir else "",
+            os.path.join(work_dir, "bin", "nep") if work_dir else "",
+            os.path.join(conda_dir, "bin", "nep") if conda_dir else "",
+            "/usr/local/bin/nep",
+            "/usr/bin/nep",
+            os.path.abspath("nep"),
+        ]
+        for p in candidates:
+            if p and os.path.isfile(p):
+                return os.path.abspath(p)
+        return "nep"
 
 
 def write_delta_nep_in(
