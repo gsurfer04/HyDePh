@@ -2443,15 +2443,51 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-DIR=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" dft_frames_list.txt)
-if [ -z "$DIR" ] || [ ! -d "$DIR" ]; then
-    echo "[!] Error: Directory '$DIR' not found (line $((SLURM_ARRAY_TASK_ID + 1)) of dft_frames_list.txt)"
+# Locate dft_frames_list.txt across candidate paths
+LIST_FILE=""
+for cand in "dft_frames_list.txt" "$SCRIPT_DIR/dft_frames_list.txt" "$SCRIPT_DIR/output_4h_sic_kk/dft_frames_list.txt" "$PWD/output_4h_sic_kk/dft_frames_list.txt" "$SCRIPT_DIR/../dft_frames_list.txt" "$PWD/../dft_frames_list.txt"; do
+    if [ -f "$cand" ]; then
+        LIST_FILE="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
+        break
+    fi
+done
+
+if [ -z "$LIST_FILE" ]; then
+    echo "[!] Error: 'dft_frames_list.txt' not found in $PWD or $SCRIPT_DIR!"
+    echo "    Make sure you have executed Stage 2 first on the login node:"
+    echo "        python run_test.py --to-stage 2"
+    exit 1
+fi
+
+echo "[+] Using frame list: $LIST_FILE"
+RAW_DIR=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$LIST_FILE")
+# Normalize slashes in case of Windows formatting
+RAW_DIR=$(echo "$RAW_DIR" | tr '\\\\' '/')
+
+if [ -z "$RAW_DIR" ]; then
+    echo "[!] Error: No entry found at line $((SLURM_ARRAY_TASK_ID + 1)) of $LIST_FILE"
+    exit 1
+fi
+
+# Locate the target frame directory across candidate locations
+DIR=""
+LIST_DIR="$(dirname "$LIST_FILE")"
+for cand in "$RAW_DIR" "$LIST_DIR/$RAW_DIR" "$SCRIPT_DIR/$RAW_DIR" "$PWD/$RAW_DIR" "$SCRIPT_DIR/output_4h_sic_kk/$RAW_DIR" "$PWD/output_4h_sic_kk/$RAW_DIR"; do
+    if [ -d "$cand" ] && [ -f "$cand/pw.in" ]; then
+        DIR="$(cd "$cand" && pwd)"
+        break
+    fi
+done
+
+if [ -z "$DIR" ]; then
+    echo "[!] Error: Target directory '$RAW_DIR' with pw.in not found!"
+    echo "    Searched relative to $LIST_DIR, $SCRIPT_DIR, and $PWD"
     exit 1
 fi
 
 # Resolve pseudo directory and ensure it is accessible inside the target frame directory
 PSEUDO_DIR=""
-for cand in "$SCRIPT_DIR/pseudo" "$SCRIPT_DIR/../pseudo" "$PWD/pseudo" "$PWD/../pseudo"; do
+for cand in "$SCRIPT_DIR/pseudo" "$SCRIPT_DIR/../pseudo" "$PWD/pseudo" "$PWD/../pseudo" "$LIST_DIR/pseudo" "$LIST_DIR/../pseudo"; do
     if [ -d "$cand" ]; then
         PSEUDO_DIR="$(cd "$cand" && pwd)"
         break
@@ -2473,6 +2509,17 @@ echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
             array_script_path = os.path.join(calc_base, "submit_dft_array_pure_qe.slurm")
             with open(array_script_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(array_content)
+
+            # Also mirror SLURM scripts and dft_frames_list.txt to parent directory for convenience
+            parent_dir = os.path.dirname(os.path.abspath(calc_base))
+            if parent_dir and os.path.isdir(parent_dir) and parent_dir != os.path.abspath(calc_base):
+                for fname in ("submit_dft_pure_qe.slurm", "submit_dft_array_pure_qe.slurm", "dft_frames_list.txt"):
+                    src_f = os.path.join(calc_base, fname)
+                    if os.path.isfile(src_f):
+                        try:
+                            shutil.copy2(src_f, os.path.join(parent_dir, fname))
+                        except Exception:
+                            pass
 
             logger.info(f"[+] Written pure QE batch script: {slurm_script_path}")
             logger.info(f"[+] Written pure QE array script: {array_script_path}")
