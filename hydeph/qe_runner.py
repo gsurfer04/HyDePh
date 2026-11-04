@@ -1216,6 +1216,97 @@ def find_frame_calc_dir(
     return canonical_dir, False
 
 
+def extract_and_attach_adiabatic_energetics(
+    labeled_gs: List[Atoms],
+    labeled_es: List[Atoms],
+    at_gs: Optional[Atoms] = None,
+    at_es: Optional[Atoms] = None,
+) -> Dict[str, float]:
+    """Computes exact adiabatic DFT energetics (ZPL, E_abs, E_em, Stokes shift, relaxation energies)
+    from paired Franck-Condon candidate frames and attaches them to at_gs and at_es.
+
+    Parameters
+    ----------
+    labeled_gs : List[Atoms]
+        Converged ground-state DFT frames.
+    labeled_es : List[Atoms]
+        Converged excited-state Delta-SCF DFT frames.
+    at_gs : Atoms, optional
+        Reference ground state structure to update.
+    at_es : Atoms, optional
+        Reference excited state structure to update.
+
+    Returns
+    -------
+    Dict[str, float]
+        Dictionary of exact adiabatic energetics in eV.
+    """
+    if not labeled_gs or not labeled_es:
+        return {}
+
+    gs_0 = next((f for f in labeled_gs if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4), None)
+    gs_1 = next((f for f in labeled_gs if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 0.0) - 1.0) < 1e-4), None)
+    es_0 = next((f for f in labeled_es if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4), None)
+    es_1 = next((f for f in labeled_es if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 0.0) - 1.0) < 1e-4), None)
+
+    if gs_0 is None and labeled_gs:
+        gs_0 = next((f for f in labeled_gs if f.info.get("frame_id") in ("fc_00", "frame_00")), labeled_gs[0])
+    if es_1 is None and labeled_es:
+        fc_es = [f for f in labeled_es if f.info.get("sample_type") == "franck_condon"]
+        if fc_es:
+            es_1 = fc_es[-1]
+        elif labeled_es:
+            es_1 = labeled_es[-1]
+
+    results: Dict[str, float] = {}
+    if gs_0 is not None and es_1 is not None and "energy" in gs_0.info and "energy" in es_1.info:
+        e_gs_0 = float(gs_0.info["energy"])
+        e_es_1 = float(es_1.info["energy"])
+        e_zpl_exact = float(e_es_1 - e_gs_0)
+
+        results["e_gs_0"] = e_gs_0
+        results["e_es_1"] = e_es_1
+        if at_gs is not None:
+            at_gs.info["energy"] = e_gs_0
+            if e_zpl_exact > 0:
+                at_gs.info["e_zpl_exact_eV"] = e_zpl_exact
+                at_gs.info["zpl_source"] = "delta_scf_adiabatic"
+        if at_es is not None:
+            at_es.info["energy"] = e_es_1
+        if e_zpl_exact > 0:
+            results["e_zpl_exact_eV"] = e_zpl_exact
+
+        logger.info("\n" + "-" * 60)
+        logger.info("[+] EXACT ADIABATIC DFT ENERGETICS (Delta-SCF):")
+        logger.info(f"    • Ground State Minimum E_GS(lambda=0): {e_gs_0:.4f} eV")
+        logger.info(f"    • Excited State Minimum E_ES(lambda=1): {e_es_1:.4f} eV")
+        logger.info(f"    • Exact Adiabatic ZPL E_ZPL: {e_zpl_exact:.4f} eV")
+
+        if gs_1 is not None and es_0 is not None and "energy" in gs_1.info and "energy" in es_0.info:
+            e_gs_1 = float(gs_1.info["energy"])
+            e_es_0 = float(es_0.info["energy"])
+            e_abs_exact = float(e_es_0 - e_gs_0)
+            e_em_exact = float(e_es_1 - e_gs_1)
+            erel_gs = float(e_gs_1 - e_gs_0)
+            erel_es = float(e_es_0 - e_es_1)
+            stokes_exact = float(e_abs_exact - e_em_exact)
+
+            results["e_abs_exact_eV"] = e_abs_exact
+            results["e_em_exact_eV"] = e_em_exact
+            results["erel_gs_eV"] = erel_gs
+            results["erel_es_eV"] = erel_es
+            results["stokes_shift_exact_eV"] = stokes_exact
+
+            logger.info(f"    • Vertical Absorption E_abs: {e_abs_exact:.4f} eV")
+            logger.info(f"    • Vertical Emission E_em: {e_em_exact:.4f} eV")
+            logger.info(f"    • GS Relaxation Energy Delta E_rel,GS: {erel_gs*1000:.1f} meV ({erel_gs:.4f} eV)")
+            logger.info(f"    • ES Relaxation Energy Delta E_rel,ES: {erel_es*1000:.1f} meV ({erel_es:.4f} eV)")
+            logger.info(f"    • Exact Stokes Shift Delta E_Stokes: {stokes_exact*1000:.1f} meV ({stokes_exact:.4f} eV)")
+        logger.info("-" * 60 + "\n")
+
+    return results
+
+
 class QERunner:
     """Manages Quantum ESPRESSO calculations with parallel execution and smart resumption."""
 
@@ -2701,11 +2792,16 @@ echo "==========================================================================
                 for d in all_dirs_rel:
                     f.write(f"{d}\n")
 
+            total_count = len(prepared_gs) + len(prepared_es)
+            array_max_idx = max(0, total_count - 1)
+
             array_content = f"""#!/bin/bash
 # ==============================================================================
 # CINECA Leonardo Booster: Pure QE Job Array Script
 # ==============================================================================
-# Usage:
+# Usage (total {total_count} candidate frames):
+#   sbatch --array=0-{array_max_idx}%16 submit_dft_array_pure_qe.slurm
+# Or dynamic:
 #   sbatch --array=0-$(($(wc -l < dft_frames_list.txt) - 1))%16 submit_dft_array_pure_qe.slurm
 # ==============================================================================
 #SBATCH --job-name=hydeph_pw_array
@@ -2829,6 +2925,7 @@ echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
 
             logger.info(f"[+] Written pure QE batch script: {slurm_script_path}")
             logger.info(f"[+] Written pure QE array script: {array_script_path}")
+            logger.info(f"    Cluster array command: sbatch --array=0-{array_max_idx}%16 {os.path.basename(array_script_path)}")
 
         return {
             "n_gs_frames": len(prepared_gs),
@@ -2840,24 +2937,57 @@ echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
             "list_file": list_file_path,
         }
 
+    def extract_and_attach_adiabatic_energetics(
+        self,
+        labeled_gs: List[Atoms],
+        labeled_es: List[Atoms],
+        at_gs: Optional[Atoms] = None,
+        at_es: Optional[Atoms] = None,
+    ) -> Dict[str, float]:
+        """Computes exact adiabatic DFT energetics (ZPL, E_abs, E_em, Stokes shift, relaxation energies)
+        from paired Franck-Condon candidate frames and attaches them to at_gs and at_es.
+
+        Parameters
+        ----------
+        labeled_gs : List[Atoms]
+            Converged ground-state DFT frames.
+        labeled_es : List[Atoms]
+            Converged excited-state Delta-SCF DFT frames.
+        at_gs : Atoms, optional
+            Reference ground state structure to update.
+        at_es : Atoms, optional
+            Reference excited state structure to update.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary of exact adiabatic energetics in eV.
+        """
+        return extract_and_attach_adiabatic_energetics(labeled_gs, labeled_es, at_gs=at_gs, at_es=at_es)
+
+
     def ingest_completed_calculations(
         self,
-        candidate_frames: List[Atoms],
+        candidate_frames: Optional[List[Atoms]] = None,
         at_gs: Optional[Atoms] = None,
+        at_es: Optional[Atoms] = None,
         calc_dir_base: Optional[str] = None,
     ) -> Tuple[List[Atoms], List[Atoms]]:
         """Ingests completed Quantum ESPRESSO calculations from disk without executing `pw.x`.
 
         Parses converged energies, forces, and electronic band gaps from `dft_calculations/`
         and `dft_calculations_es/`, writes `labeled_dft_frames.xyz` and `labeled_frames_es.xyz`,
-        and updates `at_gs` info.
+        computes exact adiabatic energetics (ZPL and Stokes shift), and updates `at_gs` / `at_es`.
 
         Parameters
         ----------
-        candidate_frames : List[Atoms]
-            Original candidate geometries.
+        candidate_frames : List[Atoms], optional
+            Original candidate geometries. If None or empty, geometries are discovered
+            directly from pw.in input files on disk.
         at_gs : Atoms, optional
             Reference ground state structure to update with DFT ground state properties.
+        at_es : Atoms, optional
+            Reference excited state structure to update with DFT excited state properties.
         calc_dir_base : str, optional
             Workspace root directory (defaults to config.workspace_dir).
 
@@ -2874,11 +3004,41 @@ echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
 
         logger.info(f"[-] Ingesting completed DFT calculations from {dft_dir}...")
 
+        # If candidate_frames is not provided, auto-discover from dft_dir
+        eff_cand = list(candidate_frames) if candidate_frames else []
+        if not eff_cand and os.path.isdir(dft_dir):
+            subdirs = sorted([d for d in os.listdir(dft_dir) if os.path.isdir(os.path.join(dft_dir, d)) and d.startswith("frame_")])
+            for idx, sd in enumerate(subdirs):
+                sdir = os.path.join(dft_dir, sd)
+                pw_in = os.path.join(sdir, "pw.in")
+                if os.path.isfile(pw_in):
+                    try:
+                        at_read = ase.io.read(pw_in, format="espresso-in")
+                        parts = sd.split("_", 2)
+                        try:
+                            cand_idx = int(parts[1]) if len(parts) >= 2 else idx
+                        except ValueError:
+                            cand_idx = idx
+                        frame_id = parts[2] if len(parts) >= 3 else sd
+                        stype = "franck_condon" if "fc" in frame_id else ("rattle" if "rattle" in frame_id else "md")
+                        at_read.info["candidate_index"] = cand_idx
+                        at_read.info["frame_id"] = frame_id
+                        at_read.info["sample_type"] = stype
+                        if "fc" in frame_id:
+                            try:
+                                fc_num = int(frame_id.split("_")[-1])
+                                at_read.info["lambda"] = float(fc_num) / max(1.0, float(getattr(self.config, "n_fc_frames", 7) - 1))
+                            except Exception:
+                                pass
+                        eff_cand.append(at_read)
+                    except Exception as e:
+                        logger.warning(f"[-] Could not parse structure from {pw_in}: {e}")
+
         # 1. Ingest Ground State frames
         labeled_gs: List[Atoms] = []
         missing_gs: List[str] = []
 
-        for idx, fr in enumerate(candidate_frames):
+        for idx, fr in enumerate(eff_cand):
             cand_idx = fr.info.get("candidate_index", idx)
             frame_id = fr.info.get("frame_id") or fr.info.get("label") or f"frame_{cand_idx:02d}"
             stype = fr.info.get("sample_type", "unknown")
@@ -2906,9 +3066,9 @@ echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
 
             missing_gs.append(f"{frame_id} ({os.path.basename(cdir)})")
 
-        if missing_gs:
+        if missing_gs and eff_cand:
             logger.warning(
-                f"[!] Notice: {len(missing_gs)}/{len(candidate_frames)} GS frames are not yet converged or missing."
+                f"[!] Notice: {len(missing_gs)}/{len(eff_cand)} GS frames are not yet converged or missing."
             )
             if len(missing_gs) <= 5:
                 logger.warning(f"    Missing: {', '.join(missing_gs)}")
@@ -2916,7 +3076,7 @@ echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
         if not labeled_gs:
             raise FileNotFoundError(
                 f"No converged Quantum ESPRESSO calculations found in '{dft_dir}'. "
-                "Please run the compute job (e.g. sbatch submit_dft_pure_qe.slurm) before resuming Stage 4."
+                "Please run the compute job (e.g. sbatch submit_dft_pure_qe.slurm or submit_dft_array_pure_qe.slurm) before resuming Stage 4."
             )
 
         # Write labeled_dft_frames.xyz
@@ -2946,9 +3106,38 @@ echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
             logger.info(f"[-] Ingesting optical excited-state (Delta-SCF) calculations from {dft_es_dir}...")
             es_cand_mode = getattr(self.config, "dft_es_candidates", "all").lower()
             if es_cand_mode == "fc_path":
-                es_targets = [f for f in candidate_frames if f.info.get("sample_type") == "franck_condon"]
+                es_targets = [f for f in eff_cand if f.info.get("sample_type") == "franck_condon"]
             else:
-                es_targets = list(candidate_frames)
+                es_targets = list(eff_cand)
+
+            if not es_targets and os.path.isdir(dft_es_dir):
+                # Auto-discover ES candidate frames from dft_es_dir
+                subdirs_es = sorted([d for d in os.listdir(dft_es_dir) if os.path.isdir(os.path.join(dft_es_dir, d)) and d.startswith("frame_es_")])
+                for idx, sd in enumerate(subdirs_es):
+                    sdir = os.path.join(dft_es_dir, sd)
+                    pw_in = os.path.join(sdir, "pw.in")
+                    if os.path.isfile(pw_in):
+                        try:
+                            at_read = ase.io.read(pw_in, format="espresso-in")
+                            parts = sd.split("_", 3)
+                            try:
+                                cand_idx = int(parts[2]) if len(parts) >= 3 else idx
+                            except ValueError:
+                                cand_idx = idx
+                            frame_id = parts[3] if len(parts) >= 4 else sd
+                            stype = "franck_condon" if "fc" in frame_id else ("rattle" if "rattle" in frame_id else "md")
+                            at_read.info["candidate_index"] = cand_idx
+                            at_read.info["frame_id"] = frame_id
+                            at_read.info["sample_type"] = stype
+                            if "fc" in frame_id:
+                                try:
+                                    fc_num = int(frame_id.split("_")[-1])
+                                    at_read.info["lambda"] = float(fc_num) / max(1.0, float(getattr(self.config, "n_fc_frames", 7) - 1))
+                                except Exception:
+                                    pass
+                            es_targets.append(at_read)
+                        except Exception as e:
+                            logger.warning(f"[-] Could not parse ES structure from {pw_in}: {e}")
 
             for i, fr in enumerate(es_targets):
                 cand_idx = fr.info.get("candidate_index", i)
@@ -2984,5 +3173,8 @@ echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
                 ase.io.write(tmp_es_xyz, labeled_es, format="extxyz")
                 os.replace(tmp_es_xyz, out_es_xyz)
                 logger.info(f"[+] Ingested {len(labeled_es)} converged ES frames -> {out_es_xyz}")
+
+        # Compute exact adiabatic energetics and attach to at_gs and at_es
+        extract_and_attach_adiabatic_energetics(labeled_gs, labeled_es, at_gs=at_gs, at_es=at_es)
 
         return labeled_gs, labeled_es

@@ -60,7 +60,7 @@ class ConfigurationCoordinateEngine:
     ) -> Tuple[Optional[float], Optional[str]]:
         """Derives ZPL energy from Kohn-Sham defect band gap, Delta-SCF energies, or stored CC results."""
         # 0. Exact adiabatic Delta-SCF ZPL calculated directly from FC endpoint frames
-        if "e_zpl_exact_eV" in at_gs.info and at_gs.info["e_zpl_exact_eV"] is not None:
+        if "e_zpl_exact_eV" in at_gs.info and at_gs.info["e_zpl_exact_eV"] is not None and float(at_gs.info["e_zpl_exact_eV"]) > 0:
             return float(at_gs.info["e_zpl_exact_eV"]), at_gs.info.get("zpl_source", "delta_scf_adiabatic")
 
         # 1. Kohn-Sham defect eigenvalue transition gap from DFT

@@ -164,6 +164,8 @@ class FrameSampler:
 
     def sample_defect_core_rattling(self, at_gs: Atoms, n_frames: int = 12, r_cutoff: float = 6.0) -> List[Atoms]:
         """Phase 2: Defect-core localized Gaussian rattle configurations."""
+        if n_frames <= 0:
+            return []
         center = get_defect_center(at_gs)
         dists = mic_distances(at_gs.positions, center, at_gs.cell)
         core_mask = dists < r_cutoff
@@ -192,6 +194,8 @@ class FrameSampler:
         self, at_gs: Atoms, n_select: int = 20, n_steps: int = 2000, dt_fs: float = 1.0
     ) -> List[Atoms]:
         """Phase 3: NVT MD with the foundation potential followed by Farthest Point Sampling."""
+        if n_select <= 0:
+            return []
         scratch_dir = os.path.join(self.config.workspace_dir, "sampler_md")
         os.makedirs(scratch_dir, exist_ok=True)
 

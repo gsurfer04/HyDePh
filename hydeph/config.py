@@ -302,6 +302,7 @@ class ToolkitConfig:
     excited_state_spin_multiplicity: Optional[int] = None
     ground_state_relax_method: str = "auto"  # "auto", "foundation", or "dft"
     prepare_relaxation_inputs: bool = False
+    prepare_dft_inputs: bool = False
     relax_forc_conv_thr: float = 1.0e-3
     relax_nstep: int = 100
     excited_state_displacement: Optional[float] = None  # Angstrom
@@ -540,8 +541,20 @@ class ToolkitConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ToolkitConfig:
         """Constructs a ToolkitConfig from a dictionary, rejecting unknown keys with helpful suggestions."""
+        # Normalize common user-friendly aliases for decoupled execution
+        alias_map = {
+            "prepare_dft": "prepare_dft_inputs",
+            "prepare_scf": "prepare_dft_inputs",
+            "prepare_scf_inputs": "prepare_dft_inputs",
+            "prepare_sample_frames": "prepare_dft_inputs",
+            "prepare_frames": "prepare_dft_inputs",
+            "prepare_relax": "prepare_relaxation_inputs",
+            "prepare_relaxation": "prepare_relaxation_inputs",
+        }
+        normalized_data = {alias_map.get(k, k): v for k, v in data.items()}
+
         valid_keys = {f.name for f in fields(cls)}
-        unknown_keys = [k for k in data.keys() if k not in valid_keys]
+        unknown_keys = [k for k in normalized_data.keys() if k not in valid_keys]
         if unknown_keys:
             import difflib
             errors = []
@@ -554,7 +567,7 @@ class ToolkitConfig:
             raise ValueError("\n".join(errors))
 
         filtered = {}
-        for k, v in data.items():
+        for k, v in normalized_data.items():
             if k in ("supercell_repeat", "kpoints", "nqx") and isinstance(v, list):
                 filtered[k] = tuple(v)
             else:

@@ -354,28 +354,42 @@ def run_pipeline(
         logger.info(f"[+] Loaded {len(candidate_frames)} candidate frames from {cand_xyz}")
 
     # Pre-generate DFT input decks and standalone SLURM runner scripts if stopping at stage 2 or requested
+    dft_inputs_res = None
     if eff_to_stage == 2 or prepare_dft_inputs or getattr(config, "prepare_dft_inputs", False):
         logger.info("\n[-] Pre-generating Quantum ESPRESSO pw.in input decks and standalone SLURM scripts...")
-        qe.prepare_all_dft_inputs(candidate_frames, at_gs=at_gs)
+        dft_inputs_res = qe.prepare_all_dft_inputs(candidate_frames, at_gs=at_gs)
 
-    if eff_to_stage <= 2:
-        logger.info(f"\n[+] Pipeline stopped after Stage 2 as requested (--to-stage {eff_to_stage}).")
+    if eff_to_stage <= 2 or prepare_dft_inputs or getattr(config, "prepare_dft_inputs", False):
+        n_gs = dft_inputs_res.get("n_gs_frames", len(candidate_frames)) if dft_inputs_res else len(candidate_frames)
+        n_es = dft_inputs_res.get("n_es_frames", 0) if dft_inputs_res else 0
+        total_dft = n_gs + n_es
+        array_max_idx = max(0, total_dft - 1)
+
+        logger.info(f"\n[+] Pipeline stopped after Stage 2 as requested.")
         logger.info("=" * 78)
-        logger.info("      NEXT STEPS FOR DECOUPLED HPC EXECUTION:")
+        logger.info("      NEXT STEPS FOR DECOUPLED HPC DFT CALCULATIONS (STAGE 2/3):")
         logger.info("=" * 78)
+        logger.info(f"Generated {n_gs} GS and {n_es} ES Quantum ESPRESSO input decks.")
         logger.info("1. Submit pure Quantum ESPRESSO calculations to the compute nodes:")
-        logger.info("   • Standard batch job (4 A100 GPUs): sbatch submit_dft_pure_qe.slurm")
-        logger.info("   • Debug queue (fast 30-min run):   sbatch --qos=boost_qos_dbg submit_dft_pure_qe.slurm")
+        logger.info(f"   • High-throughput SLURM Job Array (Recommended):")
+        logger.info(f"     sbatch --array=0-{array_max_idx}%16 submit_dft_array_pure_qe.slurm")
+        logger.info(f"   • Standalone batch job (4 A100 GPUs):")
+        logger.info(f"     sbatch submit_dft_pure_qe.slurm")
+        logger.info(f"   • Debug queue (fast <= 30 min run):")
+        logger.info(f"     sbatch --qos=boost_qos_dbg submit_dft_pure_qe.slurm")
         logger.info("   (Zero Python / Conda required on the compute nodes!)")
         logger.info("")
-        logger.info("2. Once DFT calculations complete, resume post-processing on the login node:")
+        logger.info("2. Once DFT calculations complete, resume pipeline execution on login node / WSL:")
         logger.info(f"   python -m hydeph run {config.workspace_dir}/config.yaml --from-stage 4")
+        logger.info("   (HyDePh will automatically ingest all converged GS and ES calculations,")
+        logger.info("    extract exact adiabatic ZPL & Stokes energetics, and train Delta-NEPs!)")
         logger.info("=" * 78)
         return {
             "workspace_dir": config.workspace_dir,
             "candidate_frames": candidate_frames,
             "dq_fc": dq_fc,
             "stage": 2,
+            "dft_inputs": dft_inputs_res,
         }
 
     # -------------------------------------------------------------------------
@@ -436,42 +450,8 @@ def run_pipeline(
             ase.io.write(labeled_es_xyz, labeled_frames_es, format="extxyz")
             logger.info(f"[+] Labeled {len(labeled_frames_es)} optical excited state frames -> {labeled_es_xyz}")
 
-            # Extract exact adiabatic ZPL, absorption, emission, and Stokes shift
-            gs_0 = next((f for f in labeled_frames if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4), None)
-            gs_1 = next((f for f in labeled_frames if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 0.0) - 1.0) < 1e-4), None)
-            es_0 = next((f for f in labeled_frames_es if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4), None)
-            es_1 = next((f for f in labeled_frames_es if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 0.0) - 1.0) < 1e-4), None)
-
-            if gs_0 is not None and es_1 is not None and "energy" in gs_0.info and "energy" in es_1.info:
-                e_gs_0 = float(gs_0.info["energy"])
-                e_es_1 = float(es_1.info["energy"])
-                e_zpl_exact = float(e_es_1 - e_gs_0)
-
-                at_gs.info["energy"] = e_gs_0
-                at_es.info["energy"] = e_es_1
-                at_gs.info["e_zpl_exact_eV"] = e_zpl_exact
-                at_gs.info["zpl_source"] = "delta_scf_adiabatic"
-
-                logger.info("\n" + "-" * 60)
-                logger.info("[+] EXACT ADIABATIC DFT ENERGETICS (Delta-SCF):")
-                logger.info(f"    • Ground State Minimum E_GS(lambda=0): {e_gs_0:.4f} eV")
-                logger.info(f"    • Excited State Minimum E_ES(lambda=1): {e_es_1:.4f} eV")
-                logger.info(f"    • Exact Adiabatic ZPL E_ZPL: {e_zpl_exact:.4f} eV")
-
-                if gs_1 is not None and es_0 is not None and "energy" in gs_1.info and "energy" in es_0.info:
-                    e_gs_1 = float(gs_1.info["energy"])
-                    e_es_0 = float(es_0.info["energy"])
-                    e_abs_exact = float(e_es_0 - e_gs_0)
-                    e_em_exact = float(e_es_1 - e_gs_1)
-                    erel_gs = float(e_gs_1 - e_gs_0)
-                    erel_es = float(e_es_0 - e_es_1)
-                    stokes_exact = float(e_abs_exact - e_em_exact)
-                    logger.info(f"    • Vertical Absorption E_abs: {e_abs_exact:.4f} eV")
-                    logger.info(f"    • Vertical Emission E_em: {e_em_exact:.4f} eV")
-                    logger.info(f"    • GS Relaxation Energy Delta E_rel,GS: {erel_gs*1000:.1f} meV ({erel_gs:.4f} eV)")
-                    logger.info(f"    • ES Relaxation Energy Delta E_rel,ES: {erel_es*1000:.1f} meV ({erel_es:.4f} eV)")
-                    logger.info(f"    • Exact Stokes Shift Delta E_Stokes: {stokes_exact*1000:.1f} meV ({stokes_exact:.4f} eV)")
-                logger.info("-" * 60 + "\n")
+            from .qe_runner import extract_and_attach_adiabatic_energetics
+            extract_and_attach_adiabatic_energetics(labeled_frames, labeled_frames_es, at_gs=at_gs, at_es=at_es)
     else:
         logger.info(f"\n[STEP 3/6] Skipping DFT Labeling (resuming from stage {from_stage})...")
         if not os.path.isfile(labeled_xyz):
@@ -483,7 +463,7 @@ def run_pipeline(
                     ase.io.read(cand_xyz, index=":") if os.path.isfile(cand_xyz) else []
                 )
                 labeled_frames, labeled_frames_es = qe.ingest_completed_calculations(
-                    cand_frames_to_ingest, at_gs=at_gs
+                    cand_frames_to_ingest, at_gs=at_gs, at_es=at_es
                 )
             else:
                 raise FileNotFoundError(
@@ -498,6 +478,10 @@ def run_pipeline(
                 logger.info(f"[+] Loaded {len(labeled_frames_es)} DFT-labeled ES frames from {labeled_es_xyz}")
             else:
                 labeled_frames_es = []
+
+            if labeled_frames and labeled_frames_es:
+                from .qe_runner import extract_and_attach_adiabatic_energetics
+                extract_and_attach_adiabatic_energetics(labeled_frames, labeled_frames_es, at_gs=at_gs, at_es=at_es)
 
     if eff_to_stage <= 3:
         logger.info(f"\n[+] Pipeline stopped after Stage 3 as requested (--to-stage {eff_to_stage}).")
@@ -745,8 +729,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     p_run.add_argument(
         "--prepare-dft",
+        "--prepare-frames",
+        "--prepare-scf",
+        "--prepare-sample-frames",
+        dest="prepare_dft",
         action="store_true",
-        help="Pre-generate all Quantum ESPRESSO pw.in input files and standalone SLURM scripts",
+        help="Pre-generate all sample frame Quantum ESPRESSO pw.in input files (GS & ES) and standalone SLURM scripts",
     )
     p_run.add_argument(
         "--prepare-relax",

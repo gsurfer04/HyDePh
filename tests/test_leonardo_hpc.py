@@ -558,4 +558,247 @@ bfgs converged in 7 iterations
         assert res["stage"] == 1
 
 
+def test_prepare_all_dft_inputs_and_array_script(tmp_path):
+    """Verify QERunner.prepare_all_dft_inputs creates GS and ES inputs, dft_frames_list.txt, and SLURM array."""
+    from hydeph.qe_runner import QERunner
+
+    ws = str(tmp_path / "ws_dft_prep")
+    os.makedirs(ws, exist_ok=True)
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    with open(os.path.join(pseudo_dir, "C.upf"), "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "pristine.xyz"),
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        paired_delta_nep=True,
+        excited_state_method="delta_scf",
+        delta_scf_homo_band=4,
+        delta_scf_lumo_band=5,
+        delta_scf_lumo_degeneracy=1,
+        delta_scf_spin_channel=2,
+        spin_multiplicity=1,
+    )
+    qe = QERunner(cfg)
+
+    # 3 candidate frames
+    at = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    frames = []
+    for i in range(3):
+        fr = at.copy()
+        fr.info["candidate_index"] = i
+        fr.info["frame_id"] = f"fc_{i:02d}"
+        fr.info["sample_type"] = "franck_condon"
+        fr.info["lambda"] = float(i) / 2.0
+        frames.append(fr)
+
+    res = qe.prepare_all_dft_inputs(frames, at_gs=at)
+
+    assert res["n_gs_frames"] == 3
+    assert res["n_es_frames"] == 3
+    assert os.path.isfile(res["slurm_script"])
+    assert os.path.isfile(res["array_script"])
+    assert os.path.isfile(res["list_file"])
+
+    # Verify dft_frames_list.txt has 6 lines with forward slashes
+    with open(res["list_file"], "r") as f:
+        lines = [line.strip() for line in f if line.strip()]
+    assert len(lines) == 6
+    assert all("\\" not in l for l in lines)
+    assert any("dft_calculations/frame_" in l for l in lines)
+    assert any("dft_calculations_es/frame_es_" in l for l in lines)
+
+    # Verify array script contains exact bounds
+    with open(res["array_script"], "r") as f:
+        arr_content = f.read()
+    assert "--array=0-5%16" in arr_content
+    assert "pw.x" in arr_content
+
+
+def test_pipeline_prepare_dft_stops_cleanly(tmp_path):
+    """Verify run_pipeline stops cleanly at Stage 2 when prepare_dft_inputs is requested."""
+    from hydeph.pipeline import run_pipeline
+
+    ws = str(tmp_path / "ws_pipe_prep")
+    os.makedirs(ws, exist_ok=True)
+    pristine_p = str(tmp_path / "pristine.xyz")
+    at = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    at_es = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.45)], cell=[10, 10, 10], pbc=True)
+    at.write(pristine_p)
+    at.write(os.path.join(ws, "relaxed_gs.xyz"))
+    at_es.write(os.path.join(ws, "relaxed_es.xyz"))
+
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    with open(os.path.join(pseudo_dir, "C.upf"), "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    pot_file = str(tmp_path / "nep.txt")
+    with open(pot_file, "w") as f:
+        f.write("dummy nep")
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_p,
+        defect_cell_path=pristine_p,
+        supercell_repeat=(1, 1, 1),
+        foundation_potential_path=pot_file,
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=1,
+        prepare_dft_inputs=True,
+        n_fc_frames=3,
+        n_phonon_frames=0,
+        n_md_frames=0,
+    )
+
+    from unittest.mock import patch
+    with patch("hydeph.calculator.CPUNEP") as mock_nep:
+        calc_inst = mock_nep.return_value
+        calc_inst.get_potential_energy.return_value = -100.0
+        calc_inst.get_forces.return_value = np.zeros((2, 3))
+        res = run_pipeline(cfg)
+
+        assert res["stage"] == 2
+        assert "dft_inputs" in res
+        assert res["dft_inputs"] is not None
+        assert os.path.isfile(os.path.join(ws, "submit_dft_array_pure_qe.slurm"))
+        assert os.path.isfile(os.path.join(ws, "dft_frames_list.txt"))
+
+
+def test_ingest_completed_calculations_with_exact_energetics(tmp_path):
+    """Verify ingest_completed_calculations parses GS & ES outputs and calculates exact adiabatic ZPL."""
+    from hydeph.qe_runner import QERunner, write_qe_input
+
+    ws = str(tmp_path / "ws_ingest")
+    os.makedirs(ws, exist_ok=True)
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    with open(os.path.join(pseudo_dir, "C.upf"), "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "pristine.xyz"),
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=1,
+    )
+    qe = QERunner(cfg)
+
+    at_gs = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    at_es = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.45)], cell=[10, 10, 10], pbc=True)
+
+    # Prepare candidate frames: lambda=0 (GS geometry) and lambda=1 (ES geometry)
+    f0 = at_gs.copy()
+    f0.info.update({"candidate_index": 0, "frame_id": "fc_00", "sample_type": "franck_condon", "lambda": 0.0})
+    f1 = at_es.copy()
+    f1.info.update({"candidate_index": 1, "frame_id": "fc_01", "sample_type": "franck_condon", "lambda": 1.0})
+    cand_frames = [f0, f1]
+
+    # Setup GS calculations: E_GS(0) = -150.0 eV, E_GS(1) = -149.5 eV
+    gs_dir0 = os.path.join(ws, "dft_calculations", "frame_000_fc_00")
+    os.makedirs(gs_dir0, exist_ok=True)
+    write_qe_input(f0, os.path.join(gs_dir0, "pw.in"), cfg)
+    with open(os.path.join(gs_dir0, "pw.out"), "w") as f:
+        f.write("""
+!    total energy              =     -11.02500000 Ry
+     Forces acting on atoms (cartesian axes, Ry/au):
+     atom    1 type  1   force =     0.00000000    0.00000000    0.00000000
+     atom    2 type  1   force =     0.00000000    0.00000000    0.00000000
+     JOB DONE.
+""")
+
+    gs_dir1 = os.path.join(ws, "dft_calculations", "frame_001_fc_01")
+    os.makedirs(gs_dir1, exist_ok=True)
+    write_qe_input(f1, os.path.join(gs_dir1, "pw.in"), cfg)
+    with open(os.path.join(gs_dir1, "pw.out"), "w") as f:
+        f.write("""
+!    total energy              =     -10.98800000 Ry
+     Forces acting on atoms (cartesian axes, Ry/au):
+     atom    1 type  1   force =     0.00000000    0.00000000    0.00000000
+     atom    2 type  1   force =     0.00000000    0.00000000    0.00000000
+     JOB DONE.
+""")
+
+    # Setup ES calculations: E_ES(0) = -10.878 Ry, E_ES(1) = -10.900 Ry
+    es_dir0 = os.path.join(ws, "dft_calculations_es", "frame_es_000_fc_00")
+    os.makedirs(es_dir0, exist_ok=True)
+    write_qe_input(f0, os.path.join(es_dir0, "pw.in"), cfg)
+    with open(os.path.join(es_dir0, "pw.out"), "w") as f:
+        f.write("""
+!    total energy              =     -10.87800000 Ry
+     Forces acting on atoms (cartesian axes, Ry/au):
+     atom    1 type  1   force =     0.00000000    0.00000000    0.00000000
+     atom    2 type  1   force =     0.00000000    0.00000000    0.00000000
+     JOB DONE.
+""")
+
+    es_dir1 = os.path.join(ws, "dft_calculations_es", "frame_es_001_fc_01")
+    os.makedirs(es_dir1, exist_ok=True)
+    write_qe_input(f1, os.path.join(es_dir1, "pw.in"), cfg)
+    with open(os.path.join(es_dir1, "pw.out"), "w") as f:
+        f.write("""
+!    total energy              =     -10.90000000 Ry
+     Forces acting on atoms (cartesian axes, Ry/au):
+     atom    1 type  1   force =     0.00000000    0.00000000    0.00000000
+     atom    2 type  1   force =     0.00000000    0.00000000    0.00000000
+     JOB DONE.
+""")
+
+    labeled_gs, labeled_es = qe.ingest_completed_calculations(cand_frames, at_gs=at_gs, at_es=at_es)
+
+    assert len(labeled_gs) == 2
+    assert len(labeled_es) == 2
+    assert os.path.isfile(os.path.join(ws, "labeled_dft_frames.xyz"))
+    assert os.path.isfile(os.path.join(ws, "labeled_frames_es.xyz"))
+
+    # E_ZPL = E_ES(lambda=1) - E_GS(lambda=0) = (-10.900 - (-11.025)) * 13.605698066 = 0.125 * 13.605698066 = 1.7007 eV
+    assert "e_zpl_exact_eV" in at_gs.info
+    assert at_gs.info["zpl_source"] == "delta_scf_adiabatic"
+    assert pytest.approx(at_gs.info["e_zpl_exact_eV"], rel=1e-3) == 1.7007
+
+
+def test_ingest_without_candidate_frames_auto_discovery(tmp_path):
+    """Verify ingest_completed_calculations auto-discovers frames from disk when candidate_frames is None."""
+    from hydeph.qe_runner import QERunner, write_qe_input
+
+    ws = str(tmp_path / "ws_auto_ingest")
+    os.makedirs(ws, exist_ok=True)
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    with open(os.path.join(pseudo_dir, "C.upf"), "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "pristine.xyz"),
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=1,
+    )
+    qe = QERunner(cfg)
+
+    at = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    gs_dir = os.path.join(ws, "dft_calculations", "frame_000_fc_00")
+    os.makedirs(gs_dir, exist_ok=True)
+    write_qe_input(at, os.path.join(gs_dir, "pw.in"), cfg)
+    with open(os.path.join(gs_dir, "pw.out"), "w") as f:
+        f.write("""
+!    total energy              =     -11.00000000 Ry
+     Forces acting on atoms (cartesian axes, Ry/au):
+     atom    1 type  1   force =     0.00000000    0.00000000    0.00000000
+     atom    2 type  1   force =     0.00000000    0.00000000    0.00000000
+     JOB DONE.
+""")
+
+    labeled_gs, labeled_es = qe.ingest_completed_calculations(None)
+    assert len(labeled_gs) == 1
+    assert os.path.isfile(os.path.join(ws, "labeled_dft_frames.xyz"))
+
+
+
 
