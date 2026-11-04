@@ -402,3 +402,28 @@ def test_defect_builder_excited_state_seed_path(tmp_path):
     assert dq > 0.0
 
 
+def test_apply_jahn_teller_distortion():
+    """Verify apply_jahn_teller_distortion contracts coordinating atoms without moving center of mass."""
+    from hydeph.defect_builder import apply_jahn_teller_distortion
+
+    # Create an equilateral triangle of C atoms around origin (C3v symmetry)
+    pos = np.array([
+        [0.0, 1.0, 0.0],
+        [np.sqrt(3)/2, -0.5, 0.0],
+        [-np.sqrt(3)/2, -0.5, 0.0],
+    ])
+    at = Atoms("C3", positions=pos, cell=[10, 10, 10], pbc=True)
+    d_orig = np.linalg.norm(pos[0] - pos[1])
+    com_orig = at.get_center_of_mass()
+
+    at_dist, pair = apply_jahn_teller_distortion(at, defect_center=[0, 0, 0], amplitude=0.04)
+    assert len(pair) == 2
+    com_dist = at_dist.get_center_of_mass()
+    np.testing.assert_allclose(com_dist, com_orig, atol=1e-6)
+
+    # The selected pair should have contracted by exactly amplitude (0.04 A)
+    d_new = np.linalg.norm(at_dist.positions[pair[0]] - at_dist.positions[pair[1]])
+    assert pytest.approx(d_orig - d_new, abs=1e-5) == 0.04
+
+
+

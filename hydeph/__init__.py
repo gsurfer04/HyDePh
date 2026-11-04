@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 from .config import ToolkitConfig, discover_pseudopotential
-from .defect_builder import DefectBuilder, detect_defect_sites
+from .defect_builder import DefectBuilder, detect_defect_sites, apply_jahn_teller_distortion
 from .frame_sampler import FrameSampler, get_rattle_sigma
 from .qe_runner import QERunner
 from .delta_trainer import DeltaTrainer, evaluate_delta_nep_quality_control
@@ -29,6 +29,7 @@ __all__ = [
     "discover_pseudopotential",
     "DefectBuilder",
     "detect_defect_sites",
+    "apply_jahn_teller_distortion",
     "FrameSampler",
     "get_rattle_sigma",
     "QERunner",

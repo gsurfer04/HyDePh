@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 import numpy as np
 import ase.io
 from ase import Atoms
@@ -150,6 +150,103 @@ def detect_defect_sites(
         "centroid": centroid,
         "description": description,
     }
+
+
+def apply_jahn_teller_distortion(
+    atoms: Atoms,
+    defect_center: Optional[np.ndarray] = None,
+    amplitude: float = 0.04,
+    r_cutoff: float = 3.5,
+) -> Tuple[Atoms, List[int]]:
+    """Applies a small symmetry-breaking Jahn-Teller distortion to coordinating atoms around the defect.
+
+    When an electronic state in a symmetric geometry has orbital degeneracy (e.g. e or t2 doublet/triplet)
+    and integer occupation is enforced, the Kohn-Sham SCF solver encounters charge sloshing and fails to converge.
+    Displacing a pair of coordinating atoms along their connecting vector by `amplitude` (e.g. 0.04 Å)
+    lowers the point-group symmetry (e.g. C3v -> C1h), lifts the orbital degeneracy (delta E ~ 0.1-0.2 eV),
+    and allows smooth BFGS relaxation directly down to the Jahn-Teller minimum.
+
+    Parameters
+    ----------
+    atoms : Atoms
+        Ground-state atomic configuration.
+    defect_center : np.ndarray, optional
+        (3,) position of the defect cavity / centroid. If None, derived from atoms.info['defect_center']
+        or geometric centroid.
+    amplitude : float
+        Magnitude of pairing displacement in Angstroms (default 0.04 Å).
+    r_cutoff : float
+        Radius within which to search for coordinating atoms around defect_center (default 3.5 Å).
+
+    Returns
+    -------
+    Atoms
+        Perturbed Atoms object with broken symmetry.
+    List[int]
+        Indices of the pair of coordinating atoms that received the distortion.
+    """
+    at = atoms.copy()
+    if defect_center is None:
+        if "defect_center" in at.info:
+            defect_center = np.asarray(at.info["defect_center"], dtype=float)
+        elif "defect_positions" in at.info and len(at.info["defect_positions"]) > 0:
+            defect_center = np.mean(at.info["defect_positions"], axis=0)
+        else:
+            defect_center = np.mean(at.positions, axis=0)
+
+    cell = at.cell if (at.pbc is not None and at.pbc.any()) else None
+    if cell is not None:
+        dists = mic_distances(at.positions, defect_center, cell)
+    else:
+        dists = np.linalg.norm(at.positions - defect_center, axis=1)
+
+    # Find coordinating atoms in the first shell
+    coord_indices = [int(i) for i in np.where(dists <= r_cutoff)[0]]
+    if len(coord_indices) < 2:
+        coord_indices = [int(i) for i in np.argsort(dists)[:min(4, len(at))]]
+
+    if len(coord_indices) < 2:
+        return at, []
+
+    # Find pair of coordinating atoms of identical chemical species
+    pairs = []
+    for i in range(len(coord_indices)):
+        for j in range(i + 1, len(coord_indices)):
+            ia, ib = coord_indices[i], coord_indices[j]
+            if cell is not None:
+                d = float(mic_distances(at.positions[ia:ia+1], at.positions[ib], cell)[0])
+            else:
+                d = float(np.linalg.norm(at.positions[ia] - at.positions[ib]))
+            pairs.append((d, ia, ib))
+    pairs.sort()
+
+    best_pair = None
+    for d, ia, ib in pairs:
+        if at[ia].symbol == at[ib].symbol:
+            best_pair = (ia, ib)
+            break
+    if best_pair is None and pairs:
+        best_pair = (pairs[0][1], pairs[0][2])
+
+    if best_pair is None:
+        return at, []
+
+    ia, ib = best_pair
+    if cell is not None:
+        dr = mic_displacement(at.positions[ib:ib+1], at.positions[ia:ia+1], cell)[0]
+    else:
+        dr = at.positions[ib] - at.positions[ia]
+
+    dist = float(np.linalg.norm(dr))
+    if dist < 1e-4:
+        return at, []
+
+    u = dr / dist
+    # Contract pair towards each other (conserves center-of-mass)
+    at.positions[ia] += 0.5 * amplitude * u
+    at.positions[ib] -= 0.5 * amplitude * u
+
+    return at, [ia, ib]
 
 
 class DefectBuilder:
@@ -650,13 +747,27 @@ class DefectBuilder:
                     except Exception as e:
                         logger.warning(f"    [!] Could not load excited_state_seed_path '{es_seed}': {e}")
                 elif lumo_deg == 1 and gap_info is not None and gap_info.get("lumo_degeneracy", 1) > 1:
-                    logger.warning(
-                        f"    [!] Warning: delta_scf_lumo_degeneracy=1 requested for an orbital that appears degenerate "
-                        f"in ground state (detected degeneracy={gap_info['lumo_degeneracy']}) without an excited_state_seed_path. "
-                        f"SCF on symmetric geometries with integer occupation in a degenerate subspace often exhibits charge "
-                        f"sloshing and convergence failure. If SCF fails to converge, consider delta_scf_lumo_degeneracy=2 "
-                        f"or provide an initial Jahn-Teller symmetry-breaking perturbation via excited_state_seed_path."
-                    )
+                    auto_jt = getattr(self.config, "auto_jahn_teller_distortion", True)
+                    jt_amp = getattr(self.config, "jahn_teller_amplitude", 0.04)
+                    if auto_jt:
+                        init_es, perturbed_atoms = apply_jahn_teller_distortion(
+                            at_gs,
+                            defect_center=center,
+                            amplitude=jt_amp,
+                        )
+                        logger.info(
+                            f"    [+] Detected degenerate LUMO (degeneracy={gap_info['lumo_degeneracy']}) with integer occupation "
+                            f"(delta_scf_lumo_degeneracy=1). Automatically applied Jahn-Teller symmetry-breaking perturbation "
+                            f"(amplitude {jt_amp:.3f} Å on coordinating atoms {perturbed_atoms}) to lift orbital degeneracy and prevent SCF charge sloshing."
+                        )
+                    else:
+                        logger.warning(
+                            f"    [!] Warning: delta_scf_lumo_degeneracy=1 requested for an orbital that appears degenerate "
+                            f"in ground state (detected degeneracy={gap_info['lumo_degeneracy']}) without an excited_state_seed_path. "
+                            f"SCF on symmetric geometries with integer occupation in a degenerate subspace often exhibits charge "
+                            f"sloshing and convergence failure. If SCF fails to converge, consider delta_scf_lumo_degeneracy=2 "
+                            f"or set auto_jahn_teller_distortion=True."
+                        )
 
                 at_es = qe_runner.run_relaxation(
                     init_es,

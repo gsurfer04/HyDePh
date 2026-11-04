@@ -294,6 +294,8 @@ class ToolkitConfig:
     delta_scf_lumo_band: Optional[int] = None
     delta_scf_lumo_degeneracy: Optional[int] = None
     delta_scf_spin_channel: Optional[int] = None
+    auto_jahn_teller_distortion: bool = True
+    jahn_teller_amplitude: float = 0.04
     paired_delta_nep: bool = True
     dft_es_candidates: str = "all"  # "all" (paired with ground state dataset) or "fc_path"
     excited_state_tot_magnetization: Optional[int] = None
