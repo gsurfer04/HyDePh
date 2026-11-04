@@ -426,4 +426,65 @@ def test_apply_jahn_teller_distortion():
     assert pytest.approx(d_orig - d_new, abs=1e-5) == 0.04
 
 
+def test_auto_jahn_teller_integration(tmp_path):
+    """Verify DefectBuilder automatically applies JT distortion when degenerate LUMO has lumo_deg=1."""
+    import hydeph.defect_builder
+
+    pristine_path = str(tmp_path / "pristine.xyz")
+    ws_dir = str(tmp_path / "ws_jt")
+    os.makedirs(ws_dir, exist_ok=True)
+
+    pos = np.array([
+        [0.0, 1.0, 0.0],
+        [np.sqrt(3)/2, -0.5, 0.0],
+        [-np.sqrt(3)/2, -0.5, 0.0],
+    ])
+    at_gs = Atoms("C3", positions=pos, cell=[10, 10, 10], pbc=True)
+    at_gs.info["defect_center"] = [0.0, 0.0, 0.0]
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_path,
+        excited_state_method="delta_scf",
+        delta_scf_lumo_degeneracy=1,
+        spin_multiplicity=3,
+        auto_jahn_teller_distortion=True,
+        jahn_teller_amplitude=0.04,
+        workspace_dir=ws_dir,
+    )
+
+    passed_atoms = []
+    mock_qe = MagicMock()
+    def mock_run_relax(atoms, *args, **kwargs):
+        passed_atoms.append(atoms.copy())
+        res = atoms.copy()
+        res.info["energy"] = -10.0
+        return res
+    mock_qe.run_relaxation = mock_run_relax
+
+    builder = DefectBuilder(cfg, calc_qe=mock_qe)
+
+    orig_parse = hydeph.defect_builder.parse_qe_band_gap
+    hydeph.defect_builder.parse_qe_band_gap = lambda f: {
+        "lumo_degeneracy": 2,
+        "nelec": 12,
+        "spin_channel": 2,
+        "homo_band": 6,
+        "lumo_band": 7,
+    }
+
+    os.makedirs(os.path.join(ws_dir, "qe_gs_relax"), exist_ok=True)
+    with open(os.path.join(ws_dir, "qe_gs_relax", "pw.out"), "w") as f:
+        f.write("mock")
+
+    try:
+        at_es, dq = builder.generate_excited_state_geometry(at_gs, force_relax=True)
+    finally:
+        hydeph.defect_builder.parse_qe_band_gap = orig_parse
+
+    assert len(passed_atoms) == 1
+    diff = np.max(np.abs(passed_atoms[0].positions - at_gs.positions))
+    assert diff > 0.01
+
+
+
 
