@@ -433,3 +433,127 @@ def test_run_pipeline_to_stage(tmp_path):
         assert "candidate_frames" not in res1
 
 
+def test_prepare_relaxation_inputs(tmp_path):
+    """Verify prepare_relaxation_inputs generates gs_relax, es_relax, and SLURM runner script."""
+    from hydeph.qe_runner import QERunner
+    from hydeph.defect_builder import DefectBuilder
+
+    ws = str(tmp_path / "ws_relax_prep")
+    os.makedirs(ws, exist_ok=True)
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    with open(os.path.join(pseudo_dir, "C.upf"), "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    pristine_p = str(tmp_path / "pristine.xyz")
+    at = Atoms("C3", positions=[(0, 1, 0), (np.sqrt(3)/2, -0.5, 0), (-np.sqrt(3)/2, -0.5, 0)], cell=[10, 10, 10], pbc=True)
+    at.write(pristine_p)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_p,
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        excited_state_method="delta_scf",
+        delta_scf_homo_band=5,
+        delta_scf_lumo_band=6,
+        delta_scf_lumo_degeneracy=1,
+        delta_scf_spin_channel=2,
+        auto_jahn_teller_distortion=True,
+        jahn_teller_amplitude=0.04,
+        spin_multiplicity=3,
+    )
+
+    builder = DefectBuilder(cfg)
+    defect_sc = at.copy()
+    defect_sc.info["defect_center"] = [0.0, 0.0, 0.0]
+
+    res = builder.prepare_relaxation_inputs(defect_sc)
+
+    assert os.path.isfile(res["gs_relax_in"])
+    assert os.path.isfile(res["gs_scf_in"])
+    assert os.path.isfile(res["es_relax_in"])
+    assert os.path.isfile(res["slurm_script"])
+
+    # Verify SLURM script contains srun, modules, and extraction
+    with open(res["slurm_script"], "r") as f:
+        content = f.read()
+    assert "qe_gs_relax" in content
+    assert "qe_es_relax" in content
+    assert "srun" in content
+    assert "relaxed_gs.xyz" in content
+
+
+def test_resumption_from_cluster_relaxation(tmp_path):
+    """Verify pipeline and DefectBuilder resume from cluster pw.out without re-running relaxation."""
+    from hydeph.pipeline import run_pipeline
+
+    ws = str(tmp_path / "ws_resume")
+    os.makedirs(ws, exist_ok=True)
+    pristine_p = str(tmp_path / "pristine.xyz")
+    at = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    at.write(pristine_p)
+
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    with open(os.path.join(pseudo_dir, "C.upf"), "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    pot_file = str(tmp_path / "nep.txt")
+    with open(pot_file, "w") as f:
+        f.write("dummy nep")
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_p,
+        foundation_potential_path=pot_file,
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=1,
+    )
+
+    # Mock converged pw.out in qe_gs_relax
+    gs_dir = os.path.join(ws, "qe_gs_relax")
+    os.makedirs(gs_dir, exist_ok=True)
+    # Write mock pw.in so template_atoms can be inferred
+    from hydeph.qe_runner import write_qe_input
+    write_qe_input(at, os.path.join(gs_dir, "pw.in"), cfg, calculation="relax")
+    with open(os.path.join(gs_dir, "pw.out"), "w") as f:
+        f.write("""
+!    total energy              =     -150.12345678 Ry
+Begin final coordinates
+ATOMIC_POSITIONS (angstrom)
+C        0.000000   0.000000   0.000000
+C        0.000000   0.000000   1.420000
+End final coordinates
+bfgs converged in 5 iterations
+""")
+
+    # Mock converged pw.out in qe_es_relax
+    es_dir = os.path.join(ws, "qe_es_relax")
+    os.makedirs(es_dir, exist_ok=True)
+    write_qe_input(at, os.path.join(es_dir, "pw.in"), cfg, calculation="relax")
+    with open(os.path.join(es_dir, "pw.out"), "w") as f:
+        f.write("""
+!    total energy              =     -148.12345678 Ry
+Begin final coordinates
+ATOMIC_POSITIONS (angstrom)
+C        0.000000   0.000000   0.000000
+C        0.000000   0.000000   1.460000
+End final coordinates
+bfgs converged in 7 iterations
+""")
+
+    # Resume pipeline from Stage 1: should discover both pw.out and write relaxed_gs.xyz, relaxed_es.xyz
+    from unittest.mock import patch
+    with patch("calorine.calculators.CPUNEP") as mock_nep:
+        calc_inst = mock_nep.return_value
+        calc_inst.get_potential_energy.return_value = -100.0
+        calc_inst.get_forces.return_value = np.zeros((2, 3))
+        res = run_pipeline(cfg, to_stage=1)
+        assert os.path.isfile(os.path.join(ws, "relaxed_gs.xyz"))
+        assert os.path.isfile(os.path.join(ws, "relaxed_es.xyz"))
+        assert res["stage"] == 1
+
+
+

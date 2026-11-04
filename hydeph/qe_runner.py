@@ -613,7 +613,7 @@ def parse_qe_output(pw_out_path: str) -> Tuple[Optional[float], Optional[np.ndar
 
 def parse_qe_relaxation_output(
     pw_out_path: str,
-    template_atoms: Atoms,
+    template_atoms: Optional[Atoms] = None,
     require_converged: bool = True,
 ) -> Tuple[Optional[Atoms], Optional[float]]:
     """Parses the final relaxed geometry and total energy from a Quantum ESPRESSO `pw.x` relaxation output.
@@ -622,8 +622,9 @@ def parse_qe_relaxation_output(
     ----------
     pw_out_path : str
         Path to `pw.out`.
-    template_atoms : Atoms
-        Reference Atoms object containing cell, symbols, and pbc.
+    template_atoms : Atoms, optional
+        Reference Atoms object containing cell, symbols, and pbc. If omitted, attempts to infer
+        from the adjacent `pw.in` input deck.
     require_converged : bool
         If True (default), strictly verifies BFGS convergence marker ('Begin final coordinates' or
         'bfgs converged in') and rejects timed-out, nstep-exhausted, or incomplete relaxations.
@@ -634,6 +635,18 @@ def parse_qe_relaxation_output(
         `(relaxed_atoms, energy_eV)`, or `(None, None)` if relaxation failed or output is missing/unconverged.
     """
     if not os.path.isfile(pw_out_path):
+        return None, None
+
+    if template_atoms is None:
+        calc_dir = os.path.dirname(pw_out_path)
+        pw_in = os.path.join(calc_dir, "pw.in")
+        if os.path.isfile(pw_in):
+            try:
+                template_atoms = ase.io.read(pw_in, format="espresso-in")
+            except Exception:
+                template_atoms = None
+
+    if template_atoms is None:
         return None, None
 
     try:
@@ -1420,9 +1433,11 @@ class QERunner:
 
         if not force_rerun and os.path.isfile(pw_out):
             at_rel, e_ev = parse_qe_relaxation_output(pw_out, atoms, require_converged=True)
-            if at_rel is not None and check_pw_in_matches_atoms(pw_in, atoms, config=self.config):
-                logger.info(f"      [Cache hit] Reusing converged QE relaxation in {calc_dir}")
-                return at_rel
+            if at_rel is not None:
+                matches = check_pw_in_matches_atoms(pw_in, atoms, config=self.config) if os.path.isfile(pw_in) else True
+                if matches or (len(at_rel) == len(atoms) and at_rel.get_chemical_symbols() == atoms.get_chemical_symbols()):
+                    logger.info(f"      [Cache hit] Reusing converged QE relaxation in {calc_dir}")
+                    return at_rel
 
         # Clean scratch tmp/
         tmp_dir = os.path.join(calc_dir, "tmp")
@@ -2142,6 +2157,280 @@ class QERunner:
         summary_str = ", ".join(f"{k}: {v}" for k, v in sorted(final_types.items()))
         logger.info(f"\n[+] DFT Labeling Complete: {len(final_labeled)} total frames ({summary_str}) -> {out_xyz}")
         return final_labeled
+
+    def prepare_relaxation_inputs(
+        self,
+        defect_sc: Atoms,
+        init_es: Optional[Atoms] = None,
+        calc_dir_base: Optional[str] = None,
+        write_slurm_scripts: bool = True,
+    ) -> Dict[str, Any]:
+        """Prepares Quantum ESPRESSO relaxation and SCF input files and standalone SLURM batch scripts.
+
+        Enables fully decoupled HPC execution for Stage 1:
+        - Writes Ground-State geometry relaxation input deck (`qe_gs_relax/pw.in`) and SCF deck (`qe_gs_scf/pw.in`).
+        - Writes Excited-State Delta-SCF geometry relaxation input deck (`qe_es_relax/pw.in`) when parameters
+          are specified, with automated Jahn-Teller symmetry-breaking distortion applied if orbital degeneracy is detected.
+        - Generates standalone SLURM batch scripts (`submit_relaxations_pure_qe.slurm`) ready to submit to compute nodes.
+        - The user can copy the workspace to the cluster, execute relaxations with zero Python required on compute nodes,
+          and seamlessly resume HyDePh once results return.
+
+        Parameters
+        ----------
+        defect_sc : Atoms
+            Defect supercell geometry to relax.
+        init_es : Atoms, optional
+            Initial excited-state geometry (e.g. with Jahn-Teller pairing distortion applied).
+        calc_dir_base : str, optional
+            Base workspace directory (defaults to config.workspace_dir).
+        write_slurm_scripts : bool
+            Whether to write standalone SLURM runner scripts (default True).
+
+        Returns
+        -------
+        Dict[str, Any]
+            Paths to generated input files and SLURM runner scripts.
+        """
+        calc_base = calc_dir_base or self.config.workspace_dir
+        os.makedirs(calc_base, exist_ok=True)
+
+        # 1. Ground State Relaxation input (qe_gs_relax/pw.in)
+        gs_dir = os.path.join(calc_base, "qe_gs_relax")
+        os.makedirs(gs_dir, exist_ok=True)
+        gs_pw_in = os.path.join(gs_dir, "pw.in")
+        tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
+        nspin = 2 if (self.config.spin_polarized or tot_mag > 0) else 1
+
+        write_qe_input(
+            defect_sc,
+            gs_pw_in,
+            self.config,
+            calculation="relax",
+            tot_magnetization=tot_mag,
+            nspin=nspin,
+        )
+        logger.info(f"[+] Prepared Ground-State relaxation input: {gs_pw_in}")
+
+        # 2. Ground State SCF single point input (qe_gs_scf/pw.in)
+        gs_scf_dir = os.path.join(calc_base, "qe_gs_scf")
+        os.makedirs(gs_scf_dir, exist_ok=True)
+        gs_scf_in = os.path.join(gs_scf_dir, "pw.in")
+        write_qe_input(
+            defect_sc,
+            gs_scf_in,
+            self.config,
+            calculation="scf",
+            tot_magnetization=tot_mag,
+            nspin=nspin,
+        )
+        logger.info(f"[+] Prepared Ground-State SCF input: {gs_scf_in}")
+
+        # 3. Excited State Relaxation input (qe_es_relax/pw.in) if delta_scf
+        es_dir = os.path.join(calc_base, "qe_es_relax")
+        es_pw_in = os.path.join(es_dir, "pw.in")
+        es_prepared = False
+
+        if getattr(self.config, "excited_state_method", "delta_scf").lower() == "delta_scf":
+            os.makedirs(es_dir, exist_ok=True)
+            homo_b = getattr(self.config, "delta_scf_homo_band", None)
+            lumo_b = getattr(self.config, "delta_scf_lumo_band", None)
+            spin_chan = getattr(self.config, "delta_scf_spin_channel", 2) or 2
+            lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", 1) or 1
+
+            if homo_b is not None and lumo_b is not None:
+                # Count valence electrons
+                unique_syms = sorted(list(set(defect_sc.get_chemical_symbols())))
+                z_vals = {}
+                for s in unique_syms:
+                    upf = self.config.pseudopotentials.get(s, "") if self.config.pseudopotentials else ""
+                    if upf:
+                        p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
+                        if os.path.isfile(p):
+                            z_vals[s] = inspect_upf_metadata(p).get("z_valence")
+                _DEFAULT_VALENCE = {
+                    "H": 1, "Li": 1, "Be": 2, "B": 3, "C": 4, "N": 5, "O": 6, "F": 7,
+                    "Na": 1, "Mg": 2, "Al": 3, "Si": 4, "P": 5, "S": 6, "Cl": 7,
+                    "K": 1, "Ca": 2, "Ga": 3, "Ge": 4, "As": 5, "Se": 6, "Br": 7,
+                    "Rb": 1, "Sr": 2, "In": 3, "Sn": 4, "Sb": 5, "Te": 6, "I": 7,
+                    "Cs": 1, "Ba": 2,
+                }
+                nelec_total = int(round(
+                    sum(z_vals.get(s) or _DEFAULT_VALENCE.get(s, 4) for s in defect_sc.get_chemical_symbols())
+                    - float(self.config.tot_charge)
+                ))
+                if (nelec_total % 2) != (tot_mag % 2):
+                    tot_mag = tot_mag if tot_mag % 2 == nelec_total % 2 else (tot_mag + 1 if tot_mag >= 0 else 0)
+
+                nbnd = max(homo_b + 1, lumo_b + lumo_deg - 1, (nelec_total + abs(tot_mag)) // 2) + 8
+                occ_up, occ_dw = build_delta_scf_occupations(
+                    nelec=nelec_total,
+                    tot_magnetization=tot_mag,
+                    nbnd=nbnd,
+                    homo_band=homo_b,
+                    lumo_band=lumo_b,
+                    spin_channel=spin_chan,
+                    lumo_degeneracy=lumo_deg,
+                )
+                start_es = init_es if init_es is not None else defect_sc
+                write_qe_input(
+                    start_es,
+                    es_pw_in,
+                    self.config,
+                    calculation="relax",
+                    tot_magnetization=tot_mag,
+                    nspin=2,
+                    occupations_mode="from_input",
+                    constrained_occupations=(occ_up, occ_dw),
+                )
+                es_prepared = True
+                logger.info(f"[+] Prepared Excited-State Delta-SCF relaxation input: {es_pw_in}")
+
+        slurm_path = None
+        if write_slurm_scripts:
+            acct = getattr(self.config, "hpc_account", "IscrC_HyDePh") or "IscrC_HyDePh"
+            slurm_content = f"""#!/bin/bash
+# ==============================================================================
+#  HyDePh Decoupled HPC Relaxation Launcher (Pure Quantum ESPRESSO)
+#  Ground-State and Excited-State (Delta-SCF) Geometry Optimizations
+#
+#  Usage:
+#    sbatch submit_relaxations_pure_qe.slurm
+# ==============================================================================
+#SBATCH --job-name=hydeph_relax
+#SBATCH --account={acct}
+#SBATCH --partition=boost_usr_prod
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:4
+#SBATCH --time=04:00:00
+#SBATCH --output=hydeph_relax_%j.out
+#SBATCH --error=hydeph_relax_%j.err
+
+set -e
+
+WORK_DIR="${{SLURM_SUBMIT_DIR:-$PWD}}"
+cd "$WORK_DIR"
+
+echo "=============================================================================="
+echo " [HPC Relaxation] Running on $(hostname) at $(date)"
+echo " Job ID: $SLURM_JOB_ID | Submit Dir: $WORK_DIR"
+echo "=============================================================================="
+
+module purge
+if module is-avail quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas 2>/dev/null; then
+    module load quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas
+    module load cuda/12.6
+else
+    module load profile/chem-phys 2>/dev/null || true
+    module load q-e/7.2 2>/dev/null || true
+    module load cuda/11.8 2>/dev/null || true
+fi
+
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+# Locate workspace directory containing relaxation folders
+WORKSPACE_DIR=""
+for cand in "$WORK_DIR" "$WORK_DIR/hydeph_run" "$WORK_DIR/../hydeph_run"; do
+    if [ -d "$cand/qe_gs_relax" ]; then
+        WORKSPACE_DIR="$(cd "$cand" && pwd)"
+        break
+    fi
+done
+
+if [ -z "$WORKSPACE_DIR" ]; then
+    echo "[!] Error: qe_gs_relax directory not found relative to $WORK_DIR!"
+    exit 1
+fi
+
+echo "[+] Using workspace directory: $WORKSPACE_DIR"
+cd "$WORKSPACE_DIR"
+
+# Resolve pseudopotentials directory
+PSEUDO_DIR=""
+for cand in "$WORKSPACE_DIR/pseudo" "$WORKSPACE_DIR/../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo"; do
+    if [ -d "$cand" ]; then
+        PSEUDO_DIR="$(cd "$cand" && pwd)"
+        break
+    fi
+done
+if [ -n "$PSEUDO_DIR" ]; then
+    [ -d "$WORKSPACE_DIR/qe_gs_relax" ] && [ ! -e "$WORKSPACE_DIR/qe_gs_relax/pseudo" ] && ln -sfn "$PSEUDO_DIR" "$WORKSPACE_DIR/qe_gs_relax/pseudo"
+    [ -d "$WORKSPACE_DIR/qe_es_relax" ] && [ ! -e "$WORKSPACE_DIR/qe_es_relax/pseudo" ] && ln -sfn "$PSEUDO_DIR" "$WORKSPACE_DIR/qe_es_relax/pseudo"
+    [ -d "$WORKSPACE_DIR/qe_gs_scf" ] && [ ! -e "$WORKSPACE_DIR/qe_gs_scf/pseudo" ] && ln -sfn "$PSEUDO_DIR" "$WORKSPACE_DIR/qe_gs_scf/pseudo"
+fi
+
+# 1. Run Ground State Relaxation
+if [ -f "$WORKSPACE_DIR/qe_gs_relax/pw.in" ]; then
+    echo "=============================================================================="
+    echo " [1/2] Launching Ground-State DFT Relaxation in qe_gs_relax..."
+    echo "=============================================================================="
+    cd "$WORKSPACE_DIR/qe_gs_relax"
+    srun --cpu-bind=cores pw.x -in pw.in > pw.out 2>&1
+    echo "[+] Ground-state relaxation finished at $(date)"
+    cd "$WORKSPACE_DIR"
+fi
+
+# 2. Run Excited State Relaxation
+if [ -f "$WORKSPACE_DIR/qe_es_relax/pw.in" ]; then
+    echo "=============================================================================="
+    echo " [2/2] Launching Excited-State Delta-SCF Relaxation in qe_es_relax..."
+    echo "=============================================================================="
+    cd "$WORKSPACE_DIR/qe_es_relax"
+    srun --cpu-bind=cores pw.x -in pw.in > pw.out 2>&1
+    echo "[+] Excited-state relaxation finished at $(date)"
+    cd "$WORKSPACE_DIR"
+fi
+
+# 3. Post-relaxation geometry extraction
+echo "=============================================================================="
+echo " [Extraction] Extracting relaxed geometries to relaxed_gs.xyz and relaxed_es.xyz..."
+echo "=============================================================================="
+python3 -c "
+import os, ase.io
+from hydeph.qe_runner import parse_qe_relaxation_output
+for sub_d, out_f in [('qe_gs_relax', 'relaxed_gs.xyz'), ('qe_es_relax', 'relaxed_es.xyz')]:
+    p_out = os.path.join('$WORKSPACE_DIR', sub_d, 'pw.out')
+    if os.path.isfile(p_out):
+        try:
+            at, e = parse_qe_relaxation_output(p_out)
+            if at is not None:
+                target_p = os.path.join('$WORKSPACE_DIR', out_f)
+                ase.io.write(target_p, at, format='extxyz')
+                print(f'[+] Successfully extracted {{target_p}} (energy = {{e:.4f}} eV)')
+        except Exception as exc:
+            print(f'[-] Extraction notice for {{out_f}}: {{exc}}')
+" 2>/dev/null || true
+
+echo "=============================================================================="
+echo " Relaxations completed at $(date)"
+echo " To resume the pipeline, execute:"
+echo "   python -m hydeph run config.yaml --from-stage 2"
+echo "=============================================================================="
+"""
+            slurm_path = os.path.join(calc_base, "submit_relaxations_pure_qe.slurm")
+            with open(slurm_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(slurm_content)
+
+            parent_dir = os.path.dirname(os.path.abspath(calc_base))
+            if parent_dir and os.path.isdir(parent_dir) and parent_dir != os.path.abspath(calc_base):
+                for fname in ("submit_relaxations_pure_qe.slurm",):
+                    src_f = os.path.join(calc_base, fname)
+                    if os.path.isfile(src_f):
+                        try:
+                            shutil.copy2(src_f, os.path.join(parent_dir, fname))
+                        except Exception:
+                            pass
+
+        return {
+            "workspace_dir": calc_base,
+            "gs_relax_in": gs_pw_in,
+            "gs_scf_in": gs_scf_in,
+            "es_relax_in": es_pw_in if es_prepared else None,
+            "slurm_script": slurm_path,
+        }
 
     def prepare_all_dft_inputs(
         self,

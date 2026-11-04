@@ -129,6 +129,7 @@ def run_pipeline(
     to_stage: Optional[int] = None,
     force_stage: Optional[Union[int, str, List[Any]]] = None,
     prepare_dft_inputs: bool = False,
+    prepare_relaxation_inputs: bool = False,
 ) -> Dict[str, Any]:
     """Runs the complete Delta-NEP defect workflow and returns a summary dictionary.
 
@@ -151,6 +152,9 @@ def run_pipeline(
     prepare_dft_inputs : bool
         Whether to pre-generate all Quantum ESPRESSO pw.in input files and standalone
         SLURM scripts in Stage 2.
+    prepare_relaxation_inputs : bool
+        Whether to pre-generate Quantum ESPRESSO relaxation and SCF input decks and
+        standalone SLURM scripts in Stage 1 for decoupled HPC execution.
 
     Returns
     -------
@@ -206,6 +210,24 @@ def run_pipeline(
     gs_xyz = os.path.join(config.workspace_dir, "relaxed_gs.xyz")
     es_xyz = os.path.join(config.workspace_dir, "relaxed_es.xyz")
 
+    if prepare_relaxation_inputs or getattr(config, "prepare_relaxation_inputs", False):
+        logger.info("\n[-] Pre-generating Quantum ESPRESSO relaxation decks and standalone SLURM scripts...")
+        pristine_sc, defect_sc = builder.build_supercell_and_defect()
+        res = builder.prepare_relaxation_inputs(defect_sc)
+        logger.info("=" * 78)
+        logger.info("      NEXT STEPS FOR DECOUPLED HPC RELAXATION:")
+        logger.info("=" * 78)
+        logger.info("1. Submit ground- and excited-state relaxations to compute nodes:")
+        slurm_fname = os.path.basename(res['slurm_script']) if res.get('slurm_script') else 'submit_relaxations_pure_qe.slurm'
+        logger.info(f"   sbatch {slurm_fname}")
+        logger.info("   (Zero Python / Conda required on the compute nodes!)")
+        logger.info("")
+        logger.info("2. Once relaxations complete, resume pipeline execution:")
+        logger.info(f"   python -m hydeph run {config.workspace_dir}/config.yaml --from-stage 2")
+        logger.info("   (HyDePh will automatically discover and load the converged relaxations!)")
+        logger.info("=" * 78)
+        return res
+
     if from_stage <= 1 or 1 in force_stages:
         logger.info("\n[STEP 1/6] Defect Construction & Geometry Optimization...")
         pristine_sc, defect_sc = builder.build_supercell_and_defect()
@@ -221,10 +243,28 @@ def run_pipeline(
             if config.pristine_cell_path:
                 cand_gs.append(os.path.join(os.path.dirname(config.pristine_cell_path), "relaxed_gs.xyz"))
             found_gs = next((p for p in cand_gs if os.path.isfile(p)), None)
+            if not found_gs:
+                for cand_out in [
+                    os.path.join(config.workspace_dir, "qe_gs_relax", "pw.out"),
+                    os.path.join(".", "qe_gs_relax", "pw.out"),
+                ]:
+                    if os.path.isfile(cand_out):
+                        try:
+                            from .qe_runner import parse_qe_relaxation_output
+                            at_parsed, e_ev = parse_qe_relaxation_output(cand_out, require_converged=True)
+                            if at_parsed is not None:
+                                os.makedirs(config.workspace_dir, exist_ok=True)
+                                ase.io.write(gs_xyz, at_parsed, format="extxyz")
+                                logger.info(f"[+] Discovered converged cluster relaxation output at '{cand_out}', extracted to '{gs_xyz}'")
+                                found_gs = gs_xyz
+                                break
+                        except Exception as e:
+                            logger.warning(f"[-] Could not parse '{cand_out}': {e}")
             if found_gs:
-                logger.info(f"[+] Discovered pre-relaxed ground state at '{found_gs}', copying to '{gs_xyz}'")
-                os.makedirs(config.workspace_dir, exist_ok=True)
-                shutil.copy2(found_gs, gs_xyz)
+                if os.path.abspath(found_gs) != os.path.abspath(gs_xyz):
+                    logger.info(f"[+] Discovered pre-relaxed ground state at '{found_gs}', copying to '{gs_xyz}'")
+                    os.makedirs(config.workspace_dir, exist_ok=True)
+                    shutil.copy2(found_gs, gs_xyz)
             else:
                 raise FileNotFoundError(
                     f"Cannot resume from stage {from_stage}: Relaxed ground state '{gs_xyz}' not found. "
@@ -250,10 +290,28 @@ def run_pipeline(
                     cand_es.append(p_cand)
 
             found_es = next((p for p in cand_es if os.path.isfile(p)), None)
+            if not found_es:
+                for cand_out in [
+                    os.path.join(config.workspace_dir, "qe_es_relax", "pw.out"),
+                    os.path.join(".", "qe_es_relax", "pw.out"),
+                ]:
+                    if os.path.isfile(cand_out):
+                        try:
+                            from .qe_runner import parse_qe_relaxation_output
+                            at_parsed, e_ev = parse_qe_relaxation_output(cand_out, require_converged=True)
+                            if at_parsed is not None:
+                                os.makedirs(config.workspace_dir, exist_ok=True)
+                                ase.io.write(es_xyz, at_parsed, format="extxyz")
+                                logger.info(f"[+] Discovered converged cluster relaxation output at '{cand_out}', extracted to '{es_xyz}'")
+                                found_es = es_xyz
+                                break
+                        except Exception as e:
+                            logger.warning(f"[-] Could not parse '{cand_out}': {e}")
             if found_es:
-                logger.info(f"[+] Discovered pre-relaxed excited state at '{found_es}', copying to '{es_xyz}'")
-                os.makedirs(config.workspace_dir, exist_ok=True)
-                shutil.copy2(found_es, es_xyz)
+                if os.path.abspath(found_es) != os.path.abspath(es_xyz):
+                    logger.info(f"[+] Discovered pre-relaxed excited state at '{found_es}', copying to '{es_xyz}'")
+                    os.makedirs(config.workspace_dir, exist_ok=True)
+                    shutil.copy2(found_es, es_xyz)
         if os.path.isfile(es_xyz):
             at_es = ase.io.read(es_xyz)
         else:
@@ -691,6 +749,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Pre-generate all Quantum ESPRESSO pw.in input files and standalone SLURM scripts",
     )
     p_run.add_argument(
+        "--prepare-relax",
+        "--prepare-relaxation",
+        dest="prepare_relax",
+        action="store_true",
+        help="Pre-generate Quantum ESPRESSO relaxation and SCF input decks and standalone SLURM scripts for Stage 1",
+    )
+    p_run.add_argument(
         "--force-stage",
         type=str,
         default=None,
@@ -746,6 +811,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             to_stage=to_st,
             force_stage=args.force_stage,
             prepare_dft_inputs=args.prepare_dft,
+            prepare_relaxation_inputs=args.prepare_relax,
         )
         return 0
 

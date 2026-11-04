@@ -478,6 +478,39 @@ class DefectBuilder:
         supercell.info["defect_positions"] = [p.tolist() if hasattr(p, 'tolist') else list(p) for p in defect_positions]
         return supercell, defect_pos
 
+    def prepare_relaxation_inputs(self, defect_sc: Atoms) -> Dict[str, Any]:
+        """Prepares Quantum ESPRESSO relaxation and SCF inputs and standalone SLURM batch scripts for decoupled HPC execution."""
+        qe_runner = self._get_qe_runner()
+        center = self.vac_pos if self.vac_pos is not None else get_defect_center(defect_sc)
+        init_es = None
+        if getattr(self.config, "excited_state_method", "delta_scf").lower() == "delta_scf":
+            es_seed = getattr(self.config, "excited_state_seed_path", None)
+            if es_seed and os.path.isfile(es_seed):
+                try:
+                    init_es = ase.io.read(es_seed)
+                except Exception:
+                    init_es = None
+            if init_es is None:
+                lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", None)
+                if lumo_deg == 1 and getattr(self.config, "auto_jahn_teller_distortion", True):
+                    jt_amp = getattr(self.config, "jahn_teller_amplitude", 0.04)
+                    init_es, pair = apply_jahn_teller_distortion(
+                        defect_sc, defect_center=center, amplitude=jt_amp
+                    )
+                    logger.info(
+                        f"    [+] Pre-applied Jahn-Teller symmetry-breaking perturbation (amplitude {jt_amp:.3f} Å on "
+                        f"coordinating atoms {pair}) to excited-state relaxation input deck."
+                    )
+                else:
+                    init_es = defect_sc.copy()
+
+        return qe_runner.prepare_relaxation_inputs(
+            defect_sc=defect_sc,
+            init_es=init_es,
+            calc_dir_base=self.config.workspace_dir,
+            write_slurm_scripts=True,
+        )
+
     def relax_ground_state(self, defect_sc: Atoms, force_relax: bool = False) -> Atoms:
         """Relaxes ground-state geometry using DFT or foundation potential, or reuses cached `relaxed_gs.xyz`."""
         gs_path = os.path.join(self.config.workspace_dir, "relaxed_gs.xyz")
@@ -513,6 +546,26 @@ class DefectBuilder:
                         return cached_gs
                 except Exception:
                     pass
+
+        # Check if converged qe_gs_relax/pw.out exists from previous cluster run
+        gs_out = os.path.join(self.config.workspace_dir, "qe_gs_relax", "pw.out")
+        if not force and os.path.isfile(gs_out):
+            try:
+                from .qe_runner import parse_qe_relaxation_output
+                at_rel, e_ev = parse_qe_relaxation_output(gs_out, defect_sc, require_converged=True)
+                if at_rel is not None:
+                    at_rel.calc = None
+                    at_rel.info["defect_center"] = np.asarray(center, dtype=float)
+                    at_rel.info["gs_source"] = "dft"
+                    if "defect_positions" in defect_sc.info:
+                        at_rel.info["defect_positions"] = defect_sc.info["defect_positions"]
+                    tmp_gs = gs_path + ".tmp.xyz"
+                    ase.io.write(tmp_gs, at_rel, format="extxyz")
+                    os.replace(tmp_gs, gs_path)
+                    logger.info(f"[+] Discovered converged cluster ground-state relaxation at {gs_out} -> cached to {gs_path}")
+                    return at_rel
+            except Exception as e:
+                logger.warning(f"[-] Could not parse {gs_out}: {e}")
 
         gs_method = getattr(self.config, "ground_state_relax_method", "auto").lower()
         es_method = getattr(self.config, "excited_state_method", "spin_proxy").lower()
@@ -640,6 +693,27 @@ class DefectBuilder:
                             return cached_es, dq_fc
                 except Exception:
                     pass
+
+        # Check if converged qe_es_relax/pw.out exists from previous cluster run
+        es_out = os.path.join(self.config.workspace_dir, "qe_es_relax", "pw.out")
+        if not force and os.path.isfile(es_out):
+            try:
+                from .qe_runner import parse_qe_relaxation_output
+                at_rel, e_ev = parse_qe_relaxation_output(es_out, at_gs, require_converged=True)
+                if at_rel is not None:
+                    dr_fc = mic_displacement(at_rel.positions, at_gs.positions, at_gs.cell)
+                    at_rel.positions = at_gs.positions + dr_fc
+                    at_rel.info["defect_center"] = np.asarray(center, dtype=float)
+                    at_rel.info["es_source"] = "delta_scf"
+                    tmp_es = es_path + ".tmp.xyz"
+                    ase.io.write(tmp_es, at_rel, format="extxyz")
+                    os.replace(tmp_es, es_path)
+                    m = at_gs.get_masses()
+                    dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
+                    logger.info(f"[+] Discovered converged cluster excited-state relaxation at {es_out} -> cached to {es_path} (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
+                    return at_rel, dq_fc
+            except Exception as e:
+                logger.warning(f"[-] Could not parse {es_out}: {e}")
 
         es_method = getattr(self.config, "excited_state_method", "delta_scf").lower()
 

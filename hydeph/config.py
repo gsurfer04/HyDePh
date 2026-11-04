@@ -301,6 +301,7 @@ class ToolkitConfig:
     excited_state_tot_magnetization: Optional[int] = None
     excited_state_spin_multiplicity: Optional[int] = None
     ground_state_relax_method: str = "auto"  # "auto", "foundation", or "dft"
+    prepare_relaxation_inputs: bool = False
     relax_forc_conv_thr: float = 1.0e-3
     relax_nstep: int = 100
     excited_state_displacement: Optional[float] = None  # Angstrom
