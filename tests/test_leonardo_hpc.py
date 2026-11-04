@@ -546,7 +546,7 @@ bfgs converged in 7 iterations
 
     # Resume pipeline from Stage 1: should discover both pw.out and write relaxed_gs.xyz, relaxed_es.xyz
     from unittest.mock import patch
-    with patch("calorine.calculators.CPUNEP") as mock_nep:
+    with patch("hydeph.calculator.CPUNEP") as mock_nep:
         calc_inst = mock_nep.return_value
         calc_inst.get_potential_energy.return_value = -100.0
         calc_inst.get_forces.return_value = np.zeros((2, 3))
