@@ -240,6 +240,15 @@ def run_pipeline(
                 cand_es.insert(0, config.excited_cell_path)
             if config.pristine_cell_path:
                 cand_es.append(os.path.join(os.path.dirname(config.pristine_cell_path), "relaxed_es.xyz"))
+            import glob
+            extra_candidates = sorted(
+                glob.glob("relaxed_es_*.xyz")
+                + glob.glob(os.path.join(config.workspace_dir, "relaxed_es_*.xyz"))
+            )
+            for p_cand in extra_candidates:
+                if p_cand not in cand_es and os.path.isfile(p_cand):
+                    cand_es.append(p_cand)
+
             found_es = next((p for p in cand_es if os.path.isfile(p)), None)
             if found_es:
                 logger.info(f"[+] Discovered pre-relaxed excited state at '{found_es}', copying to '{es_xyz}'")

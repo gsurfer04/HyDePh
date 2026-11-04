@@ -649,6 +649,14 @@ class DefectBuilder:
                             logger.info(f"    [i] Seeding excited-state Delta-SCF relaxation from {es_seed}")
                     except Exception as e:
                         logger.warning(f"    [!] Could not load excited_state_seed_path '{es_seed}': {e}")
+                elif lumo_deg == 1 and gap_info is not None and gap_info.get("lumo_degeneracy", 1) > 1:
+                    logger.warning(
+                        f"    [!] Warning: delta_scf_lumo_degeneracy=1 requested for an orbital that appears degenerate "
+                        f"in ground state (detected degeneracy={gap_info['lumo_degeneracy']}) without an excited_state_seed_path. "
+                        f"SCF on symmetric geometries with integer occupation in a degenerate subspace often exhibits charge "
+                        f"sloshing and convergence failure. If SCF fails to converge, consider delta_scf_lumo_degeneracy=2 "
+                        f"or provide an initial Jahn-Teller symmetry-breaking perturbation via excited_state_seed_path."
+                    )
 
                 at_es = qe_runner.run_relaxation(
                     init_es,
