@@ -505,6 +505,8 @@ def test_resumption_from_cluster_relaxation(tmp_path):
 
     cfg = ToolkitConfig(
         pristine_cell_path=pristine_p,
+        defect_cell_path=pristine_p,
+        supercell_repeat=(1, 1, 1),
         foundation_potential_path=pot_file,
         workspace_dir=ws,
         pseudo_dir=pseudo_dir,
