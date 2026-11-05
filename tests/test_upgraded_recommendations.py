@@ -329,6 +329,7 @@ def test_qe_speed_optimizations_upf_and_omp(tmp_path, monkeypatch):
         pristine_cell_path=str(tmp_path),
         pseudo_dir=str(tmp_path),
         pseudopotentials={"C": "C_ONCV.upf", "Si": "Si_ONCV.upf"},
+        ecutwfc=40.0,
         n_procs_qe=2,
         n_workers_qe=2,
         auto_spin_parity=True,

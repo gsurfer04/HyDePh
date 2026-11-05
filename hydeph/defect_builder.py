@@ -200,10 +200,17 @@ def apply_jahn_teller_distortion(
     else:
         dists = np.linalg.norm(at.positions - defect_center, axis=1)
 
-    # Find coordinating atoms in the first shell
-    coord_indices = [int(i) for i in np.where(dists <= r_cutoff)[0]]
+    # Find coordinating atoms in the innermost coordination shell around the defect
+    valid_mask = dists > 0.1
+    if not np.any(valid_mask):
+        return at, []
+
+    min_d = float(np.min(dists[valid_mask]))
+    # Select first coordination shell: atoms within min_d + 0.35 A and within r_cutoff
+    shell_mask = valid_mask & (dists <= min_d + 0.35) & (dists <= r_cutoff)
+    coord_indices = [int(i) for i in np.where(shell_mask)[0]]
     if len(coord_indices) < 2:
-        coord_indices = [int(i) for i in np.argsort(dists)[:min(4, len(at))]]
+        coord_indices = [int(i) for i in np.argsort(dists[valid_mask])[:min(6, int(np.sum(valid_mask)))]]
 
     if len(coord_indices) < 2:
         return at, []
@@ -213,18 +220,21 @@ def apply_jahn_teller_distortion(
     for i in range(len(coord_indices)):
         for j in range(i + 1, len(coord_indices)):
             ia, ib = coord_indices[i], coord_indices[j]
-            if cell is not None:
-                d = float(mic_distances(at.positions[ia:ia+1], at.positions[ib], cell)[0])
-            else:
-                d = float(np.linalg.norm(at.positions[ia] - at.positions[ib]))
-            pairs.append((d, ia, ib))
-    pairs.sort()
+            if at[ia].symbol == at[ib].symbol:
+                if cell is not None:
+                    v = mic_displacement(at.positions[ib:ib+1], at.positions[ia:ia+1], cell)[0]
+                else:
+                    v = at.positions[ib] - at.positions[ia]
+                d = float(np.linalg.norm(v))
+                align = float(np.max(np.abs(v)) / max(1e-6, d))
+                pairs.append((d, ia, ib, align))
+    # Prioritize lighter species (stronger JT coupling), Cartesian axis alignment, and shorter distance
+    pairs.sort(key=lambda item: (at[item[1]].number, -round(item[3], 4), item[0]))
 
     best_pair = None
-    for d, ia, ib in pairs:
-        if at[ia].symbol == at[ib].symbol:
-            best_pair = (ia, ib)
-            break
+    for d, ia, ib, _ in pairs:
+        best_pair = (ia, ib)
+        break
     if best_pair is None and pairs:
         best_pair = (pairs[0][1], pairs[0][2])
 
@@ -725,7 +735,8 @@ class DefectBuilder:
                 gs_calc_dir = os.path.join(self.config.workspace_dir, "qe_gs_relax")
                 gs_out = os.path.join(gs_calc_dir, "pw.out")
 
-                gap_info = parse_qe_band_gap(gs_out) if os.path.isfile(gs_out) else None
+                target_sc = getattr(self.config, "delta_scf_spin_channel", None)
+                gap_info = parse_qe_band_gap(gs_out, target_spin_channel=target_sc) if os.path.isfile(gs_out) else None
 
                 unique_syms = sorted(list(set(at_gs.get_chemical_symbols())))
                 z_vals = {}
@@ -783,15 +794,21 @@ class DefectBuilder:
 
                 nbnd = max(nbnd, homo_b + 1, lumo_b, n_occ_max)
 
+                homo_deg = getattr(self.config, "delta_scf_homo_degeneracy", None)
+                if homo_deg is None and gap_info is not None:
+                    homo_deg = gap_info.get("homo_degeneracy", 1)
+                homo_deg = max(1, int(homo_deg or 1))
+
                 lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", None)
                 if lumo_deg is None and gap_info is not None:
                     lumo_deg = gap_info.get("lumo_degeneracy", 1)
                 lumo_deg = max(1, int(lumo_deg or 1))
 
-                if lumo_deg > 1:
+                if lumo_deg > 1 or homo_deg > 1:
                     logger.info(
-                        f"    [Delta-SCF] Promoting electron: band {homo_b} -> bands {lumo_b}..{lumo_b + lumo_deg - 1} "
-                        f"in spin channel {spin_chan} (degeneracy={lumo_deg}, {1.0/lumo_deg:.2f} e/band, nbnd={nbnd})"
+                        f"    [Delta-SCF] Promoting electron: bands {homo_b - homo_deg + 1}..{homo_b} (deg={homo_deg}) -> "
+                        f"bands {lumo_b}..{lumo_b + lumo_deg - 1} (deg={lumo_deg}) "
+                        f"in spin channel {spin_chan} (nbnd={nbnd})"
                     )
                 else:
                     logger.info(
@@ -807,6 +824,7 @@ class DefectBuilder:
                     lumo_band=lumo_b,
                     spin_channel=spin_chan,
                     lumo_degeneracy=lumo_deg,
+                    homo_degeneracy=homo_deg,
                 )
 
                 init_es = at_gs
@@ -820,7 +838,7 @@ class DefectBuilder:
                             logger.info(f"    [i] Seeding excited-state Delta-SCF relaxation from {es_seed}")
                     except Exception as e:
                         logger.warning(f"    [!] Could not load excited_state_seed_path '{es_seed}': {e}")
-                elif lumo_deg == 1 and gap_info is not None and gap_info.get("lumo_degeneracy", 1) > 1:
+                elif (lumo_deg == 1 or homo_deg == 1) and gap_info is not None and (gap_info.get("lumo_degeneracy", 1) > 1 or gap_info.get("homo_degeneracy", 1) > 1):
                     auto_jt = getattr(self.config, "auto_jahn_teller_distortion", True)
                     jt_amp = getattr(self.config, "jahn_teller_amplitude", 0.04)
                     if auto_jt:

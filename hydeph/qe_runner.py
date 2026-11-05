@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import re
+import glob
 import time
 import shutil
 import threading
@@ -18,7 +19,7 @@ from ase import Atoms
 from ase.units import Ry, Bohr
 from ase.data import atomic_masses, atomic_numbers
 
-from .config import ToolkitConfig, discover_pseudopotential
+from .config import ToolkitConfig, discover_pseudopotential, inspect_upf_metadata, HARD_ELEMENT_CUTOFFS
 
 try:
     from tqdm import tqdm
@@ -256,14 +257,15 @@ def build_delta_scf_occupations(
     lumo_band: int,
     spin_channel: int = 1,
     lumo_degeneracy: int = 1,
+    homo_degeneracy: int = 1,
 ) -> Tuple[List[float], List[float]]:
     """Builds constrained occupation arrays for Delta-SCF optical excitation.
 
-    Promotes one electron from `homo_band` to `lumo_band` in `spin_channel` (1=up, 2=down),
+    Promotes one electron from `homo_band` (or distributed across `homo_degeneracy` bands ending at `homo_band`)
+    to `lumo_band` (or distributed across `lumo_degeneracy` bands starting at `lumo_band`) in `spin_channel` (1=up, 2=down),
     conserving total electron number and total magnetization (2S).
-    If `lumo_degeneracy > 1`, the promoted electron is distributed equally across the
-    `lumo_degeneracy` degenerate orbitals starting at `lumo_band` to preserve spatial
-    symmetry and eliminate SCF orbital-rotation oscillations.
+    If `lumo_degeneracy > 1` or `homo_degeneracy > 1`, fractional occupations preserve spatial symmetry
+    and eliminate SCF orbital-rotation oscillations and charge sloshing.
     """
     n_up = (int(nelec) + int(tot_magnetization)) // 2
     n_dw = (int(nelec) - int(tot_magnetization)) // 2
@@ -274,30 +276,41 @@ def build_delta_scf_occupations(
             f"n_up={n_up}, n_dw={n_dw}"
         )
 
-    deg = max(1, int(lumo_degeneracy))
-    max_b = max(n_up, n_dw, homo_band, lumo_band + deg - 1)
+    deg_lumo = max(1, int(lumo_degeneracy))
+    deg_homo = max(1, int(homo_degeneracy))
+    min_homo = homo_band - deg_homo + 1
+    if min_homo < 1:
+        raise ValueError(f"homo_band={homo_band} and homo_degeneracy={deg_homo} require band index < 1")
+
+    max_b = max(n_up, n_dw, homo_band, lumo_band + deg_lumo - 1)
     if nbnd < max_b:
         raise ValueError(
             f"nbnd ({nbnd}) must be at least max(n_up={n_up}, n_dw={n_dw}, "
-            f"homo={homo_band}, lumo_end={lumo_band + deg - 1})"
+            f"homo={homo_band}, lumo_end={lumo_band + deg_lumo - 1})"
         )
 
     occ_up = [1.0] * n_up + [0.0] * (nbnd - n_up)
     occ_dw = [1.0] * n_dw + [0.0] * (nbnd - n_dw)
 
-    frac_occ = 1.0 / deg
+    frac_hole = 1.0 / deg_homo
+    frac_occ = 1.0 / deg_lumo
+
     if spin_channel == 1:
-        if occ_up[homo_band - 1] < 0.5:
-            logger.warning(f"[!] Warning: HOMO band {homo_band} in spin up has low occupation: {occ_up[homo_band - 1]}")
-        occ_up[homo_band - 1] = 0.0
-        for d_idx in range(deg):
+        for d_idx in range(deg_homo):
+            b_idx = (homo_band - 1) - d_idx
+            if occ_up[b_idx] < frac_hole - 1e-4:
+                logger.warning(f"[!] Warning: HOMO band {b_idx + 1} in spin up has low occupation: {occ_up[b_idx]}")
+            occ_up[b_idx] -= frac_hole
+        for d_idx in range(deg_lumo):
             b_idx = (lumo_band - 1) + d_idx
             occ_up[b_idx] += frac_occ
     elif spin_channel == 2:
-        if occ_dw[homo_band - 1] < 0.5:
-            logger.warning(f"[!] Warning: HOMO band {homo_band} in spin down has low occupation: {occ_dw[homo_band - 1]}")
-        occ_dw[homo_band - 1] = 0.0
-        for d_idx in range(deg):
+        for d_idx in range(deg_homo):
+            b_idx = (homo_band - 1) - d_idx
+            if occ_dw[b_idx] < frac_hole - 1e-4:
+                logger.warning(f"[!] Warning: HOMO band {b_idx + 1} in spin down has low occupation: {occ_dw[b_idx]}")
+            occ_dw[b_idx] -= frac_hole
+        for d_idx in range(deg_lumo):
             b_idx = (lumo_band - 1) + d_idx
             occ_dw[b_idx] += frac_occ
     else:
@@ -352,27 +365,30 @@ def write_qe_input(
     all_nc = bool(unique_symbols) and all(meta_by_sym[s]["is_norm_conserving"] is True for s in unique_symbols)
     all_z = bool(unique_symbols) and all(meta_by_sym[s]["z_valence"] is not None for s in unique_symbols)
 
+    if getattr(config, "ecutwfc", None) is None or getattr(config, "ecutrho", None) is None:
+        config.auto_resolve_cutoffs(elements=unique_symbols)
+
+    eff_ecutwfc = float(config.ecutwfc)
     eff_ecutrho = float(config.ecutrho)
     if all_nc:
-        eff_ecutrho = 4.0 * float(config.ecutwfc)
+        eff_ecutrho = 4.0 * eff_ecutwfc
     else:
-        eff_ecutrho = max(eff_ecutrho, 4.0 * float(config.ecutwfc))
+        eff_ecutrho = max(eff_ecutrho, 4.0 * eff_ecutwfc)
         for m in meta_by_sym.values():
             if m.get("suggested_cutoff_rho") is not None:
                 eff_ecutrho = max(eff_ecutrho, float(m["suggested_cutoff_rho"]))
 
-    HARD_ELEMENTS = {"C", "N", "O", "B", "F"}
     for s in unique_symbols:
         meta = meta_by_sym.get(s, {})
         rec_wfc = meta.get("suggested_cutoff_wfc")
-        if rec_wfc is not None and float(config.ecutwfc) < float(rec_wfc):
+        if rec_wfc is not None and eff_ecutwfc < float(rec_wfc):
             logger.warning(
-                f"    [!] Warning: Configured ecutwfc={config.ecutwfc} Ry is lower than "
+                f"    [!] Warning: Configured ecutwfc={eff_ecutwfc} Ry is lower than "
                 f"UPF suggested cutoff {rec_wfc} Ry for element '{s}'."
             )
-        elif s in HARD_ELEMENTS and float(config.ecutwfc) < 60.0:
+        elif s in HARD_ELEMENT_CUTOFFS and eff_ecutwfc < 60.0:
             logger.warning(
-                f"    [!] Warning: ecutwfc={config.ecutwfc} Ry may be too low for hard element '{s}' "
+                f"    [!] Warning: ecutwfc={eff_ecutwfc} Ry may be too low for hard element '{s}' "
                 f"(recommended >= 60-80 Ry for converged forces/Hessians)."
             )
 
@@ -497,7 +513,7 @@ def write_qe_input(
   ibrav = 0,
   nat = {len(atoms)},
   ntyp = {len(unique_symbols)},{nbnd_line}
-  ecutwfc = {config.ecutwfc},
+  ecutwfc = {eff_ecutwfc},
   ecutrho = {eff_ecutrho},
   nosym = .true.,
   nspin = {eff_nspin},
@@ -744,7 +760,7 @@ def parse_qe_relaxation_output(
     return at_relaxed, energy_ev
 
 
-def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, Any]]:
+def parse_qe_band_gap(pw_out_path: str, target_spin_channel: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Parses Kohn-Sham defect eigenvalue gap (eV), HOMO, LUMO, and Fermi level from `pw.x` output.
     
     Extracts the fundamental optical transition gap across spin channels without additional DFT cost.
@@ -841,9 +857,34 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, Any]]:
         else:
             gap_d, homo_b_d, lumo_b_d, homo_d, lumo_d = None, None, None, None, None
 
-        # Prioritize the minority or in-gap defect channel (smaller positive gap)
+        # Compute degeneracies for both spin channels (exact point-group multiplets < 5 meV)
+        deg_lumo_u, deg_homo_u = 1, 1
+        if u_bands and lumo_b_u is not None and lumo_b_u <= len(u_bands):
+            le = u_bands[lumo_b_u - 1]
+            while (lumo_b_u - 1 + deg_lumo_u) < len(u_bands) and abs(u_bands[lumo_b_u - 1 + deg_lumo_u] - le) < 0.005:
+                deg_lumo_u += 1
+        if u_bands and homo_b_u is not None and 1 <= homo_b_u <= len(u_bands):
+            he = u_bands[homo_b_u - 1]
+            while (homo_b_u - deg_homo_u) >= 1 and abs(u_bands[homo_b_u - deg_homo_u - 1] - he) < 0.005:
+                deg_homo_u += 1
+
+        deg_lumo_d, deg_homo_d = 1, 1
+        if d_bands and lumo_b_d is not None and lumo_b_d <= len(d_bands):
+            le = d_bands[lumo_b_d - 1]
+            while (lumo_b_d - 1 + deg_lumo_d) < len(d_bands) and abs(d_bands[lumo_b_d - 1 + deg_lumo_d] - le) < 0.005:
+                deg_lumo_d += 1
+        if d_bands and homo_b_d is not None and 1 <= homo_b_d <= len(d_bands):
+            he = d_bands[homo_b_d - 1]
+            while (homo_b_d - deg_homo_d) >= 1 and abs(d_bands[homo_b_d - deg_homo_d - 1] - he) < 0.005:
+                deg_homo_d += 1
+
+        # Prioritize the minority or in-gap defect channel (smaller positive gap) or target_spin_channel
         chosen = None
-        if gap_d is not None and gap_u is not None:
+        if target_spin_channel == 1 and gap_u is not None:
+            chosen = ("up", 1, gap_u, homo_u, lumo_u, homo_b_u, lumo_b_u, ef_up)
+        elif target_spin_channel == 2 and gap_d is not None:
+            chosen = ("down", 2, gap_d, homo_d, lumo_d, homo_b_d, lumo_b_d, ef_dw)
+        elif gap_d is not None and gap_u is not None:
             if 0.05 < gap_d < gap_u:
                 chosen = ("down", 2, gap_d, homo_d, lumo_d, homo_b_d, lumo_b_d, ef_dw)
             else:
@@ -855,12 +896,8 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, Any]]:
 
         if chosen:
             spin_name, spin_chan, gap_v, homo_v, lumo_v, h_b, l_b, ef_v = chosen
-            chosen_bands = d_bands if spin_chan == 2 else u_bands
-            deg = 1
-            if chosen_bands and l_b <= len(chosen_bands):
-                lumo_e = chosen_bands[l_b - 1]
-                while (l_b - 1 + deg) < len(chosen_bands) and abs(chosen_bands[l_b - 1 + deg] - lumo_e) < 0.02:
-                    deg += 1
+            chosen_deg_lumo = deg_lumo_d if spin_chan == 2 else deg_lumo_u
+            chosen_deg_homo = deg_homo_d if spin_chan == 2 else deg_homo_u
             return {
                 "gap_eV": gap_v,
                 "homo_eV": homo_v,
@@ -869,8 +906,13 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, Any]]:
                 "spin": spin_name,
                 "spin_channel": spin_chan,
                 "homo_band": h_b,
+                "homo_degeneracy": chosen_deg_homo,
                 "lumo_band": l_b,
-                "lumo_degeneracy": deg,
+                "lumo_degeneracy": chosen_deg_lumo,
+                "homo_deg_up": deg_homo_u,
+                "lumo_deg_up": deg_lumo_u,
+                "homo_deg_down": deg_homo_d,
+                "lumo_deg_down": deg_lumo_d,
                 "nbnd": max(len(u_bands), len(d_bands)),
                 "gap_up_eV": gap_u,
                 "gap_down_eV": gap_d,
@@ -902,7 +944,9 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, Any]]:
                     "spin": "down",
                     "spin_channel": 2,
                     "homo_band": len(occ),
+                    "homo_degeneracy": 1,
                     "lumo_band": len(occ) + 1,
+                    "lumo_degeneracy": 1,
                     "nbnd": len(bands),
                     "nelec": nelec,
                 }
@@ -919,7 +963,9 @@ def parse_qe_band_gap(pw_out_path: str) -> Optional[Dict[str, Any]]:
                     "spin": "down",
                     "spin_channel": 2,
                     "homo_band": n_occ,
+                    "homo_degeneracy": 1,
                     "lumo_band": n_occ + 1,
+                    "lumo_degeneracy": 1,
                     "nbnd": len(bands),
                     "nelec": nelec,
                 }
@@ -1701,7 +1747,8 @@ class QERunner:
                 os.path.join(calc_base, "dft_calculations", "frame_000_fc_00", "pw.out"),
             ]
             gs_out = next((p for p in gs_candidates if os.path.isfile(p)), None)
-            gap_info = parse_qe_band_gap(gs_out) if gs_out else None
+            target_sc = getattr(self.config, "delta_scf_spin_channel", None)
+            gap_info = parse_qe_band_gap(gs_out, target_spin_channel=target_sc) if gs_out else None
 
             unique_syms = sorted(list(set(at_gs.get_chemical_symbols())))
             z_vals = {}
@@ -1752,6 +1799,11 @@ class QERunner:
 
             nbnd = max(nbnd, homo_b + 1, lumo_b, n_occ_max)
 
+            homo_deg = getattr(self.config, "delta_scf_homo_degeneracy", None)
+            if homo_deg is None and gap_info is not None:
+                homo_deg = gap_info.get("homo_degeneracy", 1)
+            homo_deg = max(1, int(homo_deg or 1))
+
             lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", None)
             if lumo_deg is None and gap_info is not None:
                 lumo_deg = gap_info.get("lumo_degeneracy", 1)
@@ -1765,6 +1817,7 @@ class QERunner:
                 lumo_band=lumo_b,
                 spin_channel=spin_chan,
                 lumo_degeneracy=lumo_deg,
+                homo_degeneracy=homo_deg,
             )
 
         eff_workers = max(1, int(n_workers if n_workers is not None else self.n_workers))
@@ -2324,57 +2377,84 @@ class QERunner:
         if getattr(self.config, "excited_state_method", "delta_scf").lower() == "delta_scf":
             os.makedirs(es_dir, exist_ok=True)
             homo_b = getattr(self.config, "delta_scf_homo_band", None)
+            homo_deg = getattr(self.config, "delta_scf_homo_degeneracy", None)
             lumo_b = getattr(self.config, "delta_scf_lumo_band", None)
-            spin_chan = getattr(self.config, "delta_scf_spin_channel", 2) or 2
-            lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", 1) or 1
+            spin_chan = getattr(self.config, "delta_scf_spin_channel", None)
+            lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", None)
 
-            if homo_b is not None and lumo_b is not None:
-                # Count valence electrons
-                unique_syms = sorted(list(set(defect_sc.get_chemical_symbols())))
-                z_vals = {}
-                for s in unique_syms:
-                    upf = self.config.pseudopotentials.get(s, "") if self.config.pseudopotentials else ""
-                    if upf:
-                        p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
-                        if os.path.isfile(p):
-                            z_vals[s] = inspect_upf_metadata(p).get("z_valence")
-                _DEFAULT_VALENCE = {
-                    "H": 1, "Li": 1, "Be": 2, "B": 3, "C": 4, "N": 5, "O": 6, "F": 7,
-                    "Na": 1, "Mg": 2, "Al": 3, "Si": 4, "P": 5, "S": 6, "Cl": 7,
-                    "K": 1, "Ca": 2, "Ga": 3, "Ge": 4, "As": 5, "Se": 6, "Br": 7,
-                    "Rb": 1, "Sr": 2, "In": 3, "Sn": 4, "Sb": 5, "Te": 6, "I": 7,
-                    "Cs": 1, "Ba": 2,
-                }
-                nelec_total = int(round(
-                    sum(z_vals.get(s) or _DEFAULT_VALENCE.get(s, 4) for s in defect_sc.get_chemical_symbols())
-                    - float(self.config.tot_charge)
-                ))
-                if (nelec_total % 2) != (tot_mag % 2):
-                    tot_mag = tot_mag if tot_mag % 2 == nelec_total % 2 else (tot_mag + 1 if tot_mag >= 0 else 0)
+            # Auto-detect from converged ground state pw.out if available
+            gs_out = os.path.join(gs_dir, "pw.out")
+            gap_info = parse_qe_band_gap(gs_out, target_spin_channel=spin_chan) if os.path.isfile(gs_out) else None
+            if gap_info is not None:
+                spin_chan = spin_chan or gap_info.get("spin_channel") or 2
+                homo_b = homo_b or gap_info.get("homo_band")
+                lumo_b = lumo_b or gap_info.get("lumo_band")
+                homo_deg = max(1, int(homo_deg or gap_info.get("homo_degeneracy", 1) or 1))
+                lumo_deg = max(1, int(lumo_deg or gap_info.get("lumo_degeneracy", 1) or 1))
+                logger.info(
+                    f"    [i] Auto-detected lowest optical transition from GS DFT: "
+                    f"spin channel {spin_chan}, bands {homo_b} (deg={homo_deg}) -> {lumo_b} (deg={lumo_deg}) "
+                    f"[gap = {gap_info.get('gap_eV', 0.0):.3f} eV]"
+                )
 
-                nbnd = max(homo_b + 1, lumo_b + lumo_deg - 1, (nelec_total + abs(tot_mag)) // 2) + 8
-                occ_up, occ_dw = build_delta_scf_occupations(
-                    nelec=nelec_total,
-                    tot_magnetization=tot_mag,
-                    nbnd=nbnd,
-                    homo_band=homo_b,
-                    lumo_band=lumo_b,
-                    spin_channel=spin_chan,
-                    lumo_degeneracy=lumo_deg,
-                )
-                start_es = init_es if init_es is not None else defect_sc
-                write_qe_input(
-                    start_es,
-                    es_pw_in,
-                    self.config,
-                    calculation="relax",
-                    tot_magnetization=tot_mag,
-                    nspin=2,
-                    occupations_mode="from_input",
-                    constrained_occupations=(occ_up, occ_dw),
-                )
-                es_prepared = True
-                logger.info(f"[+] Prepared Excited-State Delta-SCF relaxation input: {es_pw_in}")
+            # Count valence electrons
+            unique_syms = sorted(list(set(defect_sc.get_chemical_symbols())))
+            z_vals = {}
+            for s in unique_syms:
+                upf = self.config.pseudopotentials.get(s, "") if self.config.pseudopotentials else ""
+                if upf:
+                    p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
+                    if os.path.isfile(p):
+                        z_vals[s] = inspect_upf_metadata(p).get("z_valence")
+            _DEFAULT_VALENCE = {
+                "H": 1, "Li": 1, "Be": 2, "B": 3, "C": 4, "N": 5, "O": 6, "F": 7,
+                "Na": 1, "Mg": 2, "Al": 3, "Si": 4, "P": 5, "S": 6, "Cl": 7,
+                "K": 1, "Ca": 2, "Ga": 3, "Ge": 4, "As": 5, "Se": 6, "Br": 7,
+                "Rb": 1, "Sr": 2, "In": 3, "Sn": 4, "Sb": 5, "Te": 6, "I": 7,
+                "Cs": 1, "Ba": 2,
+            }
+            nelec_total = int(round(
+                sum(z_vals.get(s) or _DEFAULT_VALENCE.get(s, 4) for s in defect_sc.get_chemical_symbols())
+                - float(self.config.tot_charge)
+            ))
+            if gap_info is not None and gap_info.get("nelec") is not None:
+                nelec_total = int(round(gap_info["nelec"]))
+
+            tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
+            if (nelec_total % 2) != (tot_mag % 2):
+                tot_mag = tot_mag if tot_mag % 2 == nelec_total % 2 else (tot_mag + 1 if tot_mag >= 0 else 0)
+
+            n_occ_max = (nelec_total + abs(tot_mag)) // 2
+            homo_b = homo_b or n_occ_max
+            lumo_b = lumo_b or (n_occ_max + 1)
+            homo_deg = max(1, int(homo_deg or 1))
+            lumo_deg = max(1, int(lumo_deg or 1))
+            spin_chan = spin_chan or 2
+
+            nbnd = max(homo_b + 1, lumo_b + lumo_deg - 1, n_occ_max) + 8
+            occ_up, occ_dw = build_delta_scf_occupations(
+                nelec=nelec_total,
+                tot_magnetization=tot_mag,
+                nbnd=nbnd,
+                homo_band=homo_b,
+                lumo_band=lumo_b,
+                spin_channel=spin_chan,
+                lumo_degeneracy=lumo_deg,
+                homo_degeneracy=homo_deg,
+            )
+            start_es = init_es if init_es is not None else defect_sc
+            write_qe_input(
+                start_es,
+                es_pw_in,
+                self.config,
+                calculation="relax",
+                tot_magnetization=tot_mag,
+                nspin=2,
+                occupations_mode="from_input",
+                constrained_occupations=(occ_up, occ_dw),
+            )
+            es_prepared = True
+            logger.info(f"[+] Prepared Excited-State Delta-SCF relaxation input: {es_pw_in}")
 
         slurm_path = None
         if write_slurm_scripts:
@@ -2605,10 +2685,36 @@ echo "==========================================================================
                 tot_mag = valid_mag
 
             n_occ_max = (nelec_total + abs(tot_mag)) // 2
-            spin_chan = getattr(self.config, "delta_scf_spin_channel", 2) or 2
-            homo_b = getattr(self.config, "delta_scf_homo_band", n_occ_max) or n_occ_max
-            lumo_b = getattr(self.config, "delta_scf_lumo_band", n_occ_max + 1) or (n_occ_max + 1)
-            lumo_deg = max(1, int(getattr(self.config, "delta_scf_lumo_degeneracy", 1) or 1))
+            spin_chan = getattr(self.config, "delta_scf_spin_channel", None)
+            homo_b = getattr(self.config, "delta_scf_homo_band", None)
+            lumo_b = getattr(self.config, "delta_scf_lumo_band", None)
+            homo_deg = getattr(self.config, "delta_scf_homo_degeneracy", None)
+            lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", None)
+
+            # Auto-detect from converged ground state pw.out if available
+            gs_out = os.path.join(calc_base, "qe_gs_relax", "pw.out")
+            if not os.path.isfile(gs_out):
+                cand_outs = glob.glob(os.path.join(dft_dir, "frame_*", "pw.out"))
+                if cand_outs:
+                    gs_out = sorted(cand_outs)[0]
+            gap_info = parse_qe_band_gap(gs_out, target_spin_channel=spin_chan) if os.path.isfile(gs_out) else None
+            if gap_info is not None:
+                spin_chan = spin_chan or gap_info.get("spin_channel") or 2
+                homo_b = homo_b or gap_info.get("homo_band") or n_occ_max
+                lumo_b = lumo_b or gap_info.get("lumo_band") or (n_occ_max + 1)
+                homo_deg = max(1, int(homo_deg or gap_info.get("homo_degeneracy", 1) or 1))
+                lumo_deg = max(1, int(lumo_deg or gap_info.get("lumo_degeneracy", 1) or 1))
+                logger.info(
+                    f"    [i] Auto-detected lowest optical transition from GS DFT: "
+                    f"spin channel {spin_chan}, bands {homo_b} (deg={homo_deg}) -> {lumo_b} (deg={lumo_deg}) "
+                    f"[gap = {gap_info.get('gap_eV', 0.0):.3f} eV]"
+                )
+            else:
+                spin_chan = spin_chan or 2
+                homo_b = homo_b or n_occ_max
+                lumo_b = lumo_b or (n_occ_max + 1)
+                homo_deg = max(1, int(homo_deg or 1))
+                lumo_deg = max(1, int(lumo_deg or 1))
             nbnd = max(lumo_b + lumo_deg - 1, homo_b + 1, n_occ_max) + 8
 
             constrained_occupations = build_delta_scf_occupations(
@@ -2619,6 +2725,7 @@ echo "==========================================================================
                 lumo_band=lumo_b,
                 spin_channel=spin_chan,
                 lumo_degeneracy=lumo_deg,
+                homo_degeneracy=homo_deg,
             )
 
             for i, fr in enumerate(es_targets):

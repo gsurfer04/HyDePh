@@ -80,6 +80,109 @@ def discover_pseudopotential(element: str, pseudo_dir: str) -> Optional[str]:
     return pool[-1]
 
 
+def inspect_upf_metadata(upf_path: str) -> Dict[str, Any]:
+    """Reads lightweight header metadata (`is_norm_conserving`, `z_valence`, suggested cutoffs) from a UPF file."""
+    info: Dict[str, Any] = {
+        "is_norm_conserving": None,
+        "z_valence": None,
+        "suggested_cutoff_wfc": None,
+        "suggested_cutoff_rho": None,
+    }
+    if not upf_path or not os.path.isfile(upf_path):
+        return info
+    try:
+        header_lines = []
+        with open(upf_path, "r", encoding="utf-8", errors="replace") as f:
+            for _ in range(200):
+                line = f.readline()
+                if not line:
+                    break
+                header_lines.append(line)
+                if "<PP_MESH" in line or "<PP_R " in line or "</PP_HEADER>" in line:
+                    break
+        text = "".join(header_lines)
+
+        # Parse z_valence (UPF v2 attribute or UPF v1 line)
+        m_z2 = re.search(r'z_valence\s*=\s*"\s*([-\d.Ee+]+)\s*"', text, re.IGNORECASE)
+        if m_z2:
+            info["z_valence"] = float(m_z2.group(1))
+        else:
+            m_z1 = re.search(r"([-\d.Ee+]+)\s+Z\s+valence", text, re.IGNORECASE)
+            if m_z1:
+                info["z_valence"] = float(m_z1.group(1))
+
+        # Parse suggested cutoffs (UPF v2 attributes or comments)
+        m_wfc = re.search(r'(?:suggested_cutoff_wfc|wfc_cutoff)\s*=\s*"\s*([-\d.Ee+]+)\s*"', text, re.IGNORECASE)
+        if not m_wfc:
+            m_wfc = re.search(r'(?:suggested|recommended)?\s*cutoff(?:\s*for)?\s*wavefunctions?\s*[:=]\s*([-\d.Ee+]+)', text, re.IGNORECASE)
+        if m_wfc:
+            try:
+                info["suggested_cutoff_wfc"] = float(m_wfc.group(1))
+            except ValueError:
+                pass
+
+        m_rho = re.search(r'(?:suggested_cutoff_rho|rho_cutoff)\s*=\s*"\s*([-\d.Ee+]+)\s*"', text, re.IGNORECASE)
+        if not m_rho:
+            m_rho = re.search(r'(?:suggested|recommended)?\s*cutoff(?:\s*for)?\s*(?:charge\s*density|density|rho)\s*[:=]\s*([-\d.Ee+]+)', text, re.IGNORECASE)
+        if m_rho:
+            try:
+                val = float(m_rho.group(1))
+                # Only treat as energy cutoff (Ry) if >= 50.0; small values (e.g. 6.0 Bohr) are radial mesh radii
+                if val >= 50.0:
+                    info["suggested_cutoff_rho"] = val
+            except ValueError:
+                pass
+
+        # Parse pseudopotential type (Norm-Conserving vs Ultrasoft/PAW)
+        m_us = re.search(r'is_ultrasoft\s*=\s*"\s*([TFtf])\s*"', text)
+        m_paw = re.search(r'is_paw\s*=\s*"\s*([TFtf])\s*"', text)
+        m_type = re.search(r'pseudo_type\s*=\s*"\s*([A-Za-z0-9_-]+)\s*"', text)
+        if m_us and m_us.group(1).upper() == "T":
+            info["is_norm_conserving"] = False
+        elif m_paw and m_paw.group(1).upper() == "T":
+            info["is_norm_conserving"] = False
+        elif m_type:
+            ptype = m_type.group(1).upper()
+            if ptype in ("NC", "SL", "NCPP"):
+                info["is_norm_conserving"] = True
+            elif ptype in ("US", "USPP", "PAW"):
+                info["is_norm_conserving"] = False
+        elif m_us and m_us.group(1).upper() == "F":
+            info["is_norm_conserving"] = True
+    except Exception:
+        pass
+    return info
+
+
+# Recommended plane-wave kinetic energy cutoffs (ecutwfc in Ry) for elements:
+# Mapping: element -> (paw_or_uspp_wfc, norm_conserving_wfc)
+# Hard elements: 1st-row 1s/2p (C, N, O, F, B, Be, H) and 3d transition metals (Sc to Zn)
+HARD_ELEMENT_CUTOFFS: Dict[str, Tuple[float, float]] = {
+    # 1st-row 2p and 1s elements (extreme localization, nodeless valence orbitals)
+    "C": (65.0, 80.0),
+    "N": (65.0, 80.0),
+    "O": (65.0, 80.0),
+    "F": (70.0, 85.0),
+    "B": (55.0, 65.0),
+    "Be": (50.0, 65.0),
+    "H": (50.0, 60.0),
+    "He": (50.0, 60.0),
+    "Li": (45.0, 60.0),
+    "Ne": (65.0, 80.0),
+    # 3d transition metals (localized 3d valence orbitals)
+    "Sc": (50.0, 65.0),
+    "Ti": (50.0, 65.0),
+    "V":  (55.0, 70.0),
+    "Cr": (55.0, 70.0),
+    "Mn": (55.0, 70.0),
+    "Fe": (55.0, 70.0),
+    "Co": (55.0, 70.0),
+    "Ni": (55.0, 70.0),
+    "Cu": (55.0, 70.0),
+    "Zn": (55.0, 70.0),
+}
+
+
 @dataclass
 class ToolkitConfig:
     """Central configuration dataclass for the HyDePh workflow.
@@ -291,6 +394,7 @@ class ToolkitConfig:
     excited_state_seed_path: Optional[str] = None
     excited_state_method: str = "delta_scf"  # "delta_scf", "spin_proxy", "synthetic", or "file"
     delta_scf_homo_band: Optional[int] = None
+    delta_scf_homo_degeneracy: Optional[int] = None
     delta_scf_lumo_band: Optional[int] = None
     delta_scf_lumo_degeneracy: Optional[int] = None
     delta_scf_spin_channel: Optional[int] = None
@@ -350,8 +454,10 @@ class ToolkitConfig:
     spin_polarized: bool = True     # nspin=2 in QE
     spin_multiplicity: Optional[int] = None  # 2S+1 (defaults to 2 if tot_magnetization omitted)
     tot_magnetization: Optional[int] = None  # 2S = spin_multiplicity - 1
-    ecutwfc: float = 40.0           # Ry
-    ecutrho: float = 320.0          # Ry
+    ecutwfc: Optional[float] = None  # Ry (auto-derived for hard elements / UPFs if omitted)
+    ecutrho: Optional[float] = None  # Ry (auto-derived from dual rule if omitted)
+    _user_specified_ecutwfc: bool = field(default=False, repr=False)
+    _user_specified_ecutrho: bool = field(default=False, repr=False)
     kpoints: Tuple[int, int, int] = (1, 1, 1)
     input_dft: Optional[str] = None
     exx_fraction: Optional[float] = None
@@ -515,11 +621,23 @@ class ToolkitConfig:
         if self.parallel_hessian and self.parallel_hessian_workers is None:
             self.parallel_hessian_workers = max(1, min(16, os.cpu_count() or 4))
 
+        # Track whether ecutwfc and ecutrho were explicitly supplied by the caller
+        if self.ecutwfc is not None:
+            self._user_specified_ecutwfc = True
+        if self.ecutrho is not None:
+            self._user_specified_ecutrho = True
+
+        # Auto-resolve cutoffs if not specified
+        if self.ecutwfc is None or self.ecutrho is None:
+            self.auto_resolve_cutoffs()
+
     def __repr__(self) -> str:
         """Returns a readable representation highlighting only non-default fields."""
         defaults = ToolkitConfig(pristine_cell_path="")
         diffs = {}
         for f in fields(self):
+            if f.name.startswith("_"):
+                continue
             val = getattr(self, f.name)
             def_val = getattr(defaults, f.name)
             if f.name == "pristine_cell_path" or val != def_val:
@@ -531,6 +649,8 @@ class ToolkitConfig:
         """Serializes configuration fields to a dictionary."""
         d = {}
         for f in fields(self):
+            if f.name.startswith("_"):
+                continue
             val = getattr(self, f.name)
             if isinstance(val, tuple):
                 d[f.name] = list(val)
@@ -553,7 +673,7 @@ class ToolkitConfig:
         }
         normalized_data = {alias_map.get(k, k): v for k, v in data.items()}
 
-        valid_keys = {f.name for f in fields(cls)}
+        valid_keys = {f.name for f in fields(cls) if not f.name.startswith("_")}
         unknown_keys = [k for k in normalized_data.keys() if k not in valid_keys]
         if unknown_keys:
             import difflib
@@ -698,6 +818,99 @@ class ToolkitConfig:
 
         return discovered
 
+    def auto_resolve_cutoffs(
+        self, elements: Optional[Iterable[str]] = None, force: bool = False
+    ) -> Tuple[float, float]:
+        """Automatically derives ecutwfc and ecutrho for system elements if not specified.
+
+        Takes into account:
+        - Element hardness (first-row elements C, N, O, F, B, Be, H and 3d transition metals).
+        - Pseudopotential type (Norm-Conserving vs. Ultrasoft/PAW).
+        - UPF header suggested cutoffs (suggested_cutoff_wfc, suggested_cutoff_rho).
+
+        Parameters
+        ----------
+        elements : iterable of str, optional
+            System element symbols. If None, auto-detected from configured structures and defects.
+        force : bool
+            If True, overrides user-specified cutoffs.
+
+        Returns
+        -------
+        tuple of (ecutwfc, ecutrho)
+        """
+        targets = list(elements) if elements is not None else self.get_system_elements()
+        if not targets:
+            if not self._user_specified_ecutwfc or force or self.ecutwfc is None:
+                self.ecutwfc = 40.0
+            if not self._user_specified_ecutrho or force or self.ecutrho is None:
+                self.ecutrho = 320.0
+            return (float(self.ecutwfc), float(self.ecutrho))
+
+        rec_wfcs: List[float] = []
+        nc_flags: List[bool] = []
+        max_sug_rho = 0.0
+
+        for elem in targets:
+            if not elem:
+                continue
+            upf_path = self.pseudopotentials.get(elem, "")
+            if not upf_path and self.pseudo_dir:
+                disc = discover_pseudopotential(elem, self.pseudo_dir)
+                if disc:
+                    upf_path = disc if os.path.isabs(disc) else os.path.join(self.pseudo_dir, disc)
+            full_upf = upf_path if os.path.isabs(upf_path) else os.path.join(self.pseudo_dir or ".", upf_path)
+            meta = inspect_upf_metadata(full_upf) if os.path.isfile(full_upf) else {}
+
+            is_nc = meta.get("is_norm_conserving")
+            if is_nc is None:
+                base_low = os.path.basename(full_upf).lower()
+                if "oncv" in base_low or "nc" in base_low or "sg15" in base_low:
+                    is_nc = True
+                else:
+                    is_nc = False
+            nc_flags.append(is_nc)
+
+            paw_wfc, nc_wfc = HARD_ELEMENT_CUTOFFS.get(elem, (40.0, 50.0))
+            wfc_base = nc_wfc if is_nc else paw_wfc
+
+            wfc_sug = meta.get("suggested_cutoff_wfc")
+            if wfc_sug is not None:
+                wfc_base = max(wfc_base, float(wfc_sug))
+            rec_wfcs.append(wfc_base)
+
+            rho_sug = meta.get("suggested_cutoff_rho")
+            if rho_sug is not None:
+                max_sug_rho = max(max_sug_rho, float(rho_sug))
+
+        all_nc = bool(nc_flags) and all(nc_flags)
+        system_wfc = max(rec_wfcs) if rec_wfcs else (50.0 if all_nc else 40.0)
+
+        if not self._user_specified_ecutwfc or force or self.ecutwfc is None:
+            self.ecutwfc = system_wfc
+
+        if not self._user_specified_ecutrho or force or self.ecutrho is None:
+            if all_nc:
+                self.ecutrho = 4.0 * float(self.ecutwfc)
+            else:
+                self.ecutrho = max(320.0, 8.0 * float(self.ecutwfc))
+            if max_sug_rho > 0:
+                self.ecutrho = max(float(self.ecutrho), max_sug_rho)
+
+        hard_found = [e for e in targets if e in HARD_ELEMENT_CUTOFFS]
+        if hard_found:
+            logger.info(
+                f"[+] Auto-configured ecutwfc = {self.ecutwfc} Ry, ecutrho = {self.ecutrho} Ry "
+                f"(detected hard elements: {sorted(list(set(hard_found)))}, norm_conserving={all_nc})."
+            )
+        else:
+            logger.info(
+                f"[+] Auto-configured ecutwfc = {self.ecutwfc} Ry, ecutrho = {self.ecutrho} Ry "
+                f"for system elements {sorted(list(set(targets)))}."
+            )
+
+        return (float(self.ecutwfc), float(self.ecutrho))
+
     def validate(self):
         """Validate input files and configuration options."""
         if not os.path.isfile(self.pristine_cell_path):
@@ -717,6 +930,10 @@ class ToolkitConfig:
 
         # Auto-discover any missing pseudopotentials for system elements
         self.auto_discover_pseudopotentials()
+
+        # Auto-resolve cutoffs with discovered UPFs if cutoffs were not user-specified
+        if not self._user_specified_ecutwfc or not self._user_specified_ecutrho or self.ecutwfc is None or self.ecutrho is None:
+            self.auto_resolve_cutoffs()
         
         for elem, upf in self.pseudopotentials.items():
             full_upf = upf if os.path.isabs(upf) else os.path.join(self.pseudo_dir, upf)
@@ -829,11 +1046,11 @@ class ToolkitConfig:
             )
 
         # Plane-wave cutoffs validation
-        if float(self.ecutwfc) <= 0.0:
+        if self.ecutwfc is not None and float(self.ecutwfc) <= 0.0:
             raise ValueError(f"Invalid ecutwfc: {self.ecutwfc}. Must be > 0 Ry.")
-        if float(self.ecutrho) <= 0.0:
+        if self.ecutrho is not None and float(self.ecutrho) <= 0.0:
             raise ValueError(f"Invalid ecutrho: {self.ecutrho}. Must be > 0 Ry.")
-        if float(self.ecutrho) < 4.0 * float(self.ecutwfc):
+        if self.ecutwfc is not None and self.ecutrho is not None and float(self.ecutrho) < 4.0 * float(self.ecutwfc):
             raise ValueError(
                 f"Invalid ecutrho: {self.ecutrho} Ry is less than 4 * ecutwfc ({4.0 * self.ecutwfc} Ry). "
                 "Charge density cutoff must be at least 4 times wavefunction cutoff."

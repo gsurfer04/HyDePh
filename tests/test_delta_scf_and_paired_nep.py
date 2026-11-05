@@ -60,6 +60,18 @@ def test_build_delta_scf_occupations():
     assert occ_dw3[6] == 0.5
     assert occ_dw3[7] == 0.5
 
+    # 3b. Degenerate HOMO and LUMO (e.g. e -> e* transition): homo_degeneracy=2, lumo_degeneracy=2
+    occ_up3b, occ_dw3b = build_delta_scf_occupations(
+        nelec=14, tot_magnetization=2, nbnd=12, homo_band=6, lumo_band=7, spin_channel=2,
+        homo_degeneracy=2, lumo_degeneracy=2
+    )
+    assert sum(occ_up3b) == 8.0
+    assert sum(occ_dw3b) == 6.0
+    assert occ_dw3b[4] == 0.5  # Band 5 has 0.5 hole
+    assert occ_dw3b[5] == 0.5  # Band 6 has 0.5 hole
+    assert occ_dw3b[6] == 0.5  # Band 7 has 0.5 electron
+    assert occ_dw3b[7] == 0.5  # Band 8 has 0.5 electron
+
     # 4. Incompatible parity raises ValueError
     with pytest.raises(ValueError, match="incompatible parity"):
         build_delta_scf_occupations(nelec=8, tot_magnetization=1, nbnd=10, homo_band=4, lumo_band=5)
@@ -464,7 +476,7 @@ def test_auto_jahn_teller_integration(tmp_path):
     builder = DefectBuilder(cfg, calc_qe=mock_qe)
 
     orig_parse = hydeph.defect_builder.parse_qe_band_gap
-    hydeph.defect_builder.parse_qe_band_gap = lambda f: {
+    hydeph.defect_builder.parse_qe_band_gap = lambda f, **kwargs: {
         "lumo_degeneracy": 2,
         "nelec": 12,
         "spin_channel": 2,

@@ -267,3 +267,87 @@ def test_anchor_frame_priority_in_dft_budget(tmp_path, monkeypatch, caplog):
 
     # Budget warning check: total budget 2 < 20
     assert any("fewer than 20 frames" in r.message for r in caplog.records)
+
+
+def test_auto_ecutwfc_for_hard_elements(tmp_path):
+    """Verify that ecutwfc is automatically set to an appropriate value for hard elements if not specified."""
+    # 1. Hard element: Carbon with Norm-Conserving UPF -> ecutwfc=80.0 Ry, ecutrho=320.0 Ry
+    upf_c_nc = tmp_path / "C_nc.upf"
+    upf_c_nc.write_text(
+        '<UPF version="2.0.1">\n'
+        '  <PP_HEADER element="C" pseudo_type="NC" is_norm_conserving="T" z_valence="4.00"/>\n'
+        '</UPF>\n',
+        encoding="utf-8",
+    )
+    pristine_c = tmp_path / "pristine_c.xyz"
+    pristine_c.write_text("2\ncell\nC 0 0 0\nC 1 1 1\n", encoding="utf-8")
+    nep = tmp_path / "nep.txt"
+    nep.write_text("version 1\n", encoding="utf-8")
+
+    cfg_nc = ToolkitConfig(
+        pristine_cell_path=str(pristine_c),
+        foundation_potential_path=str(nep),
+        pseudopotentials={"C": str(upf_c_nc)},
+        spin_multiplicity=1,
+    )
+    cfg_nc.validate()
+    assert cfg_nc.ecutwfc == 80.0
+    assert cfg_nc.ecutrho == 320.0
+
+    # 2. Hard element: Carbon with PAW UPF -> ecutwfc=65.0 Ry, ecutrho=520.0 Ry
+    upf_c_paw = tmp_path / "C_paw.upf"
+    upf_c_paw.write_text(
+        '<UPF version="2.0.1">\n'
+        '  <PP_HEADER element="C" pseudo_type="PAW" is_paw="T" z_valence="4.00"/>\n'
+        '</UPF>\n',
+        encoding="utf-8",
+    )
+    cfg_paw = ToolkitConfig(
+        pristine_cell_path=str(pristine_c),
+        foundation_potential_path=str(nep),
+        pseudopotentials={"C": str(upf_c_paw)},
+        spin_multiplicity=1,
+    )
+    cfg_paw.validate()
+    assert cfg_paw.ecutwfc == 65.0
+    assert cfg_paw.ecutrho == 520.0
+
+    # 3. Soft element: Silicon with PAW UPF -> ecutwfc=40.0 Ry, ecutrho=320.0 Ry
+    upf_si_paw = tmp_path / "Si_paw.upf"
+    upf_si_paw.write_text(
+        '<UPF version="2.0.1">\n'
+        '  <PP_HEADER element="Si" pseudo_type="PAW" is_paw="T" z_valence="4.00"/>\n'
+        '</UPF>\n',
+        encoding="utf-8",
+    )
+    pristine_si = tmp_path / "pristine_si.xyz"
+    pristine_si.write_text("2\ncell\nSi 0 0 0\nSi 1 1 1\n", encoding="utf-8")
+
+    cfg_si = ToolkitConfig(
+        pristine_cell_path=str(pristine_si),
+        foundation_potential_path=str(nep),
+        pseudopotentials={"Si": str(upf_si_paw)},
+        spin_multiplicity=1,
+    )
+    cfg_si.validate()
+    assert cfg_si.ecutwfc == 40.0
+    assert cfg_si.ecutrho == 320.0
+
+    # 4. Explicit user specification is respected (not overwritten)
+    cfg_user = ToolkitConfig(
+        pristine_cell_path=str(pristine_c),
+        foundation_potential_path=str(nep),
+        pseudopotentials={"C": str(upf_c_nc)},
+        ecutwfc=55.0,
+        spin_multiplicity=1,
+    )
+    cfg_user.validate()
+    assert cfg_user.ecutwfc == 55.0
+
+    # 5. write_qe_input correctly renders auto-resolved ecutwfc in pw.in
+    pw_out = tmp_path / "pw_auto.in"
+    atoms_c = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    write_qe_input(atoms_c, str(pw_out), cfg_nc)
+    content = pw_out.read_text(encoding="utf-8")
+    assert "ecutwfc = 80.0," in content
+    assert "ecutrho = 320.0," in content
