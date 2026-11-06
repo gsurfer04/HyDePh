@@ -862,9 +862,9 @@ def test_manual_cluster_module_configuration_and_order(tmp_path):
     # 2. Test candidate DFT scripts (standalone and array)
     at.info["sample_type"] = "franck_condon"
     at.info["candidate_index"] = 0
-    dft_res = qe.prepare_candidate_dft_inputs([at])
-    dft_slurm = dft_res["slurm_script"]
-    array_slurm = dft_res["array_script"]
+    dft_res = qe.prepare_all_dft_inputs([at])
+    dft_slurm = os.path.join(ws, "submit_dft_pure_qe.slurm")
+    array_slurm = os.path.join(ws, "submit_dft_array_pure_qe.slurm")
 
     for script_path in (dft_slurm, array_slurm):
         assert os.path.isfile(script_path)
