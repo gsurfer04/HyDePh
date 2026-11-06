@@ -1233,8 +1233,12 @@ class LineshapeEngine:
         # 2. Smart Y Limits
         curve_scope = active_curve_subset if active_curve_subset else all_curves
         peak_I = max(float(np.max(a)) for (_, a) in curve_scope)
+        if peak_I <= 0:
+            peak_I = 1.0
         y_min_final = float(user_ymin) if user_ymin is not None else (-0.015 * peak_I)
         y_max_final = float(user_ymax) if user_ymax is not None else (1.15 * peak_I)
+        if y_max_final <= y_min_final:
+            y_max_final = y_min_final + 1.0
 
         return (e_min_final, e_max_final), (y_min_final, y_max_final)
 
