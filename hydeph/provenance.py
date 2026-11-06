@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional
 
 import ase
 import hydeph
+from .config import resolve_pseudo_path
 
 
 def calculate_file_sha256(filepath: str) -> Optional[str]:
@@ -54,18 +55,12 @@ def generate_provenance_manifest(
     pseudos = getattr(config, "pseudopotentials", {}) or {}
     pseudo_hashes: Dict[str, Any] = {}
     for elem, p_path in pseudos.items():
-        if os.path.isfile(p_path):
+        full_p = resolve_pseudo_path(p_path, getattr(config, "pseudo_dir", None))
+        if os.path.isfile(full_p):
             pseudo_hashes[elem] = {
-                "path": str(p_path),
-                "sha256": calculate_file_sha256(str(p_path)),
+                "path": full_p,
+                "sha256": calculate_file_sha256(full_p),
             }
-        elif getattr(config, "pseudo_dir", None) and os.path.isdir(config.pseudo_dir):
-            full_p = os.path.join(config.pseudo_dir, p_path)
-            if os.path.isfile(full_p):
-                pseudo_hashes[elem] = {
-                    "path": full_p,
-                    "sha256": calculate_file_sha256(full_p),
-                }
 
     gs_source = "unknown"
     if at_gs is not None:

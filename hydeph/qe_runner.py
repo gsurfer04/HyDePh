@@ -19,7 +19,7 @@ from ase import Atoms
 from ase.units import Ry, Bohr
 from ase.data import atomic_masses, atomic_numbers
 
-from .config import ToolkitConfig, discover_pseudopotential, inspect_upf_metadata, HARD_ELEMENT_CUTOFFS
+from .config import ToolkitConfig, discover_pseudopotential, inspect_upf_metadata, HARD_ELEMENT_CUTOFFS, resolve_pseudo_path
 
 try:
     from tqdm import tqdm
@@ -301,12 +301,12 @@ def write_qe_input(
         if not upf_rel and config.pseudo_dir:
             disc = discover_pseudopotential(s, config.pseudo_dir)
             if disc:
-                full_disc = disc if os.path.isabs(disc) else os.path.join(config.pseudo_dir, disc)
+                full_disc = resolve_pseudo_path(disc, config.pseudo_dir)
                 with _UPF_RESOLVE_LOCK:
                     config.pseudopotentials[s] = full_disc
                 upf_rel = full_disc
                 logger.info(f"[+] Auto-discovered pseudopotential for '{s}' during QE input prep: {os.path.basename(disc)}")
-        full_upf = upf_rel if os.path.isabs(upf_rel) else os.path.join(config.pseudo_dir or ".", upf_rel)
+        full_upf = resolve_pseudo_path(upf_rel, config.pseudo_dir)
         meta_by_sym[s] = inspect_upf_metadata(full_upf)
 
     all_nc = bool(unique_symbols) and all(meta_by_sym[s]["is_norm_conserving"] is True for s in unique_symbols)
@@ -487,7 +487,7 @@ def write_qe_input(
         if s not in config.pseudopotentials or not config.pseudopotentials[s]:
             disc = discover_pseudopotential(s, config.pseudo_dir) if config.pseudo_dir else None
             if disc:
-                full_disc = disc if os.path.isabs(disc) else os.path.join(config.pseudo_dir, disc)
+                full_disc = resolve_pseudo_path(disc, config.pseudo_dir)
                 with _UPF_RESOLVE_LOCK:
                     config.pseudopotentials[s] = full_disc
             else:
@@ -1716,7 +1716,7 @@ class QERunner:
             for s in unique_syms:
                 upf = self.config.pseudopotentials.get(s, "")
                 if upf:
-                    p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
+                    p = resolve_pseudo_path(upf, self.config.pseudo_dir)
                     z_vals[s] = inspect_upf_metadata(p).get("z_valence")
 
             if all(v is not None for v in z_vals.values()):
@@ -2375,7 +2375,7 @@ class QERunner:
             for s in unique_syms:
                 upf = self.config.pseudopotentials.get(s, "") if self.config.pseudopotentials else ""
                 if upf:
-                    p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
+                    p = resolve_pseudo_path(upf, self.config.pseudo_dir)
                     if os.path.isfile(p):
                         z_vals[s] = inspect_upf_metadata(p).get("z_valence")
             _DEFAULT_VALENCE = {
@@ -2650,7 +2650,7 @@ echo "==========================================================================
             for s in unique_syms:
                 upf = self.config.pseudopotentials.get(s, "")
                 if upf:
-                    p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
+                    p = resolve_pseudo_path(upf, self.config.pseudo_dir)
                     z_vals[s] = inspect_upf_metadata(p).get("z_valence")
 
             if all(v is not None for v in z_vals.values()):

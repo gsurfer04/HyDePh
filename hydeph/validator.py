@@ -12,7 +12,7 @@ from typing import Dict, Any, List
 import numpy as np
 import ase.io
 
-from .config import ToolkitConfig, discover_pseudopotential
+from .config import ToolkitConfig, discover_pseudopotential, resolve_pseudo_path
 from .defect_builder import detect_defect_sites
 from .qe_runner import inspect_upf_metadata
 from .provenance import calculate_file_sha256
@@ -115,9 +115,9 @@ def validate_workflow(
         if not upf_rel and config.pseudo_dir:
             disc = discover_pseudopotential(s, config.pseudo_dir)
             if disc:
-                upf_rel = disc if os.path.isabs(disc) else os.path.join(config.pseudo_dir, disc)
+                upf_rel = disc
         
-        full_upf = upf_rel if os.path.isabs(upf_rel) else os.path.join(config.pseudo_dir or ".", upf_rel)
+        full_upf = resolve_pseudo_path(upf_rel, config.pseudo_dir)
         meta = inspect_upf_metadata(full_upf)
         upf_info[s] = meta
 

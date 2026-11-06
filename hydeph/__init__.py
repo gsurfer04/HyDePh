@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from .config import ToolkitConfig, discover_pseudopotential
+from .config import ToolkitConfig, discover_pseudopotential, resolve_pseudo_path
 from .defect_builder import DefectBuilder, detect_defect_sites, apply_jahn_teller_distortion
 from .frame_sampler import FrameSampler, get_rattle_sigma
 from .qe_runner import QERunner, extract_and_attach_adiabatic_energetics
@@ -27,6 +27,7 @@ logging.getLogger("hydeph").addHandler(logging.NullHandler())
 __all__ = [
     "ToolkitConfig",
     "discover_pseudopotential",
+    "resolve_pseudo_path",
     "DefectBuilder",
     "detect_defect_sites",
     "apply_jahn_teller_distortion",

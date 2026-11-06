@@ -14,7 +14,7 @@ from ase.optimize import BFGS
 from ase.constraints import FixAtoms
 from calorine.calculators import CPUNEP
 
-from .config import ToolkitConfig
+from .config import ToolkitConfig, resolve_pseudo_path
 from .calculator import load_foundation_calculator
 from .qe_runner import build_delta_scf_occupations, inspect_upf_metadata, parse_qe_band_gap
 
@@ -744,7 +744,7 @@ class DefectBuilder:
                 for s in unique_syms:
                     upf = self.config.pseudopotentials.get(s, "") if self.config.pseudopotentials else ""
                     if upf:
-                        p = upf if os.path.isabs(upf) else os.path.join(self.config.pseudo_dir or ".", upf)
+                        p = resolve_pseudo_path(upf, self.config.pseudo_dir)
                         if os.path.isfile(p):
                             z_vals[s] = inspect_upf_metadata(p).get("z_valence")
 

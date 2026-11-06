@@ -748,6 +748,54 @@ def test_toolkit_config_auto_discover_pseudopotentials(tmp_path):
     assert os.path.basename(cfg2.pseudopotentials["I"]) == "I_ONCV_PBE-1.2.upf"
 
 
+def test_toolkit_config_pseudo_dir_default_no_duplicate_path(tmp_path, monkeypatch):
+    """When pseudo_dir is not specified, auto-discovery and validation do not double-nest './pseudo/./pseudo/'."""
+    import ase.io
+    from hydeph.config import resolve_pseudo_path
+
+    # Create workspace with local ./pseudo directory
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    pseudo_dir = ws / "pseudo"
+    pseudo_dir.mkdir()
+    (pseudo_dir / "C.upf").write_text('<PP_HEADER z_valence="4.0" />')
+
+    pristine_file = ws / "pristine.xyz"
+    ase.io.write(str(pristine_file), Atoms("C2", positions=[[0, 0, 0], [0, 0, 1.4]], cell=[10, 10, 10], pbc=True))
+    pot_file = ws / "nep.txt"
+    pot_file.write_text("dummy nep")
+
+    monkeypatch.chdir(ws)
+
+    # 1. Test auto-discovery with default pseudo_dir
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(pot_file),
+    )
+    assert cfg.pseudo_dir == "./pseudo"
+    cfg.validate()
+
+    assert "C" in cfg.pseudopotentials
+    assert "./pseudo/./pseudo" not in cfg.pseudopotentials["C"]
+    assert "pseudo/pseudo" not in cfg.pseudopotentials["C"].replace("\\", "/")
+    assert os.path.isfile(cfg.pseudopotentials["C"])
+
+    # 2. Test manual relative path pseudopotentials={"C": "./pseudo/C.upf"}
+    cfg2 = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(pot_file),
+        pseudopotentials={"C": "./pseudo/C.upf"},
+    )
+    cfg2.validate()
+    assert "./pseudo/./pseudo" not in cfg2.pseudopotentials["C"]
+    assert os.path.isfile(cfg2.pseudopotentials["C"])
+
+    # 3. Test resolve_pseudo_path directly against doubling
+    assert resolve_pseudo_path("./pseudo/C.upf", "./pseudo") == str((pseudo_dir / "C.upf").resolve())
+    assert resolve_pseudo_path("pseudo/C.upf", "./pseudo") == str((pseudo_dir / "C.upf").resolve())
+    assert resolve_pseudo_path("C.upf", "./pseudo") == str((pseudo_dir / "C.upf").resolve())
+
+
 def test_write_qe_input_auto_discovery_and_error_handling(tmp_path):
     """Tests write_qe_input auto-discovering UPFs and raising helpful KeyError when missing."""
     from hydeph.qe_runner import write_qe_input

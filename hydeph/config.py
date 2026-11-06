@@ -80,6 +80,63 @@ def discover_pseudopotential(element: str, pseudo_dir: str) -> Optional[str]:
     return pool[-1]
 
 
+def resolve_pseudo_path(upf_path: str, pseudo_dir: Optional[str] = None) -> str:
+    """Resolves the real filesystem path to a UPF pseudopotential file.
+
+    Handles absolute paths, cwd-relative paths, pseudo_dir-relative paths,
+    and prevents duplicate directory prefixes (e.g. './pseudo/./pseudo/file.upf').
+
+    Parameters
+    ----------
+    upf_path : str
+        Filename or path to the UPF file (e.g. 'C.upf', './pseudo/C.upf', '/abs/path/C.upf').
+    pseudo_dir : str, optional
+        Base directory containing pseudopotentials (e.g. './pseudo', '/path/to/pseudo').
+
+    Returns
+    -------
+    str
+        Canonical resolved path to the pseudopotential file.
+    """
+    if not upf_path:
+        return ""
+
+    # 1. If absolute path, return normalized absolute path
+    if os.path.isabs(upf_path):
+        return os.path.abspath(upf_path)
+
+    # 2. If it already exists directly as a file from current working directory, return it
+    if os.path.isfile(upf_path):
+        return os.path.abspath(upf_path)
+
+    norm_upf = os.path.normpath(upf_path)
+    candidates: List[str] = []
+
+    if pseudo_dir:
+        norm_dir = os.path.normpath(pseudo_dir)
+
+        # Check if norm_upf already starts with norm_dir (e.g. norm_upf="pseudo/C.upf", norm_dir="pseudo")
+        if norm_upf == norm_dir or norm_upf.startswith(norm_dir + os.sep) or norm_upf.startswith(norm_dir + "/"):
+            candidates.append(norm_upf)
+        else:
+            candidates.append(os.path.join(pseudo_dir, upf_path))
+            # Also check if upf_path had a leading folder name matching pseudo_dir basename
+            dir_base = os.path.basename(norm_dir)
+            parts = norm_upf.split(os.sep)
+            if len(parts) > 1 and parts[0] == dir_base:
+                candidates.append(os.path.join(pseudo_dir, *parts[1:]))
+    else:
+        candidates.append(norm_upf)
+
+    # Return the first candidate that exists on disk
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return os.path.abspath(cand)
+
+    # If none exists on disk, return normalized best candidate
+    return candidates[0] if candidates else norm_upf
+
+
 def inspect_upf_metadata(upf_path: str) -> Dict[str, Any]:
     """Reads lightweight header metadata (`is_norm_conserving`, `z_valence`, suggested cutoffs) from a UPF file."""
     info: Dict[str, Any] = {
@@ -645,6 +702,18 @@ class ToolkitConfig:
         if self.parallel_hessian and self.parallel_hessian_workers is None:
             self.parallel_hessian_workers = max(1, min(16, os.cpu_count() or 4))
 
+        # If pseudo_dir defaults to "./pseudo" and does not exist locally,
+        # but user supplied pseudopotentials in another directory, infer pseudo_dir
+        if (self.pseudo_dir == "./pseudo" or self.pseudo_dir == "pseudo") and not os.path.isdir(self.pseudo_dir):
+            if self.pseudopotentials:
+                dirs = [
+                    os.path.dirname(p)
+                    for p in self.pseudopotentials.values()
+                    if p and os.path.dirname(p) and os.path.isdir(os.path.dirname(p))
+                ]
+                if dirs:
+                    self.pseudo_dir = dirs[0]
+
         # Track whether ecutwfc and ecutrho were explicitly supplied by the caller
         if self.ecutwfc is not None:
             self._user_specified_ecutwfc = True
@@ -836,11 +905,7 @@ class ToolkitConfig:
                 continue
             upf_file = discover_pseudopotential(elem, self.pseudo_dir)
             if upf_file:
-                full_upf = (
-                    upf_file
-                    if os.path.isabs(upf_file)
-                    else os.path.join(self.pseudo_dir, upf_file)
-                )
+                full_upf = resolve_pseudo_path(upf_file, self.pseudo_dir)
                 self.pseudopotentials[elem] = full_upf
                 discovered[elem] = full_upf
                 logger.info(f"[+] Auto-discovered pseudopotential for '{elem}': {os.path.basename(full_upf)}")
@@ -887,8 +952,8 @@ class ToolkitConfig:
             if not upf_path and self.pseudo_dir:
                 disc = discover_pseudopotential(elem, self.pseudo_dir)
                 if disc:
-                    upf_path = disc if os.path.isabs(disc) else os.path.join(self.pseudo_dir, disc)
-            full_upf = upf_path if os.path.isabs(upf_path) else os.path.join(self.pseudo_dir or ".", upf_path)
+                    upf_path = disc
+            full_upf = resolve_pseudo_path(upf_path, self.pseudo_dir)
             meta = inspect_upf_metadata(full_upf) if os.path.isfile(full_upf) else {}
 
             is_nc = meta.get("is_norm_conserving")
@@ -965,7 +1030,7 @@ class ToolkitConfig:
             self.auto_resolve_cutoffs()
         
         for elem, upf in self.pseudopotentials.items():
-            full_upf = upf if os.path.isabs(upf) else os.path.join(self.pseudo_dir, upf)
+            full_upf = resolve_pseudo_path(upf, self.pseudo_dir)
             if not os.path.isfile(full_upf):
                 raise FileNotFoundError(
                     f"Pseudopotential for {elem} not found: {full_upf}. "
@@ -1152,7 +1217,7 @@ class ToolkitConfig:
 
         upf_hashes = {}
         for elem, path in self.pseudopotentials.items():
-            full_p = path if os.path.isabs(path) else os.path.join(self.pseudo_dir, path)
+            full_p = resolve_pseudo_path(path, self.pseudo_dir)
             h = compute_file_sha256(full_p) if os.path.isfile(full_p) else None
             upf_hashes[elem] = {"path": path, "sha256": h}
 
