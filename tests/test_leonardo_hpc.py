@@ -836,6 +836,7 @@ def test_manual_cluster_module_configuration_and_order(tmp_path):
 
     assert cfg.slurm_modules == custom_modules
 
+    from hydeph.qe_runner import QERunner
     qe = QERunner(cfg, pw_exe="pw.x")
 
     # 1. Test relaxation launcher script
