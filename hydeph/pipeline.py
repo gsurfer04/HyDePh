@@ -220,11 +220,10 @@ def run_pipeline(
         logger.info("1. Submit ground- and excited-state relaxations to compute nodes:")
         slurm_fname = os.path.basename(res['slurm_script']) if res.get('slurm_script') else 'submit_relaxations_pure_qe.slurm'
         logger.info(f"   sbatch {slurm_fname}")
-        logger.info("   (Zero Python / Conda required on the compute nodes!)")
+        logger.info("   Runs standalone pw.x on compute nodes (no Python environment required).")
         logger.info("")
         logger.info("2. Once relaxations complete, resume pipeline execution:")
-        logger.info(f"   python -m hydeph run {config.workspace_dir}/config.yaml --from-stage 2")
-        logger.info("   (HyDePh will automatically discover and load the converged relaxations!)")
+        logger.info(f"   hydeph {config.workspace_dir}/config.yaml --from-stage 2")
         logger.info("=" * 78)
         return res
 
@@ -377,12 +376,10 @@ def run_pipeline(
         logger.info(f"     sbatch submit_dft_pure_qe.slurm")
         logger.info(f"   • Debug queue (fast <= 30 min run):")
         logger.info(f"     sbatch --qos=boost_qos_dbg submit_dft_pure_qe.slurm")
-        logger.info("   (Zero Python / Conda required on the compute nodes!)")
+        logger.info("   Runs standalone pw.x on compute nodes (no Python environment required).")
         logger.info("")
         logger.info("2. Once DFT calculations complete, resume pipeline execution on login node / WSL:")
-        logger.info(f"   python -m hydeph run {config.workspace_dir}/config.yaml --from-stage 4")
-        logger.info("   (HyDePh will automatically ingest all converged GS and ES calculations,")
-        logger.info("    extract exact adiabatic ZPL & Stokes energetics, and train Delta-NEPs!)")
+        logger.info(f"   hydeph {config.workspace_dir}/config.yaml --from-stage 4")
         logger.info("=" * 78)
         return {
             "workspace_dir": config.workspace_dir,

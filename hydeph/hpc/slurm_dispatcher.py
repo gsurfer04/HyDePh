@@ -202,7 +202,7 @@ class SlurmDispatcher:
 
         script_content = f"""#!/bin/bash
 # ==============================================================================
-# CINECA Leonardo SLURM Job Array for HyDePh Candidate Frame Labeling
+# SLURM Job Array for HyDePh Candidate Frame Labeling
 # Generated automatically by HyDePh SlurmDispatcher
 # Profile: {self.profile.description}
 # ==============================================================================

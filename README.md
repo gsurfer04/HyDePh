@@ -260,7 +260,20 @@ summary = run_pipeline(config)
 | `dephasing_temperature_coefficient` | `float` | `5.5e-5` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). |
 | `phonon_supercell_repeat` | `tuple of int` | `None` | Supercell repeat for expanded phonon embedding calculations. |
 | `phonon_embedding_method` | `str` | `"displacement"` | Embedding mode projection: `"displacement"` or `"force"`. |
+| `phonon_y_min` / `phonon_y_max` | `float` | `None` | Explicit y-axis limits for phonon spectral density plots. |
 | `plot_configuration_coordinate` | `bool` | `True` | Generates 2-panel 1D configuration coordinate and Stokes shift figure. |
+
+### High-Performance Computing (HPC) & SLURM
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `hpc_scheduler` | `str` | `"local"` | Scheduler backend: `"local"` or `"slurm"`. |
+| `cluster_profile` | `str` | `"auto"` | Hardware profile: `"leonardo_booster"`, `"leonardo_dcgp"`, or `"generic_slurm"`. |
+| `slurm_account` | `str` | `None` | SLURM account string (reads `$CINECA_ACCOUNT` or `$SLURM_ACCOUNT`). |
+| `slurm_partition` | `str` | `None` | Target partition (e.g. `boost_usr_prod`). |
+| `slurm_modules` / `modules` | `list of str` | `[]` | Environment modules loaded in exact sequence (e.g. `['profile/chem-phys', 'quantum-espresso/7.2--openmpi--4.1.4--cuda--11.8']`). |
+| `prepare_relaxation_inputs` | `bool` | `False` | Writes pure QE relaxation inputs and SLURM runner scripts. |
+| `prepare_dft_inputs` | `bool` | `False` | Writes pure QE candidate frame inputs and SLURM job array scripts. |
 
 ---
 
@@ -339,14 +352,18 @@ hydeph/
 ├── cc_diagram.py                  # Paired 1D configuration coordinate & Stokes shift engine
 ├── provenance.py                  # Environmental provenance & SHA256 manifest tracking
 ├── validator.py                   # Dry-run structure, valence, and spin validator
-└── pipeline.py                    # Pipeline orchestrator with stage resumption
+├── pipeline.py                    # Pipeline orchestrator with stage resumption
+└── hpc/                           # Cluster orchestration & multi-GPU dispatch
+    ├── cluster_profiles.py        # System definitions (Leonardo Booster, DCGP)
+    ├── slurm_dispatcher.py        # SLURM script generators & Lustre synchronization
+    └── array_worker.py            # Headless array task executor
 benchmarks/
 ├── diamond-nvminus/               # Diamond NV- benchmark data & figures
 ├── 4H-SiC/                        # 4H-SiC kk divacancy benchmark data & figures
 └── NaCl/                          # NaCl F-center benchmark data & figures
 docs/
 └── THEORY_WALKTHROUGH.md          # Theoretical formulation & literature citations
-tests/                             # Automated test suite (128 unit & regression tests)
+tests/                             # Automated test suite (151 unit & regression tests)
 CHANGELOG.md                       # Release notes and history
 CONTRIBUTING.md                    # Developer and contribution guidelines
 pyproject.toml                     # Packaging metadata, CLI scripts & dependencies

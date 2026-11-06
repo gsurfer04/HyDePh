@@ -1008,7 +1008,7 @@ class LineshapeEngine:
 
                 # Low-temperature quantum anchor:
                 # Below ~50 K, classical MD lacks quantum zero-point fluctuations (kBT << hbar*omega).
-                # Seamlessly anchor to the exact harmonic normal-mode spectral function s_cont as T -> 0:
+                # Anchor to harmonic normal-mode spectral function s_cont as T -> 0:
                 w_md = float(np.clip(T / 77.0, 0.0, 1.0))
                 s_anh = (1.0 - w_md) * s_cont + w_md * s_md
 

@@ -2797,7 +2797,7 @@ echo "==========================================================================
                     "[!] Warning: No cluster environment modules specified ('modules' or 'slurm_modules' is empty in config). "
                     "Cluster jobs may fail to find Quantum ESPRESSO binaries unless loaded in the shell environment."
                 )
-            # 1. Standalone 4-GPU Slurm script for Leonardo Booster
+            # Standalone multi-GPU Slurm batch script
             acct = (
                 getattr(self.config, "slurm_account", None)
                 or getattr(self.config, "hpc_account", None)
@@ -2813,10 +2813,10 @@ echo "==========================================================================
 
             slurm_content = f"""#!/bin/bash
 # ==============================================================================
-# Standalone Quantum ESPRESSO DFT Runner on CINECA Leonardo Booster
+# Standalone Quantum ESPRESSO DFT Runner
 # ==============================================================================
-# Executes candidate frame DFT calculations across {gpus}x NVIDIA GPUs.
-# This script does NOT require Python or any Conda environment on compute nodes!
+# Executes candidate frame DFT calculations across {gpus}x GPUs.
+# Runs standalone pw.x across compute nodes without requiring Python or Conda.
 # ==============================================================================
 #SBATCH --job-name=hydeph_pw_dft
 #SBATCH --account={acct}
@@ -2836,7 +2836,7 @@ cd "$WORK_DIR"
 
 # Locate workspace directory where dft_calculations lives
 WORKSPACE_DIR=""
-for cand in "$WORK_DIR" "$WORK_DIR/output_4h_sic_kk"; do
+for cand in "$WORK_DIR" "$WORK_DIR/hydeph_run"; do
     if [ -d "$cand/dft_calculations" ]; then
         WORKSPACE_DIR="$(cd "$cand" && pwd)"
         break
@@ -2847,7 +2847,7 @@ if [ -n "$WORKSPACE_DIR" ]; then
 fi
 
 echo "=============================================================================="
-echo " Starting Pure Quantum ESPRESSO Calculations on CINECA Leonardo Booster"
+echo " Starting Pure Quantum ESPRESSO Calculations"
 echo " Host: $(hostname) | Job ID: $SLURM_JOB_ID | Start: $(date)"
 echo " Working Dir: $PWD"
 echo "=============================================================================="
@@ -2938,7 +2938,7 @@ echo "==========================================================================
             with open(slurm_script_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(slurm_content)
 
-            # 2. Frame list for SLURM Job Array (enforce forward slashes for Linux compatibility)
+            # Frame list for SLURM Job Array (enforce forward slashes for Linux compatibility)
             all_dirs_rel = [os.path.relpath(d, calc_base).replace("\\", "/") for d in (prepared_gs + prepared_es)]
             list_file_path = os.path.join(calc_base, "dft_frames_list.txt")
             with open(list_file_path, "w", encoding="utf-8", newline="\n") as f:
@@ -2950,7 +2950,7 @@ echo "==========================================================================
 
             array_content = f"""#!/bin/bash
 # ==============================================================================
-# CINECA Leonardo Booster: Pure QE Job Array Script
+# Pure Quantum ESPRESSO SLURM Job Array Script
 # ==============================================================================
 # Usage (total {total_count} candidate frames):
 #   sbatch --array=0-{array_max_idx}%16 submit_dft_array_pure_qe.slurm
@@ -2987,7 +2987,7 @@ export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # Locate dft_frames_list.txt across candidate paths relative to submit directory
 LIST_FILE=""
-for cand in "$WORK_DIR/dft_frames_list.txt" "$WORK_DIR/output_4h_sic_kk/dft_frames_list.txt" "$WORK_DIR/../dft_frames_list.txt"; do
+for cand in "$WORK_DIR/dft_frames_list.txt" "$WORK_DIR/hydeph_run/dft_frames_list.txt" "$WORK_DIR/../dft_frames_list.txt"; do
     if [ -f "$cand" ]; then
         LIST_FILE="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
         break
@@ -2997,7 +2997,7 @@ done
 if [ -z "$LIST_FILE" ]; then
     echo "[!] Error: 'dft_frames_list.txt' not found relative to submit dir ($WORK_DIR)!"
     echo "    Make sure you have executed Stage 2 first on the login node:"
-    echo "        python run_test.py --to-stage 2"
+    echo "        hydeph config.yaml --to-stage 2"
     exit 1
 fi
 

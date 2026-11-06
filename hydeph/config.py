@@ -311,10 +311,12 @@ class ToolkitConfig:
         Spin multiplicity (2S+1). Default is 2.
     tot_magnetization : int, optional
         Target magnetization (2S). Derived from spin_multiplicity - 1 if omitted.
-    ecutwfc : float
-        Plane-wave cutoff energy for wavefunctions (Ry). Default is 40.0.
-    ecutrho : float
-        Plane-wave cutoff energy for charge density (Ry). Default is 320.0.
+    ecutwfc : float, optional
+        Plane-wave cutoff energy for wavefunctions (Ry). If omitted, automatically
+        derived from system element hardness and UPF header recommendations.
+    ecutrho : float, optional
+        Plane-wave cutoff energy for charge density (Ry). If omitted, automatically
+        derived (defaults to 4x ecutwfc for norm-conserving, 8x for ultrasoft/PAW).
     kpoints : tuple of int
         Monkhorst-Pack k-point grid. Default is (1, 1, 1) (Gamma-point).
     input_dft : str, optional
@@ -380,6 +382,14 @@ class ToolkitConfig:
     anharmonic_coupling_regime : str
         "auto", "quantum", or "semiclassical". Default is "auto".
 
+    phonon_y_min : float, optional
+        Minimum y-axis limit for phonon spectral density plots.
+    phonon_y_max : float, optional
+        Maximum y-axis limit for phonon spectral density plots.
+    cluster_profile : str
+        HPC hardware profile name ("leonardo_booster", "leonardo_dcgp", or "generic_slurm").
+    slurm_modules : list of str
+        List of environment modules to load in order on HPC clusters (default is empty).
     workspace_dir : str
         Output and scratch working directory. Default is "./hydeph_run".
     plot_configuration_coordinate : bool
