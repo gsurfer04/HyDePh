@@ -140,6 +140,8 @@ def format_slurm_module_lines(modules: Optional[List[str]] = None, purge: bool =
             m_clean = str(m).strip()
             if m_clean:
                 lines.append(f"module load {m_clean}")
+    else:
+        lines.append("# Note: No cluster environment modules specified in configuration.")
     return "\n".join(lines)
 
 
@@ -2327,15 +2329,7 @@ class QERunner:
                     return [m.strip() for m in mods.split(",") if m.strip()]
                 return [m.strip() for m in mods.split() if m.strip()]
             return [str(m).strip() for m in mods if str(m).strip()]
-        # Fallback to cluster profile default modules
-        try:
-            from .hpc.cluster_profiles import get_cluster_profile
-            prof = get_cluster_profile(getattr(self.config, "cluster_profile", "leonardo_booster"))
-            if prof and prof.default_modules:
-                return list(prof.default_modules)
-        except Exception:
-            pass
-        return ["profile/chem-phys", "q-e/7.2", "cuda/11.8", "openmpi/4.1.4"]
+        return []
 
     def prepare_relaxation_inputs(
         self,
@@ -2493,6 +2487,12 @@ class QERunner:
 
         slurm_path = None
         if write_slurm_scripts:
+            mods = self._get_slurm_modules()
+            if not mods:
+                logger.warning(
+                    "[!] Warning: No cluster environment modules specified ('modules' or 'slurm_modules' is empty in config). "
+                    "Cluster jobs may fail to find Quantum ESPRESSO binaries unless loaded in the shell environment."
+                )
             acct = (
                 getattr(self.config, "slurm_account", None)
                 or getattr(self.config, "hpc_account", None)
@@ -2504,7 +2504,7 @@ class QERunner:
             nodes = getattr(self.config, "slurm_nodes", 1) or 1
             gpus = getattr(self.config, "slurm_gpus_per_node", 4) or 4
             cpus_per_task = getattr(self.config, "slurm_cpus_per_task", 8) or 8
-            module_block = format_slurm_module_lines(self._get_slurm_modules())
+            module_block = format_slurm_module_lines(mods)
 
             slurm_content = f"""#!/bin/bash
 # ==============================================================================
@@ -2791,6 +2791,12 @@ echo "==========================================================================
         list_file_path = None
 
         if write_slurm_scripts:
+            mods = self._get_slurm_modules()
+            if not mods:
+                logger.warning(
+                    "[!] Warning: No cluster environment modules specified ('modules' or 'slurm_modules' is empty in config). "
+                    "Cluster jobs may fail to find Quantum ESPRESSO binaries unless loaded in the shell environment."
+                )
             # 1. Standalone 4-GPU Slurm script for Leonardo Booster
             acct = (
                 getattr(self.config, "slurm_account", None)
@@ -2803,7 +2809,7 @@ echo "==========================================================================
             nodes = getattr(self.config, "slurm_nodes", 1) or 1
             gpus = getattr(self.config, "slurm_gpus_per_node", 4) or 4
             cpus_per_task = getattr(self.config, "slurm_cpus_per_task", 8) or 8
-            module_block = format_slurm_module_lines(self._get_slurm_modules())
+            module_block = format_slurm_module_lines(mods)
 
             slurm_content = f"""#!/bin/bash
 # ==============================================================================

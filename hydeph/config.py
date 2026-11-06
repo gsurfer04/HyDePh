@@ -631,8 +631,6 @@ class ToolkitConfig:
                 self.slurm_partition = prof.partition
             if self.slurm_qos is None and prof and prof.qos:
                 self.slurm_qos = prof.qos
-            if not self.slurm_modules and prof and prof.default_modules:
-                self.slurm_modules = list(prof.default_modules)
 
         if self.parallel_hessian and self.parallel_hessian_workers is None:
             self.parallel_hessian_workers = max(1, min(16, os.cpu_count() or 4))

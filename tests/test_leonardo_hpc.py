@@ -39,8 +39,7 @@ def test_cluster_profiles():
     assert booster.partition == "boost_usr_prod"
     assert booster.qos is None
     assert booster.has_gpu is True
-    assert "q-e/7.2" in booster.default_modules
-    assert "cuda/11.8" in booster.default_modules
+    assert booster.default_modules == []
 
     dcgp = get_cluster_profile("leonardo_dcgp")
     assert dcgp.name == "leonardo_dcgp"
@@ -48,6 +47,7 @@ def test_cluster_profiles():
     assert dcgp.cpus_per_node == 112
     assert dcgp.partition == "dcgp_usr_prod"
     assert dcgp.has_gpu is False
+    assert dcgp.default_modules == []
 
     # Alias check
     alias_booster = get_cluster_profile("leonardo")
@@ -125,6 +125,7 @@ def test_slurm_job_array_script_generation(tmp_path):
         profile=LEONARDO_BOOSTER,
         account="cin_test_01",
         workspace_dir=str(tmp_path / "run"),
+        slurm_modules=["profile/chem-phys", "quantum-espresso/7.4.1", "cuda/12.6"],
     )
     cfg_file = str(tmp_path / "config.json")
     with open(cfg_file, "w") as f:
@@ -147,8 +148,9 @@ def test_slurm_job_array_script_generation(tmp_path):
     assert "#SBATCH --partition=boost_usr_prod" in script
     assert "--qos" not in script
     assert "#SBATCH --gres=gpu:1" in script
-    assert "module load q-e/7.2" in script
-    assert "module load cuda/11.8" in script
+    assert "module load profile/chem-phys" in script
+    assert "module load quantum-espresso/7.4.1" in script
+    assert "module load cuda/12.6" in script
     assert "conda activate hydeph_env" in script
     assert "python -m hydeph.hpc.array_worker" in script
 
@@ -240,7 +242,7 @@ def test_toolkit_config_hpc_extensions(tmp_path):
     assert cfg.slurm_account == "cin_project_123"
     assert cfg.slurm_partition == "boost_usr_prod"
     assert cfg.slurm_qos is None
-    assert "q-e/7.2" in cfg.slurm_modules
+    assert cfg.slurm_modules == []
     assert cfg.parallel_hessian is True
     assert cfg.parallel_hessian_workers == 8
 
@@ -279,6 +281,7 @@ def test_prepare_all_dft_inputs_and_slurm_scripts(tmp_path):
         pseudopotentials={"C": "C.upf"},
         cluster_profile="leonardo_booster",
         slurm_account="cin_staff",
+        slurm_modules=["profile/chem-phys", "quantum-espresso/7.4.1", "cuda/12.6"],
         spin_multiplicity=1,
     )
     qe = QERunner(cfg, pw_exe="pw.x")
@@ -308,7 +311,10 @@ def test_prepare_all_dft_inputs_and_slurm_scripts(tmp_path):
     assert os.path.isfile(slurm_script)
     with open(slurm_script, "r") as f:
         content = f.read()
-    assert "module load q-e/7.2" in content
+    assert "module load profile/chem-phys" in content
+    assert "module load quantum-espresso/7.4.1" in content
+    assert "module load cuda/12.6" in content
+    assert "q-e" not in content
     assert "if module is-avail" not in content
     assert "CUDA_VISIBLE_DEVICES" in content
     assert "pw.x" in content
@@ -876,6 +882,67 @@ def test_manual_cluster_module_configuration_and_order(tmp_path):
         q_idx = content.index("module load quantum-espresso/7.4.1")
         c_idx = content.index("module load cuda/12.6")
         assert p_idx < q_idx < c_idx
+
+
+def test_warning_when_no_modules_specified_in_cluster_preparation(tmp_path, caplog):
+    """Verify that a warning is logged and no fake modules are written when no modules are specified."""
+    import logging
+    ws = str(tmp_path / "ws_no_modules")
+    os.makedirs(ws, exist_ok=True)
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    c_upf = os.path.join(pseudo_dir, "C.upf")
+    with open(c_upf, "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    pristine_xyz = str(tmp_path / "pristine.xyz")
+    at = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    import ase.io
+    ase.io.write(pristine_xyz, at)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_xyz,
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        slurm_account="cin_staff",
+        spin_multiplicity=1,
+    )
+    assert cfg.slurm_modules == []
+
+    from hydeph.qe_runner import QERunner
+    qe = QERunner(cfg, pw_exe="pw.x")
+
+    with caplog.at_level(logging.WARNING):
+        rel_res = qe.prepare_relaxation_inputs(at)
+
+    # Check warning was emitted
+    assert any("No cluster environment modules specified" in record.message for record in caplog.records)
+
+    with open(rel_res["slurm_script"], "r") as f:
+        rel_content = f.read()
+
+    assert "module purge" in rel_content
+    assert "# Note: No cluster environment modules specified in configuration." in rel_content
+    assert "q-e" not in rel_content
+    assert "if module is-avail" not in rel_content
+
+    # Check warning during prepare_all_dft_inputs
+    caplog.clear()
+    at.info["sample_type"] = "franck_condon"
+    at.info["candidate_index"] = 0
+    with caplog.at_level(logging.WARNING):
+        qe.prepare_all_dft_inputs([at])
+
+    assert any("No cluster environment modules specified" in record.message for record in caplog.records)
+
+    slurm_script = os.path.join(ws, "submit_dft_pure_qe.slurm")
+    with open(slurm_script, "r") as f:
+        content = f.read()
+    assert "module purge" in content
+    assert "# Note: No cluster environment modules specified in configuration." in content
+    assert "q-e" not in content
+
 
 
 

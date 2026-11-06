@@ -190,7 +190,12 @@ class SlurmDispatcher:
         n_tasks = (n_frames + chunk_size - 1) // chunk_size
         max_idx = max(0, n_tasks - 1)
 
-        mods = self.slurm_modules if self.slurm_modules is not None else self.profile.default_modules
+        mods = self.slurm_modules if self.slurm_modules is not None else []
+        if not mods:
+            logger.warning(
+                "[!] Warning: No cluster environment modules specified ('modules' or 'slurm_modules' is empty). "
+                "Cluster jobs may fail to find required binaries unless loaded in the shell environment."
+            )
         module_lines = "\n".join([f"module load {str(m).strip()}" for m in mods if str(m).strip()])
         qos_line = f"#SBATCH --qos={self.profile.qos}" if self.profile.qos else ""
         gres_line = f"#SBATCH --gres=gpu:1" if self.profile.has_gpu else ""

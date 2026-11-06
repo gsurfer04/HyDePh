@@ -68,12 +68,7 @@ LEONARDO_BOOSTER = ClusterProfile(
     qos=None,  # Default: omit --qos so Slurm automatically uses the account's configured QoS (or boost_qos_lprod)
     gpus_per_node=4,
     cpus_per_node=32,
-    default_modules=[
-        "profile/chem-phys",
-        "q-e/7.2",
-        "cuda/11.8",
-        "openmpi/4.1.4",
-    ],
+    default_modules=[],
     gpu_type="NVIDIA A100-SXM4-64GB",
     default_cpus_per_task=8,  # 32 cores / 4 GPUs = 8 cores per GPU worker
     memory_per_node_gb=512,
@@ -87,12 +82,7 @@ LEONARDO_BOOSTER_DEBUG = ClusterProfile(
     qos="boost_qos_dbg",
     gpus_per_node=4,
     cpus_per_node=32,
-    default_modules=[
-        "profile/chem-phys",
-        "q-e/7.2",
-        "cuda/11.8",
-        "openmpi/4.1.4",
-    ],
+    default_modules=[],
     gpu_type="NVIDIA A100-SXM4-64GB",
     default_cpus_per_task=8,
     memory_per_node_gb=512,
@@ -106,12 +96,7 @@ LEONARDO_DCGP = ClusterProfile(
     qos=None,
     gpus_per_node=0,
     cpus_per_node=112,
-    default_modules=[
-        "profile/chem-phys",
-        "q-e/7.2",
-        "intel-oneapi-mkl",
-        "openmpi/4.1.4",
-    ],
+    default_modules=[],
     gpu_type=None,
     default_cpus_per_task=16,
     memory_per_node_gb=512,
