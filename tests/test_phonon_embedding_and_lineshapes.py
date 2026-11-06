@@ -270,3 +270,60 @@ def test_large_supercell_phonon_embedding(tmp_path):
     # Active displaced atom exists
     active_disps = np.linalg.norm(dr_large, axis=1)
     assert np.count_nonzero(active_disps > 1e-4) >= 1
+
+
+def test_smart_phonon_limits_scaling_with_anharmonic_peak(tmp_path):
+    """Verify that get_smart_phonon_limits dynamically scales y-axis when anharmonic peak exceeds 1.0."""
+    pristine_file = tmp_path / "pristine.xyz"
+    pristine = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[3.0, 3.0, 3.0], pbc=True)
+    import ase.io
+    ase.io.write(str(pristine_file), pristine)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "ws"),
+    )
+    engine = LineshapeEngine(cfg)
+
+    hw_grid = np.linspace(1.0, 100.0, 200)
+    s_cont = np.exp(-0.5 * ((hw_grid - 70.0) / 5.0) ** 2) * 45.0  # Peak = 45
+    s_0k_max = float(np.max(s_cont))
+    s_norm = s_cont / s_0k_max
+
+    # 1. Harmonic only: y_max should be default headroom ~ 1.18
+    xlim_harm, ylim_harm = engine.get_smart_phonon_limits(hw_grid, s_norm)
+    assert ylim_harm[0] == 0.0
+    assert ylim_harm[1] == pytest.approx(1.18, rel=1e-3)
+
+    # 2. Anharmonic with sharp thermal peak at 150 K (e.g. 165 eV^-1 -> dens = 3.66)
+    s_anh_150K = np.exp(-0.5 * ((hw_grid - 72.0) / 2.0) ** 2) * 165.0
+    anharmonic_dict = {
+        150.0: {
+            "s_anh": s_anh_150K,
+            "vdos": np.ones_like(hw_grid),
+        }
+    }
+    xlim_anh, ylim_anh = engine.get_smart_phonon_limits(
+        hw_grid, s_norm, anharmonic_dict=anharmonic_dict, s_0k_max=s_0k_max
+    )
+    expected_peak_dens = 165.0 / 45.0  # ~3.666
+    assert ylim_anh[0] == 0.0
+    # y_max should accommodate the 3.666 peak with ~15% headroom (> 4.0)
+    assert ylim_anh[1] > expected_peak_dens
+    assert ylim_anh[1] == pytest.approx(expected_peak_dens * 1.15, rel=1e-3)
+
+    # 3. User override via config
+    cfg_user = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "ws"),
+        phonon_y_min=0.0,
+        phonon_y_max=5.0,
+    )
+    engine_user = LineshapeEngine(cfg_user)
+    _, ylim_user = engine_user.get_smart_phonon_limits(
+        hw_grid, s_norm, anharmonic_dict=anharmonic_dict, s_0k_max=s_0k_max
+    )
+    assert ylim_user == (0.0, 5.0)
+

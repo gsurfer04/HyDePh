@@ -508,6 +508,8 @@ class ToolkitConfig:
     smart_axis_scaling: bool = True
     phonon_hw_min: Optional[float] = None    # meV
     phonon_hw_max: Optional[float] = None    # meV
+    phonon_y_min: Optional[float] = None
+    phonon_y_max: Optional[float] = None
     lineshape_e_min: Optional[float] = None  # meV relative to ZPL
     lineshape_e_max: Optional[float] = None  # meV relative to ZPL
     lineshape_y_min: Optional[float] = None

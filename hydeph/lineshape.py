@@ -1100,26 +1100,42 @@ class LineshapeEngine:
 
         return anharmonic_dict
 
-    def get_smart_phonon_limits(self, hw_grid, s_norm, anharmonic_dict=None):
+    def get_smart_phonon_limits(self, hw_grid, s_norm, anharmonic_dict=None, s_0k_max=None):
         """Determines optimal [x_min, x_max] and [y_min, y_max] for phonon density plots."""
-        if not self.config.smart_axis_scaling:
-            return (float(hw_grid[0]), float(hw_grid[-1])), (0.0, 1.05)
+        user_xmin = getattr(self.config, "phonon_hw_min", None)
+        user_xmax = getattr(self.config, "phonon_hw_max", None)
+        user_ymin = getattr(self.config, "phonon_y_min", None)
+        user_ymax = getattr(self.config, "phonon_y_max", None)
 
-        user_xmin = self.config.phonon_hw_min
-        user_xmax = self.config.phonon_hw_max
+        peak_y = float(np.max(s_norm)) if (s_norm is not None and len(s_norm) > 0 and np.max(s_norm) > 0) else 1.0
+        active = hw_grid[s_norm >= 0.008] if s_norm is not None else np.array([])
+
+        if anharmonic_dict:
+            ref_max = s_0k_max if (s_0k_max is not None and s_0k_max > 0) else 1.0
+            for T, data in anharmonic_dict.items():
+                s_t = data.get("s_anh")
+                if s_t is not None and len(s_t) == len(hw_grid):
+                    dens_t = s_t / ref_max
+                    peak_y = max(peak_y, float(np.max(dens_t)))
+                    active = np.concatenate([active, hw_grid[dens_t >= 0.008]])
+                vdos = data.get("vdos")
+                if vdos is not None and len(vdos) == len(hw_grid):
+                    dens_v = vdos / np.max(vdos) if np.max(vdos) > 0 else vdos
+                    peak_y = max(peak_y, float(np.max(dens_v)))
+                    active = np.concatenate([active, hw_grid[dens_v >= 0.008]])
+
+        if not self.config.smart_axis_scaling:
+            x_min = float(user_xmin) if user_xmin is not None else float(hw_grid[0])
+            x_max = float(user_xmax) if user_xmax is not None else float(hw_grid[-1])
+            y_min = float(user_ymin) if user_ymin is not None else 0.0
+            y_max = float(user_ymax) if user_ymax is not None else max(1.05, 1.05 * peak_y)
+            return (x_min, x_max), (y_min, y_max)
 
         x_min = float(user_xmin) if user_xmin is not None else 0.0
 
         if user_xmax is not None:
             x_max = float(user_xmax)
         else:
-            active = hw_grid[s_norm >= 0.008]
-            if anharmonic_dict:
-                for T, data in anharmonic_dict.items():
-                    vdos = data.get("vdos")
-                    if vdos is not None and len(vdos) == len(hw_grid):
-                        active = np.concatenate([active, hw_grid[vdos >= 0.008]])
-
             if len(active) > 0:
                 high_val = float(np.max(active))
                 pad = max(6.0, high_val * 0.06)
@@ -1134,8 +1150,8 @@ class LineshapeEngine:
             else:
                 x_max = float(hw_grid[-1])
 
-        y_min = 0.0
-        y_max = 1.18  # Headroom for legend
+        y_min = float(user_ymin) if user_ymin is not None else 0.0
+        y_max = float(user_ymax) if user_ymax is not None else max(1.18, peak_y * 1.15)
         return (x_min, x_max), (y_min, y_max)
 
     def get_smart_lineshape_limits(self, lineshape_dict, anharmonic_dict=None, active_curve_subset=None):
@@ -1269,7 +1285,9 @@ class LineshapeEngine:
             ax.fill_between(hw_grid, 0, s_norm, color='#2196F3', alpha=0.25, label=r'Harmonic $S(\hbar\omega)$ ($0\ \mathrm{K}$)')
             ax.plot(hw_grid, s_norm, color='#1976D2', lw=2.2)
 
-        hw_xlim, hw_ylim = self.get_smart_phonon_limits(hw_grid, s_norm, anharmonic_dict=anharmonic_dict)
+        hw_xlim, hw_ylim = self.get_smart_phonon_limits(
+            hw_grid, s_norm, anharmonic_dict=anharmonic_dict, s_0k_max=s_0k_max
+        )
         ax.set_xlim(hw_xlim)
         ax.set_ylim(hw_ylim)
 
@@ -1352,7 +1370,9 @@ class LineshapeEngine:
 
             ax = axs[0]
             vdos_sub = {T: anharmonic_dict[T]} if (anharmonic_dict and T in anharmonic_dict) else None
-            hw_xlim, hw_ylim = self.get_smart_phonon_limits(hw_grid, s_norm, anharmonic_dict=vdos_sub)
+            hw_xlim, hw_ylim = self.get_smart_phonon_limits(
+                hw_grid, s_norm, anharmonic_dict=vdos_sub, s_0k_max=s_0k_max
+            )
 
             if anharmonic_dict and T in anharmonic_dict:
                 s_t = anharmonic_dict[T].get("s_anh")
