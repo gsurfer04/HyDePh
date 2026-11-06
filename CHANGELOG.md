@@ -7,16 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-06
+
 ### Added
+- **HPC & Cluster Subsystem (`hydeph.hpc`)**:
+  - Implemented `ClusterProfile` models and hardware definitions for SLURM clusters (`generic_slurm`, `leonardo_booster`, `leonardo_booster_debug`, `leonardo_dcgp`).
+  - Added deterministic, user-specified module loading preserving exact library order (e.g., `profile/chem-phys` before `quantum-espresso`) without heuristic bash availability checks or unconfigured defaults.
+  - Implemented multi-GPU worker pinning (`get_pinned_worker_env`) isolating concurrent workers across physical GPUs (`CUDA_VISIBLE_DEVICES = worker_idx % gpus_per_node`) with dedicated OpenMP/MKL thread counts.
+  - Added Lustre/GPFS atomic completion markers (`mark_frame_done`, `is_frame_done`) preventing race conditions during parallel job array sweeps.
+  - Added multi-threaded finite-difference supercell Hessian evaluation via `ParallelVibrations` (`parallel_hessian = True`, `parallel_hessian_workers = 16`), reducing 2,388-displacement Hessian evaluation from ~20 minutes to < 1 minute.
+- **Decoupled Pure Quantum ESPRESSO Staged Execution**:
+  - Added `--prepare-relax` flag to pre-generate ground-state and excited-state $\Delta\text{SCF}$ input decks and standalone SLURM batch script (`submit_relaxations_pure_qe.slurm`) for compute-node offloading without requiring Python or Conda on compute nodes.
+  - Added `--prepare-dft` / `--to-stage 2` input preparation generating individual frame directories (`dft_calculations/frame_*`, `dft_calculations_es/frame_es_*`), SLURM Job Array scripts (`submit_dft_array_pure_qe.slurm` with `dft_frames_list.txt`), and multi-GPU node batch scripts (`submit_dft_pure_qe.slurm`).
+  - Added automatic calculation resumption (`--from-stage 2`, `--from-stage 4`) discovering completed `pw.out` files, ingesting converged total energies and forces, and deriving adiabatic Zero-Phonon Line and Stokes energetics directly from disk.
+- **Automated Lowest-Energy $\Delta\text{SCF}$ Excitation & Degeneracy Symmetrization**:
+  - Automatically identifies in-gap defect frontier orbitals and selects the lowest-energy optical excitation ($\min(\epsilon_{\mathrm{LUMO}} - \epsilon_{\mathrm{HOMO}})$ across spin channels) from ground-state Kohn-Sham eigenvalues when explicit band indices are omitted.
+  - Detects degenerate frontier manifolds and symmetrizes fractional occupations across both $g_{\mathrm{H}}$-fold degenerate HOMO holes and $g_{\mathrm{L}}$-fold degenerate LUMO electrons, preventing SCF charge sloshing in high-symmetry defects.
+- **Automated Jahn-Teller Detection & Symmetry-Breaking Distortion**:
+  - Automatically detects degenerate orbital manifolds ($g_{\mathrm{H}} > 1$ or $g_{\mathrm{L}} > 1$) and applies a coordinated symmetry-breaking displacement (`jahn_teller_amplitude = 0.04 Å`) prior to $\Delta\text{SCF}$ relaxation when `auto_jahn_teller_distortion = True`, resolving physical Jahn-Teller ground/excited states without manual geometry perturbation.
+- **Automated Plane-Wave Cutoff Derivation**:
+  - Added `auto_resolve_cutoffs()` in `ToolkitConfig`, automatically deriving `ecutwfc` and `ecutrho` based on system element hardness (first-row $2p$ and $3d$ transition-metal elements) and UPF pseudopotential metadata when cutoffs are omitted.
 - **4H-SiC $kk$-$\mathrm{VV}^0$ Divacancy Benchmark Reproduction**:
-  - Full-scale turnkey reproduction and validation against first-principles hybrid-DFT calculations and experimental photoluminescence spectra from Jin *et al.* (*Phys. Rev. Materials* **5**, 084603, 2021).
-  - Resolved all three attested literature phonon sideband features: Peak 1 at $-34\ \mathrm{meV}$ (breathing mode), Peak 2 at $-73\ \mathrm{meV}$ (localized defect mode), and Peak 3 at $-96\ \mathrm{meV}$ (bulk optical band edge).
-  - Preserved distinct, prominent Zero-Phonon Line (ZPL) peak at $300\ \mathrm{K}$ through $(5\times 5\times 2)$ Alkauskas large-supercell phonon embedding, eliminating artificial zone-boundary folding combs and multi-phonon replica inflation.
-  - Added digitized literature curves (`jin_et_al_digitized_kk_10K.csv`) and comparative overlay benchmarks (`hydeph_vs_jin_benchmark.png`).
+  - Turnkey reproduction and validation against hybrid-DFT calculations and experimental photoluminescence spectra from Jin *et al.* (*Phys. Rev. Materials* **5**, 084603, 2021).
+  - Accurately resolved all three literature phonon sideband features: Peak 1 at $-34\ \mathrm{meV}$ (breathing mode), Peak 2 at $-73\ \mathrm{meV}$ (localized defect mode), and Peak 3 at $-96\ \mathrm{meV}$ (bulk optical band edge).
+  - Preserved distinct Zero-Phonon Line (ZPL) peak at $300\ \mathrm{K}$ through $(5\times 5\times 2)$ Alkauskas large-supercell phonon embedding.
+  - Added digitized experimental comparison curves (`jin_et_al_digitized_kk_10K.csv`) and comparative overlay figures.
+- **Dynamic Smart Phonon Axis Scaling & Custom Limits**:
+  - Implemented dynamic y-axis scaling in `LineshapeEngine.get_smart_phonon_limits()` ($y_{\max} = \max(1.18, \text{peak\_y} \times 1.15)$), preventing truncation of sharp localized vibronic resonance peaks in multi-temperature spectral density plots.
+  - Added `phonon_y_min` and `phonon_y_max` configuration parameters for user-defined phonon plot axis limits.
+- **Generalized HPC Documentation**:
+  - Replaced cluster-specific guide with generalized `docs/hpc_guide.md`, detailing SLURM job array execution, multi-GPU pinning, decoupled staged workflows, and CINECA Leonardo as a reference architecture.
+
+### Changed
+- Replaced heuristic `if module is-avail ...` bash loops in generated SLURM scripts with deterministic `format_slurm_module_lines()`.
+- Emptied `default_modules = []` in cluster profiles; modules must be explicitly declared under `modules:` (or aliases `slurm_modules:`, `cluster_modules:`, `hpc_modules:`).
+- Added explicit logger warnings when cluster script generation is invoked with an empty module list.
+- Calibrated default `max_test_force_rmse_eV_A` quality control threshold to `0.15 eV/Å`.
+- Applied TEND prose polishing across documentation, docstrings, error messages, and script templates, pruning throat-clearing, AI clichés, and code-echoing comments.
+- Synchronized configuration reference defaults between documentation and `ToolkitConfig` dataclass defaults (`temperatures`, `pseudo_dir`, `n_procs_qe`, `anharmonic_md_steps`).
 
 ### Fixed
-- **Large-Supercell Embedding in Anharmonic Lineshape Engine**:
-  - Resolved atomic shape broadcasting mismatch when passing embedded ground-state structures to finite-temperature anharmonic MD by updating `at_es` in the embedded coordinate system.
+- **Atomic Shape Broadcasting in Anharmonic Lineshape Engine**:
+  - Resolved shape broadcasting mismatch when passing embedded ground-state structures to finite-temperature anharmonic MD by updating `at_es` in the embedded coordinate system.
+- **Inverted Excited-State Potential Curvature**:
+  - Added defensive validation and harmonic curvature recovery in `ConfigurationCoordinateEngine` when noisy DFT samples produce inverted or negative excited-state relaxation energies.
+- **Purged Nonexistent `q-e` Module**:
+  - Removed all occurrences of the nonexistent module name `q-e` across codebase, tests, and documentation.
+- **SLURM Job Array Path Resolution**:
+  - Made `dft_frames_list.txt` and frame directory resolution in SLURM runner scripts robust against submit directory and workspace directory nesting.
+- **NEP Executable Discovery**:
+  - Extended GPUMD `nep` binary search to inspect user home directory, `$WORK`, and active Conda environment bin paths.
 
 ## [0.7.0] - 2026-10-27
 
