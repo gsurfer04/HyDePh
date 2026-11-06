@@ -284,7 +284,8 @@ def test_smart_phonon_limits_scaling_with_anharmonic_peak(tmp_path):
         foundation_potential_path=str(tmp_path / "pot.txt"),
         workspace_dir=str(tmp_path / "ws"),
     )
-    engine = LineshapeEngine(cfg)
+    mock_calc = MockHarmonicCalc(k=5.0)
+    engine = LineshapeEngine(cfg, mock_calc)
 
     hw_grid = np.linspace(1.0, 100.0, 200)
     s_cont = np.exp(-0.5 * ((hw_grid - 70.0) / 5.0) ** 2) * 45.0  # Peak = 45
@@ -321,7 +322,7 @@ def test_smart_phonon_limits_scaling_with_anharmonic_peak(tmp_path):
         phonon_y_min=0.0,
         phonon_y_max=5.0,
     )
-    engine_user = LineshapeEngine(cfg_user)
+    engine_user = LineshapeEngine(cfg_user, mock_calc)
     _, ylim_user = engine_user.get_smart_phonon_limits(
         hw_grid, s_norm, anharmonic_dict=anharmonic_dict, s_0k_max=s_0k_max
     )
