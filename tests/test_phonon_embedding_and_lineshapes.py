@@ -308,9 +308,9 @@ def test_smart_phonon_limits_scaling_with_anharmonic_peak(tmp_path):
     xlim_anh, ylim_anh = engine.get_smart_phonon_limits(
         hw_grid, s_norm, anharmonic_dict=anharmonic_dict, s_0k_max=s_0k_max
     )
-    expected_peak_dens = 165.0 / 45.0  # ~3.666
+    expected_peak_dens = float(np.max(s_anh_150K)) / s_0k_max
     assert ylim_anh[0] == 0.0
-    # y_max should accommodate the 3.666 peak with ~15% headroom (> 4.0)
+    # y_max should accommodate the peak with ~15% headroom (> 4.0)
     assert ylim_anh[1] > expected_peak_dens
     assert ylim_anh[1] == pytest.approx(expected_peak_dens * 1.15, rel=1e-3)
 
