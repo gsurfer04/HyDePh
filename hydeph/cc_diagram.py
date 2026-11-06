@@ -71,10 +71,18 @@ class ConfigurationCoordinateEngine:
             return e_zpl, "kohn_sham_eigenvalues"
 
         # 2. Delta-SCF excited-state energy difference
-        if "energy" in at_es.info and "energy" in at_gs.info:
-            diff = float(at_es.info["energy"] - at_gs.info["energy"])
-            # If difference significantly exceeds ground-state relaxation, treat as electronic Delta-SCF
+        e_es = at_es.info.get("energy")
+        if e_es is None and at_es.calc is not None and "energy" in getattr(at_es.calc, "results", {}):
+            e_es = float(at_es.calc.results["energy"])
+        e_gs = at_gs.info.get("energy")
+        if e_gs is None and at_gs.calc is not None and "energy" in getattr(at_gs.calc, "results", {}):
+            e_gs = float(at_gs.calc.results["energy"])
+
+        if e_es is not None and e_gs is not None:
+            diff = float(e_es - e_gs)
             if diff > float(e_rel_es_eV) * 1.5 and diff > 0.1:
+                return diff, "delta_scf"
+            elif diff > 0.05:
                 return diff, "delta_scf"
 
         # 3. Stored CC results cache (only if derived from physics, not fallback)

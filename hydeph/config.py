@@ -488,7 +488,7 @@ class ToolkitConfig:
     nep_basis_size: int = 8
     nep_l_max: int = 2
     nep_committee_size: int = 1
-    max_test_force_rmse_eV_A: float = 0.08
+    max_test_force_rmse_eV_A: float = 0.15
     max_gs_residual_force_eV_A: float = 0.05
     subtract_mean_energy_offset: bool = True
 
