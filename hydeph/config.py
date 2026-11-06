@@ -609,15 +609,29 @@ class ToolkitConfig:
             )
             self.zpl_energy_eV = None
 
+        # Normalize slurm_modules
+        if isinstance(self.slurm_modules, str):
+            if "," in self.slurm_modules:
+                self.slurm_modules = [m.strip() for m in self.slurm_modules.split(",") if m.strip()]
+            else:
+                self.slurm_modules = [m.strip() for m in self.slurm_modules.split() if m.strip()]
+        elif isinstance(self.slurm_modules, (list, tuple)):
+            self.slurm_modules = [str(m).strip() for m in self.slurm_modules if str(m).strip()]
+
         # Resolve HPC & Leonardo cluster defaults
-        if str(self.hpc_scheduler).lower() == "slurm" or str(self.cluster_profile).lower() != "auto":
+        if (
+            str(self.hpc_scheduler).lower() == "slurm"
+            or str(self.cluster_profile).lower() != "auto"
+            or self.prepare_relaxation_inputs
+            or self.prepare_dft_inputs
+        ):
             from .hpc.cluster_profiles import get_cluster_profile
             prof = get_cluster_profile(self.cluster_profile)
-            if self.slurm_partition is None:
+            if self.slurm_partition is None and prof:
                 self.slurm_partition = prof.partition
-            if self.slurm_qos is None and prof.qos:
+            if self.slurm_qos is None and prof and prof.qos:
                 self.slurm_qos = prof.qos
-            if not self.slurm_modules and prof.default_modules:
+            if not self.slurm_modules and prof and prof.default_modules:
                 self.slurm_modules = list(prof.default_modules)
 
         if self.parallel_hessian and self.parallel_hessian_workers is None:
@@ -672,6 +686,11 @@ class ToolkitConfig:
             "prepare_frames": "prepare_dft_inputs",
             "prepare_relax": "prepare_relaxation_inputs",
             "prepare_relaxation": "prepare_relaxation_inputs",
+            "modules": "slurm_modules",
+            "cluster_modules": "slurm_modules",
+            "hpc_modules": "slurm_modules",
+            "hpc_account": "slurm_account",
+            "account": "slurm_account",
         }
         normalized_data = {alias_map.get(k, k): v for k, v in data.items()}
 

@@ -127,6 +127,22 @@ def inspect_upf_metadata(upf_path: str) -> Dict[str, Any]:
     return info
 
 
+def format_slurm_module_lines(modules: Optional[List[str]] = None, purge: bool = True) -> str:
+    """Formats deterministic bash module purge and load lines in exact specified order without heuristic loops.
+
+    Preserves exact user-defined library loading order (e.g. profile/chem-phys before quantum-espresso).
+    """
+    lines = []
+    if purge:
+        lines.append("module purge")
+    if modules:
+        for m in modules:
+            m_clean = str(m).strip()
+            if m_clean:
+                lines.append(f"module load {m_clean}")
+    return "\n".join(lines)
+
+
 _PARITY_WARNED_KEYS = set()
 _PARITY_LOCK = threading.Lock()
 _UPF_RESOLVE_LOCK = threading.Lock()
@@ -2302,6 +2318,25 @@ class QERunner:
         logger.info(f"\n[+] DFT Labeling Complete: {len(final_labeled)} total frames ({summary_str}) -> {out_xyz}")
         return final_labeled
 
+    def _get_slurm_modules(self) -> List[str]:
+        """Resolves environment modules configured for cluster SLURM scripts in exact user-defined order."""
+        mods = getattr(self.config, "slurm_modules", None)
+        if mods:
+            if isinstance(mods, str):
+                if "," in mods:
+                    return [m.strip() for m in mods.split(",") if m.strip()]
+                return [m.strip() for m in mods.split() if m.strip()]
+            return [str(m).strip() for m in mods if str(m).strip()]
+        # Fallback to cluster profile default modules
+        try:
+            from .hpc.cluster_profiles import get_cluster_profile
+            prof = get_cluster_profile(getattr(self.config, "cluster_profile", "leonardo_booster"))
+            if prof and prof.default_modules:
+                return list(prof.default_modules)
+        except Exception:
+            pass
+        return ["profile/chem-phys", "q-e/7.2", "cuda/11.8", "openmpi/4.1.4"]
+
     def prepare_relaxation_inputs(
         self,
         defect_sc: Atoms,
@@ -2458,7 +2493,19 @@ class QERunner:
 
         slurm_path = None
         if write_slurm_scripts:
-            acct = getattr(self.config, "hpc_account", "IscrC_HyDePh") or "IscrC_HyDePh"
+            acct = (
+                getattr(self.config, "slurm_account", None)
+                or getattr(self.config, "hpc_account", None)
+                or os.environ.get("CINECA_ACCOUNT", os.environ.get("SLURM_ACCOUNT", "cin_staff"))
+            )
+            part = getattr(self.config, "slurm_partition", None) or "boost_usr_prod"
+            qos = getattr(self.config, "slurm_qos", None)
+            qos_line = f"#SBATCH --qos={qos}\n" if qos else ""
+            nodes = getattr(self.config, "slurm_nodes", 1) or 1
+            gpus = getattr(self.config, "slurm_gpus_per_node", 4) or 4
+            cpus_per_task = getattr(self.config, "slurm_cpus_per_task", 8) or 8
+            module_block = format_slurm_module_lines(self._get_slurm_modules())
+
             slurm_content = f"""#!/bin/bash
 # ==============================================================================
 #  HyDePh Decoupled HPC Relaxation Launcher (Pure Quantum ESPRESSO)
@@ -2469,11 +2516,11 @@ class QERunner:
 # ==============================================================================
 #SBATCH --job-name=hydeph_relax
 #SBATCH --account={acct}
-#SBATCH --partition=boost_usr_prod
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:4
+#SBATCH --partition={part}
+{qos_line}#SBATCH --nodes={nodes}
+#SBATCH --ntasks-per-node={gpus}
+#SBATCH --cpus-per-task={cpus_per_task}
+#SBATCH --gres=gpu:{gpus}
 #SBATCH --time=04:00:00
 #SBATCH --output=hydeph_relax_%j.out
 #SBATCH --error=hydeph_relax_%j.err
@@ -2488,15 +2535,7 @@ echo " [HPC Relaxation] Running on $(hostname) at $(date)"
 echo " Job ID: $SLURM_JOB_ID | Submit Dir: $WORK_DIR"
 echo "=============================================================================="
 
-module purge
-if module is-avail quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas 2>/dev/null; then
-    module load quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas
-    module load cuda/12.6
-else
-    module load profile/chem-phys 2>/dev/null || true
-    module load q-e/7.2 2>/dev/null || true
-    module load cuda/11.8 2>/dev/null || true
-fi
+{module_block}
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
@@ -2753,23 +2792,33 @@ echo "==========================================================================
 
         if write_slurm_scripts:
             # 1. Standalone 4-GPU Slurm script for Leonardo Booster
-            acct = getattr(self.config, "slurm_account", "") or os.environ.get("CINECA_ACCOUNT", "cin_staff")
+            acct = (
+                getattr(self.config, "slurm_account", None)
+                or getattr(self.config, "hpc_account", None)
+                or os.environ.get("CINECA_ACCOUNT", os.environ.get("SLURM_ACCOUNT", "cin_staff"))
+            )
+            part = getattr(self.config, "slurm_partition", None) or "boost_usr_prod"
+            qos = getattr(self.config, "slurm_qos", None)
+            qos_line = f"#SBATCH --qos={qos}\n" if qos else ""
+            nodes = getattr(self.config, "slurm_nodes", 1) or 1
+            gpus = getattr(self.config, "slurm_gpus_per_node", 4) or 4
+            cpus_per_task = getattr(self.config, "slurm_cpus_per_task", 8) or 8
+            module_block = format_slurm_module_lines(self._get_slurm_modules())
+
             slurm_content = f"""#!/bin/bash
 # ==============================================================================
 # Standalone Quantum ESPRESSO DFT Runner on CINECA Leonardo Booster
 # ==============================================================================
-# Executes candidate frame DFT calculations across 4x NVIDIA A100 GPUs.
+# Executes candidate frame DFT calculations across {gpus}x NVIDIA GPUs.
 # This script does NOT require Python or any Conda environment on compute nodes!
 # ==============================================================================
 #SBATCH --job-name=hydeph_pw_dft
 #SBATCH --account={acct}
-#SBATCH --partition=boost_usr_prod
-# Note: --qos is omitted by default so Slurm uses your account default QoS (e.g. boost_qos_lprod).
-# For short debug jobs (<= 30 min), use: #SBATCH --qos=boost_qos_dbg
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:4
+#SBATCH --partition={part}
+{qos_line}#SBATCH --nodes={nodes}
+#SBATCH --ntasks-per-node={gpus}
+#SBATCH --cpus-per-task={cpus_per_task}
+#SBATCH --gres=gpu:{gpus}
 #SBATCH --time=04:00:00
 #SBATCH --output=hydeph_dft_%j.out
 #SBATCH --error=hydeph_dft_%j.err
@@ -2797,16 +2846,7 @@ echo " Host: $(hostname) | Job ID: $SLURM_JOB_ID | Start: $(date)"
 echo " Working Dir: $PWD"
 echo "=============================================================================="
 
-module purge
-# Standard CINECA Leonardo Booster modules for GPU-accelerated Quantum ESPRESSO
-if module is-avail quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas 2>/dev/null; then
-    module load quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas
-    module load cuda/12.6
-else
-    module load profile/chem-phys
-    module load q-e/7.2
-    module load cuda/11.8
-fi
+{module_block}
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
@@ -2913,10 +2953,10 @@ echo "==========================================================================
 # ==============================================================================
 #SBATCH --job-name=hydeph_pw_array
 #SBATCH --account={acct}
-#SBATCH --partition=boost_usr_prod
-#SBATCH --nodes=1
+#SBATCH --partition={part}
+{qos_line}#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --gres=gpu:1
 #SBATCH --time=01:00:00
 #SBATCH --output=hydeph_array_%A_%a.out
@@ -2933,16 +2973,7 @@ echo " Job ID: $SLURM_ARRAY_JOB_ID | Task ID: $SLURM_ARRAY_TASK_ID"
 echo " Submit Dir: $WORK_DIR"
 echo "=============================================================================="
 
-module purge
-# Standard CINECA Leonardo Booster modules for GPU-accelerated Quantum ESPRESSO
-if module is-avail quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas 2>/dev/null; then
-    module load quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas
-    module load cuda/12.6
-else
-    module load profile/chem-phys
-    module load q-e/7.2
-    module load cuda/11.8
-fi
+{module_block}
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK

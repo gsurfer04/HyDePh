@@ -309,6 +309,7 @@ def test_prepare_all_dft_inputs_and_slurm_scripts(tmp_path):
     with open(slurm_script, "r") as f:
         content = f.read()
     assert "module load q-e/7.2" in content
+    assert "if module is-avail" not in content
     assert "CUDA_VISIBLE_DEVICES" in content
     assert "pw.x" in content
     # No python invocation required for execution on compute node!
@@ -798,6 +799,82 @@ def test_ingest_without_candidate_frames_auto_discovery(tmp_path):
     labeled_gs, labeled_es = qe.ingest_completed_calculations(None)
     assert len(labeled_gs) == 1
     assert os.path.isfile(os.path.join(ws, "labeled_dft_frames.xyz"))
+
+
+def test_manual_cluster_module_configuration_and_order(tmp_path):
+    """Verify that cluster modules are manually configured in exact order without heuristic if loops."""
+    ws = str(tmp_path / "ws_manual_modules")
+    os.makedirs(ws, exist_ok=True)
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    c_upf = os.path.join(pseudo_dir, "C.upf")
+    with open(c_upf, "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    pristine_xyz = str(tmp_path / "pristine.xyz")
+    at = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    import ase.io
+    ase.io.write(pristine_xyz, at)
+
+    custom_modules = [
+        "profile/chem-phys",
+        "quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas",
+        "cuda/12.6",
+    ]
+
+    # Test dictionary / yaml construction using 'modules' alias
+    cfg = ToolkitConfig.from_dict({
+        "pristine_cell_path": pristine_xyz,
+        "workspace_dir": ws,
+        "pseudo_dir": pseudo_dir,
+        "pseudopotentials": {"C": "C.upf"},
+        "modules": custom_modules,
+        "slurm_account": "IscrC_Test",
+        "slurm_partition": "boost_usr_prod",
+        "spin_multiplicity": 1,
+    })
+
+    assert cfg.slurm_modules == custom_modules
+
+    qe = QERunner(cfg, pw_exe="pw.x")
+
+    # 1. Test relaxation launcher script
+    rel_res = qe.prepare_relaxation_inputs(at)
+    rel_slurm = rel_res["slurm_script"]
+    assert os.path.isfile(rel_slurm)
+    with open(rel_slurm, "r") as f:
+        rel_content = f.read()
+
+    assert "if module is-avail" not in rel_content
+    assert "module purge" in rel_content
+    assert "module load profile/chem-phys" in rel_content
+    assert "module load quantum-espresso/7.4.1--hpcx-mpi--2.19--nvhpc--24.5-openblas" in rel_content
+    assert "module load cuda/12.6" in rel_content
+
+    # Strict ordering check: profile/chem-phys must be loaded before quantum-espresso, and QE before cuda
+    idx_purge = rel_content.index("module purge")
+    idx_prof = rel_content.index("module load profile/chem-phys")
+    idx_qe = rel_content.index("module load quantum-espresso/7.4.1")
+    idx_cuda = rel_content.index("module load cuda/12.6")
+    assert idx_purge < idx_prof < idx_qe < idx_cuda
+
+    # 2. Test candidate DFT scripts (standalone and array)
+    at.info["sample_type"] = "franck_condon"
+    at.info["candidate_index"] = 0
+    dft_res = qe.prepare_candidate_dft_inputs([at])
+    dft_slurm = dft_res["slurm_script"]
+    array_slurm = dft_res["array_script"]
+
+    for script_path in (dft_slurm, array_slurm):
+        assert os.path.isfile(script_path)
+        with open(script_path, "r") as f:
+            content = f.read()
+        assert "if module is-avail" not in content
+        assert "module purge" in content
+        p_idx = content.index("module load profile/chem-phys")
+        q_idx = content.index("module load quantum-espresso/7.4.1")
+        c_idx = content.index("module load cuda/12.6")
+        assert p_idx < q_idx < c_idx
 
 
 

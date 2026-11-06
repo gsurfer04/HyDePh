@@ -141,6 +141,7 @@ class SlurmDispatcher:
         profile: Optional[ClusterProfile] = None,
         account: Optional[str] = None,
         workspace_dir: str = "./hydeph_run",
+        slurm_modules: Optional[List[str]] = None,
     ):
         self.profile = profile or get_cluster_profile("leonardo_booster")
         self.account = (
@@ -150,6 +151,7 @@ class SlurmDispatcher:
             or "cin_staff"
         )
         self.workspace_dir = os.path.abspath(workspace_dir)
+        self.slurm_modules = list(slurm_modules) if slurm_modules is not None else None
 
     def generate_job_array_script(
         self,
@@ -188,7 +190,8 @@ class SlurmDispatcher:
         n_tasks = (n_frames + chunk_size - 1) // chunk_size
         max_idx = max(0, n_tasks - 1)
 
-        module_lines = "\n".join([f"module load {m}" for m in self.profile.default_modules])
+        mods = self.slurm_modules if self.slurm_modules is not None else self.profile.default_modules
+        module_lines = "\n".join([f"module load {str(m).strip()}" for m in mods if str(m).strip()])
         qos_line = f"#SBATCH --qos={self.profile.qos}" if self.profile.qos else ""
         gres_line = f"#SBATCH --gres=gpu:1" if self.profile.has_gpu else ""
 
