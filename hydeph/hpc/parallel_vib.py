@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import os
-import sys
 import copy
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, List, Dict, Any, Tuple
-import numpy as np
+from typing import List, Any, Tuple
 from ase import Atoms
 from ase.vibrations import Vibrations
 from ase.parallel import world

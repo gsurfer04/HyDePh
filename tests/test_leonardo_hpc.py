@@ -10,11 +10,8 @@ from ase.vibrations import Vibrations
 
 from hydeph.config import ToolkitConfig
 from hydeph.hpc.cluster_profiles import (
-    ClusterProfile,
     LEONARDO_BOOSTER,
-    LEONARDO_BOOSTER_DEBUG,
     LEONARDO_DCGP,
-    GENERIC_SLURM,
     get_cluster_profile,
     detect_cluster_environment,
 )
@@ -442,7 +439,6 @@ def test_run_pipeline_to_stage(tmp_path):
 
 def test_prepare_relaxation_inputs(tmp_path):
     """Verify prepare_relaxation_inputs generates gs_relax, es_relax, and SLURM runner script."""
-    from hydeph.qe_runner import QERunner
     from hydeph.defect_builder import DefectBuilder
 
     ws = str(tmp_path / "ws_relax_prep")
@@ -614,9 +610,9 @@ def test_prepare_all_dft_inputs_and_array_script(tmp_path):
     with open(res["list_file"], "r") as f:
         lines = [line.strip() for line in f if line.strip()]
     assert len(lines) == 6
-    assert all("\\" not in l for l in lines)
-    assert any("dft_calculations/frame_" in l for l in lines)
-    assert any("dft_calculations_es/frame_es_" in l for l in lines)
+    assert all("\\" not in entry for entry in lines)
+    assert any("dft_calculations/frame_" in entry for entry in lines)
+    assert any("dft_calculations_es/frame_es_" in entry for entry in lines)
 
     # Verify array script contains exact bounds
     with open(res["array_script"], "r") as f:
@@ -869,6 +865,7 @@ def test_manual_cluster_module_configuration_and_order(tmp_path):
     at.info["sample_type"] = "franck_condon"
     at.info["candidate_index"] = 0
     dft_res = qe.prepare_all_dft_inputs([at])
+    assert dft_res["n_gs_frames"] == 1
     dft_slurm = os.path.join(ws, "submit_dft_pure_qe.slurm")
     array_slurm = os.path.join(ws, "submit_dft_array_pure_qe.slurm")
 

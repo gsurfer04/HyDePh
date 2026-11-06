@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import shutil
 import argparse
 import logging
 from typing import Optional, Dict, Any, List, Set, Union
@@ -364,18 +365,18 @@ def run_pipeline(
         total_dft = n_gs + n_es
         array_max_idx = max(0, total_dft - 1)
 
-        logger.info(f"\n[+] Pipeline stopped after Stage 2 as requested.")
+        logger.info("\n[+] Pipeline stopped after Stage 2 as requested.")
         logger.info("=" * 78)
         logger.info("      NEXT STEPS FOR DECOUPLED HPC DFT CALCULATIONS (STAGE 2/3):")
         logger.info("=" * 78)
         logger.info(f"Generated {n_gs} GS and {n_es} ES Quantum ESPRESSO input decks.")
         logger.info("1. Submit pure Quantum ESPRESSO calculations to the compute nodes:")
-        logger.info(f"   • High-throughput SLURM Job Array (Recommended):")
+        logger.info("   • High-throughput SLURM Job Array (Recommended):")
         logger.info(f"     sbatch --array=0-{array_max_idx}%16 submit_dft_array_pure_qe.slurm")
-        logger.info(f"   • Standalone batch job (4 A100 GPUs):")
-        logger.info(f"     sbatch submit_dft_pure_qe.slurm")
-        logger.info(f"   • Debug queue (fast <= 30 min run):")
-        logger.info(f"     sbatch --qos=boost_qos_dbg submit_dft_pure_qe.slurm")
+        logger.info("   • Standalone batch job (4 A100 GPUs):")
+        logger.info("     sbatch submit_dft_pure_qe.slurm")
+        logger.info("   • Debug queue (fast <= 30 min run):")
+        logger.info("     sbatch --qos=boost_qos_dbg submit_dft_pure_qe.slurm")
         logger.info("   Runs standalone pw.x on compute nodes (no Python environment required).")
         logger.info("")
         logger.info("2. Once DFT calculations complete, resume pipeline execution on login node / WSL:")

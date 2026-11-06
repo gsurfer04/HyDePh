@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import os
-import sys
 import json
 import time
 import socket
 import logging
-from typing import Optional, Dict, Any, List, Tuple
-import ase.io
-from ase import Atoms
+from typing import Optional, Dict, Any, List
 
 from .cluster_profiles import ClusterProfile, get_cluster_profile
 
@@ -198,7 +195,7 @@ class SlurmDispatcher:
             )
         module_lines = "\n".join([f"module load {str(m).strip()}" for m in mods if str(m).strip()])
         qos_line = f"#SBATCH --qos={self.profile.qos}" if self.profile.qos else ""
-        gres_line = f"#SBATCH --gres=gpu:1" if self.profile.has_gpu else ""
+        gres_line = "#SBATCH --gres=gpu:1" if self.profile.has_gpu else ""
 
         script_content = f"""#!/bin/bash
 # ==============================================================================

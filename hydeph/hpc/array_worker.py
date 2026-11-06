@@ -8,7 +8,6 @@ import argparse
 import logging
 from typing import Optional, List
 import ase.io
-from ase import Atoms
 
 from ..config import ToolkitConfig
 from ..qe_runner import QERunner
@@ -53,7 +52,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     target_frames = list(range(start_idx, end_idx))
-    logger.info(f"[hpc worker] Task ID {task_id} processing frame indices: {target_frames}")
+    logger.info(f"[hpc worker] Task ID {task_id} processing frame indices: {target_frames} of {total_frames}")
 
     qe = QERunner(
         cfg,
