@@ -66,6 +66,7 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = [
-    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:ase",
+    "ignore:Setting the shape on a NumPy array has been deprecated.*:DeprecationWarning",
+    "ignore:invalid value encountered in divide:RuntimeWarning:ase",
 ]
 

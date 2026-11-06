@@ -52,6 +52,7 @@ def test_pipeline_hybrid_refinement_executes_cleanly(tmp_path):
         temperatures=[10.0],
         enable_anharmonic=False,
         plot_configuration_coordinate=True,
+        zpl_energy_eV=1.925,
     )
 
     at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[4, 4, 4], pbc=True)
@@ -67,6 +68,13 @@ def test_pipeline_hybrid_refinement_executes_cleanly(tmp_path):
     labeled_frame.info["energy"] = -100.0
     labeled_frame.info["dft_gap_eV"] = 2.0
 
+    labeled_frame_2 = at_gs.copy()
+    labeled_frame_2.info["sample_type"] = "core_rattle"
+    labeled_frame_2.info["energy"] = -99.8
+    labeled_frame_2.info["dft_gap_eV"] = 2.0
+
+    frames_dataset = [labeled_frame, labeled_frame_2]
+
     with patch("hydeph.pipeline.DefectBuilder") as mock_builder_cls, \
          patch("hydeph.pipeline.FrameSampler") as mock_sampler_cls, \
          patch("hydeph.pipeline.QERunner") as mock_qe_cls, \
@@ -80,16 +88,16 @@ def test_pipeline_hybrid_refinement_executes_cleanly(tmp_path):
         builder_instance.generate_excited_state_geometry.return_value = (at_es, 0.5)
 
         sampler_instance = mock_sampler_cls.return_value
-        sampler_instance.assemble_candidate_dataset.return_value = [labeled_frame]
+        sampler_instance.assemble_candidate_dataset.return_value = frames_dataset
 
         qe_instance = mock_qe_cls.return_value
-        qe_instance.label_all_frames.return_value = [labeled_frame]
-        qe_instance.label_fc_excited_state.return_value = [labeled_frame]
-        qe_instance.label_excited_state_frames.return_value = [labeled_frame]
+        qe_instance.label_all_frames.return_value = frames_dataset
+        qe_instance.label_fc_excited_state.return_value = frames_dataset
+        qe_instance.label_excited_state_frames.return_value = frames_dataset
         qe_instance.last_failed_entries = []
 
         trainer_instance = mock_trainer_cls.return_value
-        trainer_instance.compute_delta_dataset.return_value = [labeled_frame]
+        trainer_instance.compute_delta_dataset.return_value = frames_dataset
         trainer_instance.train_delta_nep.return_value = str(tmp_path / "mock_delta.txt")
 
         summary = run_pipeline(cfg)

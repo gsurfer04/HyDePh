@@ -410,7 +410,8 @@ def test_configuration_coordinate_engine(tmp_path):
     at_gs_auto = at_gs.copy()
     at_gs_auto.info["dft_gap_eV"] = 2.50
     engine_auto = ConfigurationCoordinateEngine(cfg_auto, mock_calc)
-    res_auto = engine_auto.calculate_cc_curve(at_gs_auto, at_es)
+    with pytest.warns(UserWarning, match="Auto-derived ZPL energy"):
+        res_auto = engine_auto.calculate_cc_curve(at_gs_auto, at_es)
     assert res_auto["zpl_source"] == "kohn_sham_eigenvalues"
     expected_auto_zpl = 2.50 - expected_erel
     assert pytest.approx(res_auto["e_zpl_eV"], rel=1e-3) == expected_auto_zpl
@@ -424,7 +425,8 @@ def test_configuration_coordinate_engine(tmp_path):
     )
     assert cfg_zero.zpl_energy_eV is None
     engine_zero = ConfigurationCoordinateEngine(cfg_zero, mock_calc)
-    res_zero = engine_zero.calculate_cc_curve(at_gs_auto, at_es, zpl_energy_eV=0)
+    with pytest.warns(UserWarning, match="Auto-derived ZPL energy"):
+        res_zero = engine_zero.calculate_cc_curve(at_gs_auto, at_es, zpl_energy_eV=0)
     assert res_zero["zpl_source"] == "kohn_sham_eigenvalues"
     assert pytest.approx(res_zero["e_zpl_eV"], rel=1e-3) == expected_auto_zpl
 
