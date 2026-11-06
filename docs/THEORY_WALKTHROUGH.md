@@ -88,7 +88,7 @@ where $L$ is the supercell dimension and $\alpha_{\mathrm{el}}$ is the elastic d
 - **Compact covalent crystals** ($a \approx 3.5\text{--}4.5\ \text{Å}$): `(3, 3, 3)` for diamond ($215$ atoms, $L = 10.72\ \text{Å}$) or `(3, 3, 2)` for 4H-SiC ($142$ atoms, $L \approx 9.2\text{--}10.1\ \text{Å}$).
 - **Large-lattice ionic crystals** ($a > 5.5\ \text{Å}$): `(2, 2, 2)` for rocksalt alkali halides such as NaCl ($63$ atoms, $L = 11.38\ \text{Å}$).
 
-[`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around the defect cell, locates the defect site via minimum-image coordinate matching, and optimizes the Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) equilibrium geometries. Using minimum-image displacements $\Delta \mathbf{R}_{\mathrm{MIC}}$, these define the Franck-Condon displacement vector and total mass-weighted configurational displacement [5]:
+[`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around the defect cell, locates the defect site via minimum-image coordinate matching, and optimizes the Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) equilibrium geometries (`ground_state_relax_method = "auto" | "foundation" | "dft"`). When a degenerate frontier manifold is detected ($g_{\mathrm{H}} > 1$ or $g_{\mathrm{L}} > 1$) and `auto_jahn_teller_distortion = True`, HyDePh applies a symmetry-breaking displacement (`jahn_teller_amplitude`) prior to $\Delta\text{SCF}$ relaxation to lift electronic degeneracy. Using minimum-image displacements $\Delta \mathbf{R}_{\mathrm{MIC}}$, the relaxed structures define the Franck-Condon displacement vector and total mass-weighted configurational displacement [5]:
 
 $$
 \Delta \mathbf{R}_i = \mathrm{MIC}(\mathbf{R}_{\mathrm{ES}, i} - \mathbf{R}_{\mathrm{GS}, i}), \qquad \Delta Q = \sqrt{\sum_{i=1}^N M_i \vert \Delta \mathbf{R}_i \vert^2}
@@ -136,13 +136,13 @@ $$
 
 #### (A) Ground-State Rigor & Cutoff Verification
 - **Fixed Occupations**: Gapped defect supercells default to `occupations = 'fixed'` with explicit integer spin magnetization `tot_magnetization` (and strict spin-parity verification against total valence electron count $N_e$) to prevent artificial metallic smearing across degenerate defect states.
-- **Size-Scaled Convergence & Cutoffs**: The SCF threshold `conv_thr` scales with supercell size ($10^{-10}\ \text{Ry/atom}$) to ensure clean Hellmann-Feynman forces, while UPF pseudopotential headers are automatically inspected for norm-conserving vs. ultrasoft/PAW metadata and recommended plane-wave cutoffs (`ecutwfc`, `ecutrho`).
+- **Size-Scaled Convergence & Automatic Cutoffs**: The SCF threshold `conv_thr` scales with supercell size ($10^{-10}\ \text{Ry/atom}$) to ensure accurate Hellmann-Feynman forces. When `ecutwfc` and `ecutrho` are omitted, [`auto_resolve_cutoffs`](../hydeph/config.py) derives cutoffs from element hardness (first-row $2p$ and $3d$ transition-metal elements) and UPF header metadata (`is_norm_conserving`, `suggested_cutoff_wfc`, `suggested_cutoff_rho`).
 - **Hybrid Functionals**: Supports semilocal (PBE) as well as hybrid exchange-correlation functionals (`input_dft = 'HSE06'` or `'PBE0'`, `exx_fraction`, `nqx1..3`) so that $\Delta$-NEP models can be trained directly on hybrid-DFT forces and energetics.
 
 #### (B) Constrained $\Delta$SCF Optical Excited States
 By default (`excited_state_method = "delta_scf"`, `paired_delta_nep = True`), HyDePh labels the optical excited-state manifold using constrained orbital occupations (`occupations = 'from_input'`) [6, 8, 23]:
-1. **Automated In-Gap Orbital Detection**: [`parse_qe_band_gap`](../hydeph/qe_runner.py) inspects the ground-state Kohn-Sham eigenvalues at $\mathbf{R}_{\mathrm{GS}}$ to identify the highest occupied defect orbital ($\mathrm{HOMO}$, band $b_{\mathrm{H}}$) and lowest unoccupied defect orbital ($\mathrm{LUMO}$, band $b_{\mathrm{L}}$) within the active spin channel (`delta_scf_spin_channel`).
-2. **Degenerate LUMO Symmetrization**: For high-symmetry defects where promoting an electron into a degenerate $e$-doublet or $t_2$-triplet LUMO (e.g., the ${}^3E$ excited state of Diamond $\mathrm{NV}^-$ or 4H-SiC $kk$-$\mathrm{VV}^0$) would cause SCF charge sloshing, [`build_delta_scf_occupations`](../hydeph/qe_runner.py) distributes the promoted electron equally across the $g_{\mathrm{L}}$-fold degenerate LUMO manifold ($f_{b_{\mathrm{H}}} = 0$, $f_{b_{\mathrm{L}} + m} = 1/g_{\mathrm{L}}$ for $m = 0, \dots, g_{\mathrm{L}}-1$).
+1. **Automated Lowest-Energy Excitation & Degeneracy Detection**: [`parse_qe_band_gap`](../hydeph/qe_runner.py) inspects ground-state Kohn-Sham eigenvalues at $\mathbf{R}_{\mathrm{GS}}$ across both spin channels (when `delta_scf_homo_band`, `delta_scf_lumo_band`, and `delta_scf_spin_channel` are omitted) to select the lowest-energy in-gap optical transition ($\min(\epsilon_{\mathrm{LUMO}} - \epsilon_{\mathrm{HOMO}})$) and detect both HOMO ($g_{\mathrm{H}}$) and LUMO ($g_{\mathrm{L}}$) orbital degeneracies (`delta_scf_homo_degeneracy`, `delta_scf_lumo_degeneracy`).
+2. **Degenerate Orbital Symmetrization**: For high-symmetry defects where promoting an electron out of or into a degenerate $e$-doublet or $t_2$-triplet manifold (e.g., the ${}^3E$ excited state of Diamond $\mathrm{NV}^-$ or 4H-SiC $kk$-$\mathrm{VV}^0$) would cause SCF charge sloshing, [`build_delta_scf_occupations`](../hydeph/qe_runner.py) distributes the hole and excited electron equally across the $g_{\mathrm{H}}$-fold HOMO and $g_{\mathrm{L}}$-fold LUMO manifolds ($f_{b_{\mathrm{H}} - m} = 1 - 1/g_{\mathrm{H}}$, $f_{b_{\mathrm{L}} + n} = 1/g_{\mathrm{L}}$).
 3. **Exact Adiabatic Energetics**: Evaluating both ground-state and $\Delta$SCF excited-state energies at the $\lambda = 0$ ($\mathbf{R}_{\mathrm{GS}}$) and $\lambda = 1$ ($\mathbf{R}_{\mathrm{ES}}$) anchor frames yields the exact first-principles adiabatic Zero-Phonon Line ($E_{\mathrm{ZPL}}$), vertical absorption ($E_{\mathrm{abs}}$), vertical emission ($E_{\mathrm{em}}$), and asymmetric relaxation energies without empirical parameters:
 
 $$
@@ -202,13 +202,13 @@ $$
 
 ### Stage 6A: Normal Modes, Large-Supercell Phonon Embedding & Spectral Density
 
-[`LineshapeEngine`](../hydeph/lineshape.py) computes the finite-difference Hessian around the ground-state equilibrium geometry and diagonalizes the mass-weighted dynamical matrix:
+[`LineshapeEngine`](../hydeph/lineshape.py) computes the finite-difference Hessian around the ground-state equilibrium geometry (parallelized across CPU threads via [`ParallelVibrations`](../hydeph/hpc/parallel_vib.py) when `parallel_hessian = True`) and diagonalizes the mass-weighted dynamical matrix:
 
 $$
 H_{i\alpha, j\beta} = \frac{\partial^2 V_{\mathrm{hybrid,GS}}}{\partial R_{i\alpha} \partial R_{j\beta}}, \qquad D_{i\alpha, j\beta} = \frac{H_{i\alpha, j\beta}}{\sqrt{M_i M_j}}, \qquad \sum_{j\beta} D_{i\alpha, j\beta} e_{k, j\beta} = \omega_k^2 e_{k, i\alpha}
 $$
 
-- **Imaginary Mode Guardrails & Localization ($\mathrm{IPR}_k$)**: Any mode with $\omega_k^2 < 0$ is flagged (raising a fail-loud error if imaginary modes exceed `max_imaginary_modes` or `imaginary_freq_tol_meV`). For every mode $k$, HyDePh computes the Inverse Participation Ratio:
+- **Imaginary Mode Guardrails & Localization ($\mathrm{IPR}_k$)**: Any mode with $\omega_k^2 < 0$ is flagged (raising a `ValueError` if imaginary modes exceed `max_imaginary_modes`). For every mode $k$, HyDePh computes the Inverse Participation Ratio:
 
 $$
 \mathrm{IPR}_k = \sum_{i=1}^N \left( \sum_{\alpha=x,y,z} \vert e_{k, i\alpha} \vert^2 \right)^2
@@ -276,8 +276,8 @@ Following the time-dependent cumulant formalism of Mukamel [10] and Linderälv, 
 
 #### (A) NVT Thermalization $\to$ Multi-Trajectory NVE Production
 For each target temperature $T$:
-1. **Stochastic Langevin Equilibration**: The defect supercell is initialized at $\mathbf{R}_{\mathrm{GS}}$ with Maxwell-Boltzmann velocities and equilibrated under a Langevin thermostat (`anharmonic_equil_steps`) to sample the exact canonical configurational distribution $P(\mathbf{R}) \propto \exp[-V_{\mathrm{hybrid,GS}}(\mathbf{R})/k_B T]$ without KAM invariant-tori trapping [28, 29].
-2. **Unperturbed NVE Production Ensemble**: The thermostat is detached and $N_{\mathrm{traj}}$ independent **microcanonical (NVE) Velocity-Verlet trajectories** (`anharmonic_n_trajectories`, `anharmonic_md_steps`) are propagated on $V_{\mathrm{hybrid,GS}}(\mathbf{R})$, guaranteeing strictly conservative Hamiltonian phase-space evolution free of thermostat friction.
+1. **Stochastic Langevin Equilibration**: The defect supercell is initialized at $\mathbf{R}_{\mathrm{GS}}$ with Maxwell-Boltzmann velocities and equilibrated under a Langevin thermostat (`anharmonic_thermalization_steps`) to sample the canonical configurational distribution $P(\mathbf{R}) \propto \exp[-V_{\mathrm{hybrid,GS}}(\mathbf{R})/k_B T]$ without KAM invariant-tori trapping [28, 29].
+2. **Unperturbed NVE Production Ensemble**: The thermostat is detached and $N_{\mathrm{traj}}$ independent **microcanonical (NVE) Velocity-Verlet trajectories** (`anharmonic_n_trajectories`, `anharmonic_md_steps`) are propagated on $V_{\mathrm{hybrid,GS}}(\mathbf{R})$, guaranteeing conservative Hamiltonian phase-space evolution free of thermostat friction.
 
 #### (B) Paired Energy-Gap Fluctuation & Autocorrelation Function
 At each NVE timestep $t_m$, both the ground-state and excited-state hybrid potentials are evaluated to obtain the instantaneous vertical transition energy gap $\Delta U(t)$ and its thermal fluctuation $\delta\Delta U(t)$ [10, 33]:
@@ -321,8 +321,8 @@ $$
 S_{\mathrm{MD}}(\hbar\omega, T) = \frac{J_{\mathrm{cl}}(\omega) \, \mathcal{Q}(\hbar\omega, T) \, f_{\mathrm{ac}}(\omega)}{(\hbar\omega)^2}
 $$
 
-- **Sum-Rule Normalization**: When `normalize_anharmonic_s = True` (default), the integrated intensity is normalized to the Franck-Condon Huang-Rhys factor $\int_0^{\infty} S_{\mathrm{MD}}(\hbar\omega, T) \, d(\hbar\omega) = S$, eliminating stochastic single-trajectory amplitude variance across temperatures while preserving all physical mode shifts $\Delta\omega_{\mathrm{anh}}(T)$, lifetime broadening, and thermal renormalization.
-- **Low-Temperature Quantum Anchor**: Below $\sim 50\ \text{K}$, classical trajectories lack quantum zero-point fluctuations ($k_B T \ll \hbar\omega_0$). HyDePh smoothly anchors $S_{\mathrm{anh}}(\hbar\omega, T) = (1 - w_{\mathrm{MD}}) S_{\mathrm{harm}}(\hbar\omega) + w_{\mathrm{MD}} S_{\mathrm{MD}}(\hbar\omega, T)$ with $w_{\mathrm{MD}} = \mathrm{clip}(T / 77\ \text{K}, 0, 1)$, recovering the exact harmonic normal-mode spectrum as $T \to 0$ and transitioning seamlessly to full MD cumulant dynamics at finite temperatures.
+- **Sum-Rule Normalization**: The integrated intensity is normalized to the Franck-Condon Huang-Rhys factor $\int_0^{\infty} S_{\mathrm{MD}}(\hbar\omega, T) \, d(\hbar\omega) = S$, eliminating stochastic single-trajectory amplitude variance across temperatures while preserving anharmonic mode shifts $\Delta\omega_{\mathrm{anh}}(T)$, lifetime broadening, and thermal renormalization.
+- **Low-Temperature Quantum Anchor**: Below $\sim 50\ \text{K}$, classical trajectories lack quantum zero-point fluctuations ($k_B T \ll \hbar\omega_0$). HyDePh anchors $S_{\mathrm{anh}}(\hbar\omega, T) = (1 - w_{\mathrm{MD}}) S_{\mathrm{harm}}(\hbar\omega) + w_{\mathrm{MD}} S_{\mathrm{MD}}(\hbar\omega, T)$ with $w_{\mathrm{MD}} = \mathrm{clip}(T / 77\ \text{K}, 0, 1)$, recovering the harmonic normal-mode spectrum as $T \to 0$ and transitioning to MD cumulant dynamics at finite temperatures.
 
 #### (D) Unified Cumulant Generating Function Across All Coupling Regimes
 Substituting $S_{\mathrm{anh}}(\hbar\omega, T)$ directly into the second-order cumulant phase integral:

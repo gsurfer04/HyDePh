@@ -38,14 +38,14 @@ Key capabilities:
 1. **Defect Embedding**: Vectorized tiling of pristine bulk unit cells around a defect unit cell and automated defect coordinate detection via minimum-image distance matching.
 2. **4-Phase Active Sampling**: Generates candidate configurations across the Franck-Condon coordinate, defect-core rattling, and high-temperature foundation MD with incremental Farthest Point Sampling (FPS).
 3. **DFT Labeling & Resumption**: Drives Quantum ESPRESSO (`pw.x` / `pw.exe`) with $\Gamma$-point real wavefunctions (`K_POINTS gamma`), fixed occupations (`occupations = 'fixed'`), atom-scaled convergence thresholds, and fail-closed disk caching.
-4. **Constrained $\Delta\text{SCF}$ Excited States**: Automatically detects in-gap defect frontier orbitals from ground-state Kohn-Sham eigenvalues, symmetrizes degenerate LUMO occupations, and extracts exact adiabatic Zero-Phonon Line ($E_{\mathrm{ZPL}}$), absorption, emission, and Stokes shift energies.
+4. **Constrained $\Delta\text{SCF}$ Excited States**: Automatically selects the lowest-energy in-gap excitation across spin channels from ground-state Kohn-Sham eigenvalues, detects HOMO/LUMO orbital degeneracies, applies Jahn-Teller symmetry breaking, and extracts adiabatic Zero-Phonon Line ($E_{\mathrm{ZPL}}$), absorption, emission, and Stokes shift energies.
 5. **Paired GPU $\Delta$-NEP Training**: Fits independent ground-state and optical excited-state residuals in GPUMD with mean baseline offset subtraction ($\bar{\Delta e}_S$), automated quality control gates, and optional committee ensembles.
 6. **Large-Supercell Phonon Embedding**: Embeds localized defect vibrations and forces into large bulk phonon supercells ($L \ge 10\text{--}12\ \text{Å}$) via force or displacement projection, eliminating discrete mode-comb artifacts.
 7. **Paired Cumulant Anharmonic Dynamics**: Computes multi-temperature emission lineshapes using NVT thermalization followed by unperturbed NVE microcanonical molecular dynamics with the physical energy-gap cumulant generating function and Linderälv Gaussian time-domain windowing.
 8. **1D Configuration Coordinate & Stokes Shift**: Evaluates paired potential surfaces along $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda (\mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}})$ to extract $\Delta Q$, asymmetric relaxation energies $\Delta E_{\mathrm{rel,GS}} \ne \Delta E_{\mathrm{rel,ES}}$, effective phonon energies $\hbar\Omega_{S}$, and Stokes shift $\Delta E_{\mathrm{Stokes}}$.
 9. **Provenance & Numerical Data Export**: Exports publication-ready figures, CSVs, `normal_modes.csv`, and `provenance.json` recording software versions, input SHA256 hashes, and execution metrics.
 
-See the **[Theoretical Walkthrough](docs/THEORY_WALKTHROUGH.md)** for detailed mathematical derivations, **[CHANGELOG.md](CHANGELOG.md)** for release history, and **[CONTRIBUTING.md](CONTRIBUTING.md)** for developer setup.
+See the **[Theoretical Walkthrough](docs/THEORY_WALKTHROUGH.md)** for mathematical derivations, **[HPC & Cluster Guide](docs/hpc_guide.md)** for SLURM and multi-GPU execution, **[CHANGELOG.md](CHANGELOG.md)** for release history, and **[CONTRIBUTING.md](CONTRIBUTING.md)** for developer setup.
 
 ---
 
@@ -79,9 +79,16 @@ Run end-to-end calculations directly from a YAML or TOML configuration file:
 hydeph config.yaml
 ```
 
-Optional flags:
+Stage control, worker concurrency, and HPC input preparation flags:
 ```bash
+# Resume from a specific stage (1..6)
 hydeph config.yaml --from-stage 3 --max-dft 30 --workers 1
+
+# Pre-generate Stage 1 pure-QE relaxation decks and SLURM runner script
+hydeph config.yaml --prepare-relax
+
+# Run Stages 1-2 and pre-generate Stage 3 candidate pw.in decks and SLURM job array
+hydeph config.yaml --to-stage 2
 ```
 
 Validate configuration and dry-run defect setup without running DFT:
@@ -189,8 +196,8 @@ summary = run_pipeline(config)
 | `pristine_cell_path` | `str` | *(required)* | Path to bulk pristine unit cell (`.xyz`, `.cif`, or `POSCAR`). |
 | `defect_cell_path` | `str` | `None` | Path to pre-constructed defect unit cell or supercell. |
 | `foundation_potential_path` | `str` | `"nep89_20250409.txt"` | Path to GPUMD universal foundation potential. |
-| `pseudopotentials` | `dict` | `None` | Element-to-pseudopotential filename map (auto-discovered if omitted). |
-| `pseudo_dir` | `str` | `None` | Directory containing Quantum ESPRESSO UPF pseudopotential files. |
+| `pseudopotentials` | `dict` | `{}` | Element-to-pseudopotential filename map (auto-discovered from `pseudo_dir` if omitted). |
+| `pseudo_dir` | `str` | `"./pseudo"` | Directory containing Quantum ESPRESSO UPF pseudopotential files. |
 | `workspace_dir` | `str` | `"./hydeph_run"` | Workspace directory for outputs, caches, and scratch files. |
 | `allow_fallbacks` | `bool` | `False` | When `False` (default), raises `RuntimeError` immediately upon DFT failure. |
 
@@ -199,6 +206,7 @@ summary = run_pipeline(config)
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `supercell_repeat` | `tuple of int` | `(2, 2, 2)` | Supercell expansion multipliers `(nx, ny, nz)`. Physical length $L \ge 10\text{--}12\ \text{Å}$ is recommended. |
+| `ground_state_relax_method` | `str` | `"auto"` | Stage 1 relaxation backend: `"auto"`, `"foundation"`, or `"dft"`. |
 | `charge` / `tot_charge` | `float` | `0.0` | Net supercell charge in units of $e$ (`&SYSTEM tot_charge` in QE). |
 | `spin_polarized` | `bool` | `True` | Spin-unrestricted calculation (`nspin=2` in QE). |
 | `spin_multiplicity` | `int` | `2` | Spin multiplicity $2S+1$ ($1$: singlet, $2$: doublet, $3$: triplet). |
@@ -208,10 +216,12 @@ summary = run_pipeline(config)
 | `dft_es_candidates` | `str` | `"all"` | Candidate subset for excited-state DFT: `"all"` or `"fc_path"`. |
 | `delta_scf_homo_band` | `int` | `None` | Explicit HOMO band index for $\Delta\text{SCF}$; auto-detected from ground-state eigenvalues when `None`. |
 | `delta_scf_lumo_band` | `int` | `None` | Explicit LUMO band index for $\Delta\text{SCF}$; auto-detected from ground-state eigenvalues when `None`. |
-| `delta_scf_lumo_degeneracy` | `int` | `None` | Degeneracy of LUMO state ($1$ for singlet, $2$ for doublet, etc.) for symmetric orbital filling. |
-| `delta_scf_spin_channel` | `int` | `None` | Spin channel for excitation ($1$: up, $2$: down); auto-detected when `None`. |
-| `ecutwfc` | `float` | `None` | Kinetic energy cutoff for wavefunctions in Ry. |
-| `ecutrho` | `float` | `None` | Kinetic energy cutoff for charge density in Ry (defaults to $4 \times \text{ecutwfc}$ for norm-conserving UPFs). |
+| `delta_scf_homo_degeneracy` | `int` | `None` | Degeneracy of HOMO state for symmetric hole occupation; auto-detected when `None`. |
+| `delta_scf_lumo_degeneracy` | `int` | `None` | Degeneracy of LUMO state ($1$ for singlet, $2$ for doublet, etc.) for symmetric orbital filling; auto-detected when `None`. |
+| `delta_scf_spin_channel` | `int` | `None` | Spin channel for excitation ($1$: up, $2$: down); auto-selected via lowest excitation energy when `None`. |
+| `auto_jahn_teller_distortion` | `bool` | `True` | Applies symmetry-breaking distortion (`jahn_teller_amplitude`) prior to $\Delta\text{SCF}$ relaxation when degenerate orbitals are detected. |
+| `ecutwfc` | `float` | `None` | Kinetic energy cutoff for wavefunctions in Ry (auto-derived from element hardness and UPF metadata when `None`). |
+| `ecutrho` | `float` | `None` | Kinetic energy cutoff for charge density in Ry (auto-derived: $4 \times \text{ecutwfc}$ for norm-conserving, $\ge 8 \times$ for ultrasoft/PAW). |
 | `conv_thr` | `str` | `None` | SCF convergence threshold in QE (defaults to $10^{-10}\ \text{Ry/atom}$). |
 | `mixing_beta` | `float` | `0.4` | SCF charge density mixing factor. |
 | `diagonalization` | `str` | `"david"` | Diagonalization method in QE (`'david'`, `'cg'`). |
@@ -228,7 +238,7 @@ summary = run_pipeline(config)
 | `dft_resume_mode` | `str` | `"target_total"` | `"target_total"` (reach `max_dft_frames` total) or `"max_new"` (run up to `max_new_dft_frames` new frames). |
 | `retry_failed_dft` | `bool` | `True` | Retries failed or non-converged frames with conservative mixing (`mixing_beta=0.20`, `electron_maxstep=150`). |
 | `replace_failed_frames` | `bool` | `False` | Replaces a permanently failed rattle or MD frame with a new candidate to fulfill quota. |
-| `n_procs_qe` | `int` | `1` | Number of MPI processes per Quantum ESPRESSO worker. |
+| `n_procs_qe` | `int` | `2` | Number of MPI processes per Quantum ESPRESSO worker. |
 | `n_workers_qe` | `int` | `1` | Number of independent `pw.x` calculations to execute concurrently. |
 | `qe_timeout_s` | `float` | `None` | Wall-clock timeout (seconds) per `pw.x` run before terminating and queuing for retry. |
 
@@ -249,13 +259,12 @@ summary = run_pipeline(config)
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `temperatures` | `list of float` | `[10.0, 77.0, 300.0]` | Emission temperatures in Kelvin. |
+| `temperatures` | `list of float` | `[10.0, 77.0, 150.0, 300.0]` | Emission temperatures in Kelvin. |
 | `enable_anharmonic` | `bool` | `True` | Evaluates multi-temperature anharmonic lineshapes via NVE cumulant dynamics. |
-| `anharmonic_equil_steps` | `int` | `500` | Langevin equilibration steps prior to NVE production. |
-| `anharmonic_md_steps` | `int` | `1500` | NVE production steps per trajectory for energy-gap autocorrelation sampling. |
+| `anharmonic_thermalization_steps` | `int` | `400` | Langevin equilibration steps prior to NVE production. |
+| `anharmonic_md_steps` | `int` | `2500` | NVE production steps per trajectory for energy-gap autocorrelation sampling. |
 | `anharmonic_n_trajectories` | `int` | `1` | Number of independent NVE trajectories for ensemble averaging. |
 | `anharmonic_acf_damping_meV` | `float` | `2.0` | Gaussian time-domain window width $\gamma_{\mathrm{acf}}$ for smoothing autocorrelation truncation noise. |
-| `normalize_anharmonic_s` | `bool` | `True` | Normalizes $\int S_{\mathrm{anh}}(\hbar\omega)\,d(\hbar\omega) = S$ to preserve Franck-Condon sum rule while capturing anharmonic mode shifts. |
 | `dephasing_gamma_meV` | `float` | `1.5` | Base ZPL dephasing width $\gamma_0$ in meV. |
 | `dephasing_temperature_coefficient` | `float` | `5.5e-5` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). |
 | `phonon_supercell_repeat` | `tuple of int` | `None` | Supercell repeat for expanded phonon embedding calculations. |
@@ -274,6 +283,8 @@ summary = run_pipeline(config)
 | `slurm_modules` / `modules` | `list of str` | `[]` | Environment modules loaded in exact sequence (e.g. `['profile/chem-phys', 'quantum-espresso/7.2--openmpi--4.1.4--cuda--11.8']`). |
 | `prepare_relaxation_inputs` | `bool` | `False` | Writes pure QE relaxation inputs and SLURM runner scripts. |
 | `prepare_dft_inputs` | `bool` | `False` | Writes pure QE candidate frame inputs and SLURM job array scripts. |
+| `parallel_hessian` | `bool` | `True` | Evaluates finite-difference supercell Hessian displacements in parallel via `ParallelVibrations`. |
+| `parallel_hessian_workers` | `int` | `None` | Worker thread count for parallel Hessian evaluation (defaults to `min(16, cpu_count)`). |
 
 ---
 
@@ -320,19 +331,21 @@ HyDePh reproduces the low-temperature photoluminescence spectrum and multi-tempe
 
 ---
 
-## Execution Platforms (WSL2 & Windows)
+## Execution Platforms (HPC, WSL2 & Windows)
 
-### 1. Linux & Windows WSL2 (CUDA Accelerated)
-For workstations with an NVIDIA GPU, running in WSL2 (Ubuntu) provides end-to-end GPU acceleration across both the Quantum ESPRESSO DFT labeling stage (`pw.x`) and the GPUMD $\Delta$-NEP training stage (`gpumd` / `nep`).
+### 1. HPC Clusters (SLURM Multi-GPU & Job Arrays)
+For SLURM-managed GPU and CPU clusters (such as CINECA Leonardo), HyDePh supports decoupled pure-`pw.x` job arrays, multi-GPU worker pinning, and parallel Hessian evaluation. See the **[HPC & Cluster Guide](docs/hpc_guide.md)** for full instructions.
+
+### 2. Linux & Windows WSL2 (CUDA Accelerated)
+For workstations with an NVIDIA GPU, running in WSL2 (Ubuntu) provides end-to-end GPU acceleration across both Quantum ESPRESSO DFT labeling (`pw.x`) and GPUMD $\Delta$-NEP training (`gpumd` / `nep`):
 
 ```bash
-# In WSL2 terminal
 export OMP_NUM_THREADS=16
-python HyDePh.py
+hydeph config.yaml
 ```
 
-### 2. Native Windows (Intel oneAPI / MS-MPI)
-For environments without GPU support, HyDePh automatically detects Windows paths, Microsoft MPI (`mpiexec.exe`), and Colocated DLLs when using [QMatSuite Quantum ESPRESSO binaries](https://github.com/QMatSuite/quantum-espresso-windows-exe).
+### 3. Native Windows (Intel oneAPI / MS-MPI)
+For environments without GPU support, HyDePh detects Windows paths, Microsoft MPI (`mpiexec.exe`), and colocated DLLs when using [QMatSuite Quantum ESPRESSO binaries](https://github.com/QMatSuite/quantum-espresso-windows-exe).
 
 ---
 
@@ -354,15 +367,17 @@ hydeph/
 ├── validator.py                   # Dry-run structure, valence, and spin validator
 ├── pipeline.py                    # Pipeline orchestrator with stage resumption
 └── hpc/                           # Cluster orchestration & multi-GPU dispatch
-    ├── cluster_profiles.py        # System definitions (Leonardo Booster, DCGP)
+    ├── cluster_profiles.py        # System definitions (generic SLURM, Leonardo Booster/DCGP)
     ├── slurm_dispatcher.py        # SLURM script generators & Lustre synchronization
+    ├── parallel_vib.py            # Multi-threaded supercell Hessian evaluator
     └── array_worker.py            # Headless array task executor
 benchmarks/
 ├── diamond-nvminus/               # Diamond NV- benchmark data & figures
 ├── 4H-SiC/                        # 4H-SiC kk divacancy benchmark data & figures
 └── NaCl/                          # NaCl F-center benchmark data & figures
 docs/
-└── THEORY_WALKTHROUGH.md          # Theoretical formulation & literature citations
+├── THEORY_WALKTHROUGH.md          # Theoretical formulation & literature citations
+└── hpc_guide.md                   # HPC & SLURM cluster execution guide
 tests/                             # Automated test suite (151 unit & regression tests)
 CHANGELOG.md                       # Release notes and history
 CONTRIBUTING.md                    # Developer and contribution guidelines
