@@ -1315,12 +1315,26 @@ class QERunner:
     ):
         self.config = config
         self.n_procs = int(n_procs if n_procs is not None else config.n_procs_qe)
-        self.pw_exe = resolve_pw_executable(pw_exe or config.pw_exe)
+        self._pw_exe_override = pw_exe
+        self._resolved_pw_exe: Optional[str] = None
         self.mpi_command = mpi_command or config.mpi_command
         self.mpi_args = mpi_args or config.mpi_args
         self.n_workers = int(n_workers if n_workers is not None else config.n_workers_qe)
         self.timeout_s = timeout_s if timeout_s is not None else config.qe_timeout_s
         self.last_failed_entries: List[Dict[str, Any]] = []
+
+    @property
+    def pw_exe(self) -> str:
+        """Resolves the Quantum ESPRESSO pw executable path lazily on first access."""
+        if self._resolved_pw_exe is None:
+            raw = self._pw_exe_override or self.config.pw_exe
+            self._resolved_pw_exe = resolve_pw_executable(raw)
+        return self._resolved_pw_exe
+
+    @pw_exe.setter
+    def pw_exe(self, val: Optional[str]) -> None:
+        self._resolved_pw_exe = val
+        self._pw_exe_override = val
 
     def _resolve_omp_threads(self, n_workers_override: Optional[int] = None) -> int:
         """Determines OpenMP threads per MPI rank so all CPU cores are utilized without oversubscription."""

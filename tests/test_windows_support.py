@@ -16,6 +16,7 @@ from hydeph.qe_runner import (
     build_qe_command,
     write_qe_input,
     parse_qe_output,
+    QERunner,
 )
 from hydeph.delta_trainer import resolve_nep_executable, write_delta_nep_in
 
@@ -61,6 +62,33 @@ def test_resolve_pw_executable_windows_not_assumed_raises(monkeypatch):
         resolve_pw_executable(None)
     assert "not installed as a standard system program" in str(excinfo.value)
     assert "not assumed" in str(excinfo.value)
+
+
+def test_qe_runner_lazy_pw_exe_on_windows_without_qe(monkeypatch, tmp_path):
+    """QERunner can be instantiated and used on Windows without pw.exe installed until execution."""
+    monkeypatch.setattr("hydeph.qe_runner.is_windows", lambda: True)
+    monkeypatch.delenv("PW_EXE", raising=False)
+    monkeypatch.delenv("QE_PW_EXE", raising=False)
+    monkeypatch.delenv("QE_BIN_DIR", raising=False)
+    monkeypatch.delenv("QE_PATH", raising=False)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path / "pristine.xyz"),
+        workspace_dir=str(tmp_path / "ws"),
+        pseudopotentials={"C": "C.upf"},
+    )
+    # Instantiating QERunner must not eagerly raise ValueError
+    runner = QERunner(cfg)
+
+    # Accessing .pw_exe raises descriptive error when pw.exe is missing
+    with pytest.raises(ValueError) as excinfo:
+        _ = runner.pw_exe
+    assert "not installed as a standard system program" in str(excinfo.value)
+
+    # Explicit override or setter works
+    runner.pw_exe = "custom_pw.exe"
+    assert runner.pw_exe == "custom_pw.exe"
 
 
 def test_resolve_mpi_runner_serial():
