@@ -410,6 +410,11 @@ class ToolkitConfig:
         Whether to retry unconverged DFT calculations with conservative SCF parameters.
     replace_failed_frames : bool
         Whether to replace persistently unconverged frames with backup samples.
+    rattle_mode : str
+        Strategy for Gaussian rattling frames: "hybrid" (default, 70% core + 30% whole supercell),
+        "core" (defect-core localized only), or "whole" (uniform whole supercell).
+    rattle_cutoff : float
+        Defect-core localization cutoff distance in Angstroms. Default is 6.0.
 
     nep_neurons : int
         Number of neurons in Delta-NEP hidden layer. Default is 30.
@@ -453,6 +458,13 @@ class ToolkitConfig:
         Whether to compute and plot the 1D CC curve and Stokes shifts. Default is True.
     zpl_energy_eV : float, optional
         Zero-Phonon Line energy in eV. If omitted, derived from DFT/CC minima.
+    max_imaginary_modes : int
+        Maximum number of imaginary normal modes allowed before raising an error. Default is 0.
+    acoustic_sum_rule : bool
+        Whether to enforce the Acoustic Sum Rule (ASR) and center-of-mass translation
+        projection on numerical finite-difference Hessians. Default is True.
+    displacement_delta : float
+        Finite displacement magnitude (Angstroms) for numerical Hessian evaluations. Default is 0.01.
     """
 
     pristine_cell_path: str
@@ -543,6 +555,8 @@ class ToolkitConfig:
     dft_resume_mode: str = "target_total"  # "target_total" or "max_new"
     retry_failed_dft: bool = True
     replace_failed_frames: bool = False
+    rattle_mode: str = "hybrid"  # "hybrid", "core", or "whole"
+    rattle_cutoff: float = 6.0  # Core rattle radius cutoff in Angstroms
 
     delta_nep_generation: int = 1
     nep_neurons: int = 30
@@ -588,6 +602,8 @@ class ToolkitConfig:
     dephasing_temperature_coefficient: float = 5.5e-5
     time_window_tau_fs: Optional[float] = None
     max_imaginary_modes: int = 0
+    acoustic_sum_rule: bool = True
+    displacement_delta: float = 0.01
     phonon_supercell_repeat: Optional[Tuple[int, int, int]] = None
     phonon_embedding_method: str = "displacement"  # "displacement" or "force"
     export_normal_modes: bool = True
@@ -1200,6 +1216,16 @@ class ToolkitConfig:
             raise ValueError(f"Invalid time_window_tau_fs: {self.time_window_tau_fs}. Must be > 0 fs.")
         if int(self.max_imaginary_modes) < 0:
             raise ValueError(f"Invalid max_imaginary_modes: {self.max_imaginary_modes}. Must be >= 0.")
+        if self.rattle_mode.lower() not in ("hybrid", "core", "whole"):
+            raise ValueError(
+                f"Invalid rattle_mode: '{self.rattle_mode}'. Must be 'hybrid', 'core', or 'whole'."
+            )
+        if float(self.rattle_cutoff) <= 0.0:
+            raise ValueError(f"Invalid rattle_cutoff: {self.rattle_cutoff}. Must be > 0.")
+        if float(self.displacement_delta) <= 0.0:
+            raise ValueError(f"Invalid displacement_delta: {self.displacement_delta}. Must be > 0.")
+        if not isinstance(self.acoustic_sum_rule, bool):
+            raise ValueError(f"Invalid acoustic_sum_rule: {self.acoustic_sum_rule}. Must be a boolean.")
 
         os.makedirs(self.workspace_dir, exist_ok=True)
         return True

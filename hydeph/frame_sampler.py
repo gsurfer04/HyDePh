@@ -162,13 +162,17 @@ class FrameSampler:
         logger.info(f"[+] Phase 1: Generated {len(fc_frames)} Franck-Condon path frames (lambda in [-0.2, 1.2])")
         return fc_frames
 
-    def sample_defect_core_rattling(self, at_gs: Atoms, n_frames: int = 12, r_cutoff: float = 6.0) -> List[Atoms]:
-        """Phase 2: Defect-core localized Gaussian rattle configurations."""
+    def sample_defect_core_rattling(
+        self, at_gs: Atoms, n_frames: int = 12, r_cutoff: Optional[float] = None
+    ) -> List[Atoms]:
+        """Phase 2: Defect-core and/or supercell Gaussian rattle configurations."""
         if n_frames <= 0:
             return []
+        cutoff = r_cutoff if r_cutoff is not None else getattr(self.config, "rattle_cutoff", 6.0)
+        mode = getattr(self.config, "rattle_mode", "hybrid").lower()
         center = get_defect_center(at_gs)
         dists = mic_distances(at_gs.positions, center, at_gs.cell)
-        core_mask = dists < r_cutoff
+        core_mask = dists < cutoff
 
         seed = self.config.random_seed
         rng = np.random.RandomState(seed)
@@ -178,7 +182,17 @@ class FrameSampler:
             at = clean_candidate_atoms(at_gs)
             sigma = get_rattle_sigma(i)
             displacements = rng.normal(0.0, sigma, at.positions.shape)
-            displacements[~core_mask] *= 0.15
+
+            if mode == "whole":
+                pass
+            elif mode == "core":
+                displacements[~core_mask] *= 0.15
+            else:  # "hybrid"
+                if i % 3 == 0:
+                    displacements *= 0.70
+                else:
+                    displacements[~core_mask] *= 0.15
+
             at.positions += displacements
             label = f"rattle_{i:02d}"
             at.info["sample_type"] = "core_rattle"
@@ -187,7 +201,10 @@ class FrameSampler:
             at.info["rattle_sigma"] = float(sigma)
             rattle_frames.append(at)
 
-        logger.info(f"[+] Phase 2: Generated {len(rattle_frames)} defect-core rattle frames (r < {r_cutoff} A)")
+        logger.info(
+            f"[+] Phase 2: Generated {len(rattle_frames)} rattle frames "
+            f"(mode='{mode}', cutoff={cutoff} A)"
+        )
         return rattle_frames
 
     def sample_foundation_md_with_fps(

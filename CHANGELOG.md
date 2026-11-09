@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Foundation Bulk Dynamic Stability Diagnostics**:
+  - Implemented `check_foundation_bulk_stability(pristine_atoms, calc_foundation)` executing early finite-difference phonon checks on the pristine unit cell during Step 2.
+  - Detects bulk host dynamic instabilities, negative curvatures, and soft phonon branches caused by cell volume mismatch (e.g., tensile strain beyond universal potential cutoffs) before launching expensive DFT calculations.
+- **Acoustic Sum Rule (ASR) & Rigid Translation Projection**:
+  - Added `acoustic_sum_rule: bool = True` (default `True`) and `displacement_delta: float = 0.01` in `ToolkitConfig`.
+  - Implemented `apply_acoustic_sum_rule_and_projection()` in `hydeph.lineshape`, enforcing tensorial ASR ($\sum_j \Phi_{ij} = 0$) and projecting out center-of-mass rigid translations from the mass-weighted dynamical matrix to eliminate spurious acoustic numerical drift.
+- **Whole-Supercell & Hybrid Rattling Strategies**:
+  - Added `rattle_mode: str = "hybrid"` (options: `"hybrid"`, `"core"`, `"whole"`, default `"hybrid"`) and `rattle_cutoff: float = 6.0` in `ToolkitConfig` and `FrameSampler`.
+  - In `"hybrid"` mode, 30% of rattle frames displace all atoms in the supercell uniformly, providing whole-supercell restoring force signals so Delta-NEP cures bulk stiffness deficiencies.
+- **Mode-Resolved Imaginary Normal Mode Diagnostics**:
+  - Enhanced imaginary mode reporting in `LineshapeEngine` with mode participation ratios ($PR$), top displaced atom breakdowns, and actionable diagnostic guidance distinguishing localized defect saddle points from bulk foundation softening.
+
 ## [0.8.0] - 2026-11-06
 
 ### Added

@@ -328,3 +328,137 @@ def test_smart_phonon_limits_scaling_with_anharmonic_peak(tmp_path):
     )
     assert ylim_user == (0.0, 5.0)
 
+
+def test_acoustic_sum_rule_and_translation_projection():
+    """Verify that Acoustic Sum Rule symmetrization and projection enforces translational invariance."""
+    from hydeph.lineshape import apply_acoustic_sum_rule_and_projection
+    from ase.vibrations.data import VibrationsData
+
+    # 4-atom chain or cubic cell
+    atoms = Atoms("C4", positions=[[0, 0, 0], [1.5, 0, 0], [3.0, 0, 0], [4.5, 0, 0]], cell=[6, 6, 6], pbc=True)
+    natoms = len(atoms)
+
+    # Synthetic Hessian with random translational violation (row sums != 0)
+    rng = np.random.RandomState(42)
+    H_rand = rng.normal(0.0, 1.0, (3 * natoms, 3 * natoms))
+    H_raw = 0.5 * (H_rand + H_rand.T) + 5.0 * np.eye(3 * natoms)
+
+    # Initial row sums violate ASR
+    initial_row_sums = np.sum(H_raw.reshape(natoms, 3, natoms, 3), axis=2)
+    assert np.max(np.abs(initial_row_sums)) > 0.5
+
+    # Apply ASR + projection
+    H_clean = apply_acoustic_sum_rule_and_projection(H_raw, atoms)
+
+    # 1. Row sums are now zero within numerical precision
+    clean_row_sums = np.sum(H_clean.reshape(natoms, 3, natoms, 3), axis=2)
+    assert np.allclose(clean_row_sums, 0.0, atol=1e-12)
+
+    # 2. Diagonalize: exactly 3 acoustic translation zero modes (0.0 meV)
+    vdata = VibrationsData(atoms, H_clean.reshape(natoms, 3, natoms, 3))
+    energies = vdata.get_energies()
+    # Sort by real energy
+    re_energies = np.sort(np.real(energies) * 1000.0)
+    # The 3 smallest modes must be exactly 0.0 meV
+    assert np.allclose(re_energies[:3], 0.0, atol=1e-6)
+
+
+def test_rattle_mode_strategies_hybrid_core_whole(tmp_path):
+    """Verify that rattle_mode ('hybrid', 'core', 'whole') operates as configured."""
+    from hydeph.frame_sampler import FrameSampler
+
+    pristine_file = tmp_path / "pristine.xyz"
+    # Create 8-atom supercell where atom 0 is at origin and atom 7 is far
+    atoms = Atoms("C8", positions=[
+        [0, 0, 0], [1.5, 0, 0], [0, 1.5, 0], [1.5, 1.5, 0],
+        [0, 0, 1.5], [1.5, 0, 1.5], [0, 1.5, 1.5], [5.0, 5.0, 5.0]
+    ], cell=[8, 8, 8], pbc=True)
+    atoms.info["defect_center"] = [0.0, 0.0, 0.0]
+    import ase.io
+    ase.io.write(str(pristine_file), atoms)
+
+    # 1. "core" mode: atom 7 (far away at r > 6 A) is heavily dampened
+    cfg_core = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "ws_core"),
+        rattle_mode="core",
+        rattle_cutoff=3.0,
+        n_phonon_frames=6,
+    )
+    sampler_core = FrameSampler(cfg_core)
+    frames_core = sampler_core.sample_defect_core_rattling(atoms, n_frames=6)
+    assert len(frames_core) == 6
+    disp_far_core = [np.linalg.norm(f.positions[7] - atoms.positions[7]) for f in frames_core]
+
+    # 2. "whole" mode: atom 7 rattles uniformly with full amplitude
+    cfg_whole = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "ws_whole"),
+        rattle_mode="whole",
+        n_phonon_frames=6,
+    )
+    sampler_whole = FrameSampler(cfg_whole)
+    frames_whole = sampler_whole.sample_defect_core_rattling(atoms, n_frames=6)
+    disp_far_whole = [np.linalg.norm(f.positions[7] - atoms.positions[7]) for f in frames_whole]
+    assert np.mean(disp_far_whole) > 2.0 * np.mean(disp_far_core)
+
+    # 3. "hybrid" mode (default): frame 0 (i % 3 == 0) rattles uniformly, frame 1 dampens outer
+    cfg_hybrid = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "ws_hybrid"),
+        rattle_mode="hybrid",
+        rattle_cutoff=3.0,
+        n_phonon_frames=6,
+    )
+    sampler_hybrid = FrameSampler(cfg_hybrid)
+    frames_hybrid = sampler_hybrid.sample_defect_core_rattling(atoms, n_frames=6)
+    disp_0 = np.linalg.norm(frames_hybrid[0].positions[7] - atoms.positions[7])  # whole
+    disp_1 = np.linalg.norm(frames_hybrid[1].positions[7] - atoms.positions[7])  # core
+    assert disp_0 > disp_1
+
+
+def test_foundation_bulk_stability_diagnostic():
+    """Verify check_foundation_bulk_stability detects imaginary modes on unstable bulk."""
+    from hydeph.pipeline import check_foundation_bulk_stability
+    from ase.calculators.calculator import Calculator, all_changes
+
+    atoms = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]], cell=[4, 4, 4], pbc=True)
+
+    # 1. Stable harmonic potential: all real frequencies
+    class StableCalc(Calculator):
+        implemented_properties = ["energy", "forces"]
+        def calculate(self, atoms=None, properties=["energy", "forces"], system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            self.results["energy"] = 0.0
+            # Restoring spring forces: F = -k * (r - r0)
+            dr = atoms.positions[1] - atoms.positions[0] - np.array([1.5, 0, 0])
+            f = np.zeros((2, 3))
+            f[0] = 5.0 * dr
+            f[1] = -5.0 * dr
+            self.results["forces"] = f
+
+    n_im, worst = check_foundation_bulk_stability(atoms, StableCalc())
+    assert n_im == 0
+    assert worst == 0.0
+
+    # 2. Unstable inverted potential: negative curvature / imaginary mode
+    class UnstableCalc(Calculator):
+        implemented_properties = ["energy", "forces"]
+        def calculate(self, atoms=None, properties=["energy", "forces"], system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            self.results["energy"] = 0.0
+            dr = atoms.positions[1] - atoms.positions[0] - np.array([1.5, 0, 0])
+            # Inverted repulsive spring: F = +k * dr (negative curvature)
+            f = np.zeros((2, 3))
+            f[0] = -5.0 * dr
+            f[1] = 5.0 * dr
+            self.results["forces"] = f
+
+    n_im_unstable, worst_unstable = check_foundation_bulk_stability(atoms, UnstableCalc())
+    assert n_im_unstable > 0
+    assert worst_unstable > 0.0
+
+

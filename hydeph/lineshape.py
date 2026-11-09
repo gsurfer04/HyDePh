@@ -318,6 +318,62 @@ def _compute_hessian_fingerprint(atoms, calc, delta=0.01) -> str:
     return h.hexdigest()
 
 
+def apply_acoustic_sum_rule_and_projection(H_2d: np.ndarray, atoms: Atoms) -> np.ndarray:
+    """Enforces Acoustic Sum Rule (ASR) translational invariance and projects zero modes.
+
+    1. Symmetrizes the 4D Cartesian force constant tensor Phi_ij^{a,b}.
+    2. Corrects diagonal on-site blocks Phi_ii^{a,b} = - sum_{j != i} Phi_ij^{a,b} so row sums vanish.
+    3. Projects out the 3 rigid center-of-mass translation eigenvectors from the mass-weighted Hessian,
+       guaranteeing exact zero frequencies for acoustic translations and suppressing spurious acoustic drift.
+
+    Parameters
+    ----------
+    H_2d : np.ndarray
+        2D Hessian matrix of shape (3N, 3N) in eV / Angstrom^2.
+    atoms : Atoms
+        Atomic geometry with masses.
+
+    Returns
+    -------
+    np.ndarray
+        Cleaned, ASR-symmetrized, and projection-filtered 2D Hessian of shape (3N, 3N).
+    """
+    natoms = len(atoms)
+    masses = atoms.get_masses()
+    if not np.all(masses > 0):
+        return H_2d
+
+    H_4d = H_2d.reshape(natoms, 3, natoms, 3).copy()
+
+    # Hermitian symmetrization in 4D: Phi_ij^{a,b} = Phi_ji^{b,a}
+    H_4d = 0.5 * (H_4d + H_4d.transpose(2, 3, 0, 1))
+
+    # Tensorial Acoustic Sum Rule (ASR): sum_j Phi_ij^{a,b} = 0
+    row_sums = np.sum(H_4d, axis=2)
+    for i in range(natoms):
+        H_4d[i, :, i, :] -= row_sums[i]
+    H_4d = 0.5 * (H_4d + H_4d.transpose(2, 3, 0, 1))
+    H_clean = H_4d.reshape(3 * natoms, 3 * natoms)
+
+    # Rigid translation projection on mass-weighted dynamical matrix
+    m_inv_sqrt = 1.0 / np.sqrt(np.repeat(masses, 3))
+    m_sqrt = np.sqrt(np.repeat(masses, 3))
+    m_tot = float(np.sum(masses))
+
+    D = H_clean * np.outer(m_inv_sqrt, m_inv_sqrt)
+
+    T = np.zeros((3, 3 * natoms))
+    for ax in range(3):
+        for i in range(natoms):
+            T[ax, 3 * i + ax] = np.sqrt(masses[i] / m_tot)
+
+    P = np.eye(3 * natoms) - T.T @ T
+    D_proj = P @ D @ P
+    D_proj = 0.5 * (D_proj + D_proj.T)
+
+    return D_proj * np.outer(m_sqrt, m_sqrt)
+
+
 class LineshapeEngine:
     """Calculates phonon normal modes, spectral densities S(hw), Huang-Rhys factor, and lineshapes."""
 
@@ -366,13 +422,14 @@ class LineshapeEngine:
         use_parallel = getattr(self.config, "parallel_hessian", True)
         n_workers_vib = getattr(self.config, "parallel_hessian_workers", None) or 4
         is_mocked = hasattr(Vibrations, "_mock_return_value") or not isinstance(Vibrations, type)
+        delta_vib = getattr(self.config, "displacement_delta", 0.01)
         if use_parallel and n_workers_vib > 1 and not is_mocked:
             from .hpc.parallel_vib import ParallelVibrations
-            vib = ParallelVibrations(at, name=os.path.join(vib_dir, "vib"), delta=0.01, n_workers=n_workers_vib)
+            vib = ParallelVibrations(at, name=os.path.join(vib_dir, "vib"), delta=delta_vib, n_workers=n_workers_vib)
         else:
-            vib = Vibrations(at, name=os.path.join(vib_dir, "vib"), delta=0.01)
+            vib = Vibrations(at, name=os.path.join(vib_dir, "vib"), delta=delta_vib)
 
-        current_fp = _compute_hessian_fingerprint(at_gs, self.calc, delta=0.01)
+        current_fp = _compute_hessian_fingerprint(at_gs, self.calc, delta=delta_vib)
         cached_fp = None
         if os.path.isfile(state_file):
             try:
@@ -405,7 +462,29 @@ class LineshapeEngine:
         except Exception:
             pass
 
-        energies_ev = vib.get_energies()
+        use_asr = getattr(self.config, "acoustic_sum_rule", True)
+        _get_mode_func = None
+        if use_asr and not is_mocked:
+            try:
+                vdata = vib.get_vibrations()
+                H_raw = vdata.get_hessian_2d()
+                H_clean = apply_acoustic_sum_rule_and_projection(H_raw, at)
+                from ase.vibrations.data import VibrationsData
+                vdata_clean = VibrationsData(at, H_clean.reshape(len(at), 3, len(at), 3))
+                energies_ev = vdata_clean.get_energies()
+                all_modes_arr = vdata_clean.get_modes()
+
+                def _get_mode_clean(idx):
+                    return all_modes_arr[idx]
+
+                _get_mode_func = _get_mode_clean
+            except Exception as e_asr:
+                logger.debug(f"Acoustic sum rule application encountered error ({e_asr}); falling back to standard Vibrations.")
+                energies_ev = vib.get_energies()
+                _get_mode_func = vib.get_mode
+        else:
+            energies_ev = vib.get_energies()
+            _get_mode_func = vib.get_mode
 
         # 1. Detect imaginary and acoustic modes
         imaginary_modes = []
@@ -419,19 +498,47 @@ class LineshapeEngine:
                 acoustic_modes.append(i)
 
         max_imag = getattr(self.config, "max_imaginary_modes", 0)
-        if len(imaginary_modes) > max_imag:
-            mode_desc = ", ".join([f"mode {idx} ({freq:.2f}i meV)" for idx, freq in imaginary_modes])
-            raise RuntimeError(
-                f"Hessian calculation produced {len(imaginary_modes)} imaginary mode(s) "
-                f"(threshold: max_imaginary_modes={max_imag}). "
-                f"The relaxed ground state geometry is not a true local minimum on the potential energy surface. "
-                f"Imaginary modes: {mode_desc}"
-            )
-        elif len(imaginary_modes) > 0:
-            mode_desc = ", ".join([f"mode {idx} ({freq:.2f}i meV)" for idx, freq in imaginary_modes])
-            logger.warning(
-                f"[!] Warning: Detected {len(imaginary_modes)} imaginary mode(s) below threshold ({max_imag}): {mode_desc}"
-            )
+        if len(imaginary_modes) > 0:
+            masses = at_gs.get_masses()
+            symbols = at_gs.get_chemical_symbols()
+            nat = len(at_gs)
+            im_details = []
+            for idx, freq in imaginary_modes:
+                mode_disp = _get_mode_func(idx)
+                disp_norms = np.linalg.norm(mode_disp, axis=1)
+                p = (disp_norms ** 2) * masses
+                tot_p = float(np.sum(p))
+                p = p / tot_p if tot_p > 0 else np.ones(nat) / nat
+                ipr = float(np.sum(p ** 2))
+                pr = float(1.0 / (nat * ipr)) if ipr > 0 else 1.0
+                top_atoms = np.argsort(disp_norms)[::-1][:2]
+                top_str = "/".join([f"{symbols[a]}{a}" for a in top_atoms])
+                im_details.append(f"mode {idx} ({freq:.2f}i meV, PR={pr:.2f}, top:{top_str})")
+
+            mode_desc = ", ".join(im_details[:8])
+            if len(imaginary_modes) > 8:
+                mode_desc += f"... (+{len(imaginary_modes) - 8} more)"
+
+            if len(imaginary_modes) > max_imag:
+                raise RuntimeError(
+                    f"Hessian calculation produced {len(imaginary_modes)} imaginary mode(s) "
+                    f"(threshold: max_imaginary_modes={max_imag}).\n"
+                    f"Imaginary modes breakdown: {mode_desc}\n"
+                    f"DIAGNOSTIC GUIDANCE:\n"
+                    f"  1. If imaginary modes are localized near defect atoms (low PR, top atoms are defect neighbors),\n"
+                    f"     the ground state structure is at a saddle point and needs tighter relaxation or symmetry-breaking.\n"
+                    f"  2. If imaginary modes are distributed across bulk host atoms (high PR or distant bulk atoms),\n"
+                    f"     the underlying foundation potential may have negative curvature/instability on the pristine host crystal\n"
+                    f"     at this cell volume (e.g. tensile strain beyond the foundation model's stability limit).\n"
+                    f"     Consider setting `max_imaginary_modes={len(imaginary_modes)}` to filter them out,\n"
+                    f"     using whole-supercell rattling (`rattle_mode='hybrid'`), or relaxing the pristine unit cell."
+                )
+            else:
+                logger.warning(
+                    f"[!] Notice: Filtered out {len(imaginary_modes)} imaginary mode(s) "
+                    f"(within allowed threshold max_imaginary_modes={max_imag}): {mode_desc}. "
+                    f"Proceeding with {len(energies_ev) - len(imaginary_modes) - len(acoustic_modes)} valid optical modes."
+                )
 
         # 2. Collect valid optical modes
         valid_indices = [
@@ -469,7 +576,7 @@ class LineshapeEngine:
 
         for idx in valid_indices:
             hw_k = float(np.real(energies_ev[idx]) * 1000.0)
-            mode_disp = vib.get_mode(idx)
+            mode_disp = _get_mode_func(idx)
 
             if use_force:
                 fq_k = float(np.sum(f_es_mode * mode_disp))

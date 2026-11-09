@@ -249,6 +249,18 @@ def test_comprehensive_range_validation(tmp_path):
     with pytest.raises(ValueError, match="Conflicting spin specifications"):
         ToolkitConfig(pristine_cell_path="dummy.xyz", spin_multiplicity=3, tot_magnetization=0)
 
+    # 9. Invalid rattle_mode
+    with pytest.raises(ValueError, match="Invalid rattle_mode"):
+        make_valid_config(rattle_mode="invalid_mode").validate()
+
+    # 10. Invalid displacement_delta <= 0
+    with pytest.raises(ValueError, match="Invalid displacement_delta"):
+        make_valid_config(displacement_delta=0.0).validate()
+
+    # 11. Invalid acoustic_sum_rule
+    with pytest.raises(ValueError, match="Invalid acoustic_sum_rule"):
+        make_valid_config(acoustic_sum_rule="yes").validate()
+
 
 def test_export_resolved_manifest(tmp_path):
     """Verify export_resolved_manifest writes config_resolved.json containing hashes and versions."""

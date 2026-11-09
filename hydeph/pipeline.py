@@ -8,7 +8,7 @@ import time
 import shutil
 import argparse
 import logging
-from typing import Optional, Dict, Any, List, Set, Union
+from typing import Optional, Dict, Any, List, Set, Union, Tuple
 import numpy as np
 import ase.io
 from ase import Atoms
@@ -119,6 +119,64 @@ def parse_stage_arg(val: Optional[Union[int, str, List[Any], Set[Any]]]) -> Set[
         elif t in stage_map:
             res.add(stage_map[t])
     return res
+
+
+def check_foundation_bulk_stability(
+    pristine_atoms: Atoms,
+    calc_foundation,
+    delta: float = 0.01,
+) -> Tuple[int, float]:
+    """Evaluates whether the foundation potential is dynamically stable on the pristine bulk cell.
+
+    Computes a finite-difference numerical Hessian on the pristine bulk cell using the foundation
+    calculator and diagonalizes the mass-weighted dynamical matrix. If imaginary modes are present,
+    it indicates that the foundation model possesses unphysical negative curvatures or soft phonon
+    branches at this lattice volume.
+
+    Parameters
+    ----------
+    pristine_atoms : Atoms
+        Pristine bulk unit cell.
+    calc_foundation : Calculator
+        Initialized foundation potential calculator (e.g. CPUNEP).
+    delta : float
+        Displacement magnitude in Angstroms.
+
+    Returns
+    -------
+    Tuple[int, float]
+        (number_of_imaginary_modes, worst_imaginary_frequency_in_meV)
+    """
+    natoms = len(pristine_atoms)
+    if natoms == 0 or calc_foundation is None:
+        return 0, 0.0
+
+    at = pristine_atoms.copy()
+    at.calc = calc_foundation
+    H = np.zeros((3 * natoms, 3 * natoms))
+    r = 0
+    for a in range(natoms):
+        for c in range(3):
+            p_p = at.positions.copy()
+            p_p[a, c] += delta
+            at.set_positions(p_p)
+            f_p = at.get_forces().copy()
+
+            p_m = at.positions.copy()
+            p_m[a, c] -= delta
+            at.set_positions(p_m)
+            f_m = at.get_forces().copy()
+
+            H[r] = (-(f_p - f_m) / (2.0 * delta)).ravel()
+            r += 1
+
+    H_sym = 0.5 * (H + H.T)
+    from ase.vibrations.data import VibrationsData
+    vib = VibrationsData(pristine_atoms, H_sym.reshape(natoms, 3, natoms, 3))
+    energies = vib.get_energies()
+    im_modes = [e for e in energies if abs(e.imag) * 1000.0 > 1.0]
+    worst = float(max([abs(e.imag) * 1000.0 for e in im_modes], default=0.0))
+    return len(im_modes), worst
 
 
 def run_pipeline(
@@ -337,6 +395,22 @@ def run_pipeline(
     # -------------------------------------------------------------------------
     cand_xyz = os.path.join(config.workspace_dir, "candidate_frames.xyz")
     sampler = FrameSampler(config, calc_foundation=shared_foundation)
+
+    # Proactive foundation potential bulk stability diagnostic
+    if shared_foundation is not None and config.pristine_cell_path and os.path.isfile(config.pristine_cell_path):
+        try:
+            pris_cell_diag = ase.io.read(config.pristine_cell_path)
+            n_im_pris, worst_im_pris = check_foundation_bulk_stability(pris_cell_diag, shared_foundation)
+            if n_im_pris > 0:
+                logger.warning(
+                    f"\n[!] WARNING: Foundation potential exhibits {n_im_pris} imaginary phonon mode(s) "
+                    f"on pristine bulk cell (worst: {worst_im_pris:.2f}i meV).\n"
+                    f"    The foundation model is dynamically unstable for this host crystal at this cell volume.\n"
+                    f"    If bulk imaginary modes persist in Step 6, consider setting `max_imaginary_modes={n_im_pris}` "
+                    f"or using `rattle_mode='hybrid'` to provide whole-supercell restoring training data to Delta-NEP."
+                )
+        except Exception as exc:
+            logger.debug(f"Pristine bulk stability check skipped: {exc}")
 
     if from_stage <= 2 or 2 in force_stages:
         logger.info("\n[STEP 2/6] Representative Frame Generation Protocol...")
