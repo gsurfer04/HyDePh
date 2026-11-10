@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - In `"hybrid"` mode, 30% of rattle frames displace all atoms in the supercell uniformly, providing whole-supercell restoring force signals so Delta-NEP cures bulk stiffness deficiencies.
 - **Mode-Resolved Imaginary Normal Mode Diagnostics**:
   - Enhanced imaginary mode reporting in `LineshapeEngine` with mode participation ratios ($PR$), top displaced atom breakdowns, and actionable diagnostic guidance distinguishing localized defect saddle points from bulk foundation softening.
+- **SLURM Job Array Convergence Skipping**:
+  - Enhanced `submit_dft_array_pure_qe.slurm` generation to check for `JOB DONE.` and skip already-converged calculations instantly, preventing redundant re-execution of frames previously computed locally or in earlier array tasks.
 
 ## [0.8.0] - 2026-11-06
 

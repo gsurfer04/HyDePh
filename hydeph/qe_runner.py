@@ -2974,6 +2974,12 @@ if [ -z "$DIR" ]; then
     exit 1
 fi
 
+# Skip already converged calculations
+if [ -f "$DIR/pw.out" ] && grep -q "JOB DONE." "$DIR/pw.out" 2>/dev/null && ! grep -q "convergence NOT achieved" "$DIR/pw.out" 2>/dev/null; then
+    echo "[SKIP] Target directory '$RAW_DIR' is already converged. Skipping!"
+    exit 0
+fi
+
 # Resolve pseudo directory and ensure it is accessible inside the target frame directory
 PSEUDO_DIR=""
 for cand in "$WORKSPACE_DIR/pseudo" "$WORKSPACE_DIR/../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo"; do
