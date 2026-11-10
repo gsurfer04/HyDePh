@@ -2907,6 +2907,7 @@ echo "==========================================================================
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --gres=gpu:1
+#SBATCH --array=0-{array_max_idx}%16
 #SBATCH --time=01:00:00
 #SBATCH --output=hydeph_array_%A_%a.out
 #SBATCH --error=hydeph_array_%A_%a.err
@@ -2950,6 +2951,11 @@ cd "$WORKSPACE_DIR"
 echo "[+] Using frame list: $LIST_FILE"
 echo "[+] Workspace directory: $WORKSPACE_DIR"
 
+if [ -z "$SLURM_ARRAY_TASK_ID" ]; then
+    echo "[!] Error: SLURM_ARRAY_TASK_ID is unset. Ensure this script is submitted as a SLURM job array (e.g. sbatch submit_dft_array_pure_qe.slurm)."
+    exit 1
+fi
+
 RAW_DIR=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$LIST_FILE")
 # Normalize slashes in case of Windows formatting
 RAW_DIR=$(echo "$RAW_DIR" | tr '\\\\' '/')
@@ -2961,7 +2967,7 @@ fi
 
 # Locate the target frame directory containing pw.in
 DIR=""
-for cand in "$WORKSPACE_DIR/$RAW_DIR" "$WORK_DIR/$RAW_DIR" "$RAW_DIR"; do
+for cand in "$WORKSPACE_DIR/$RAW_DIR" "$WORKSPACE_DIR/output/$RAW_DIR" "$WORKSPACE_DIR/hydeph_run/$RAW_DIR" "$WORK_DIR/$RAW_DIR" "$WORK_DIR/output/$RAW_DIR" "$WORK_DIR/hydeph_run/$RAW_DIR" "$RAW_DIR"; do
     if [ -d "$cand" ] && [ -f "$cand/pw.in" ]; then
         DIR="$(cd "$cand" && pwd)"
         break
