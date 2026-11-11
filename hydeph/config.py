@@ -631,6 +631,10 @@ class ToolkitConfig:
     slurm_nodes: int = 1
     slurm_gpus_per_node: int = 4
     slurm_cpus_per_task: int = 8
+    slurm_time: Optional[str] = None
+    slurm_relax_time: Optional[str] = "01:00:00"
+    slurm_relax_gpus: int = 1
+    slurm_relax_qos: Optional[str] = None
     slurm_modules: List[str] = field(default_factory=list)
     gpu_pinning: bool = True
     parallel_hessian: bool = True
@@ -784,6 +788,9 @@ class ToolkitConfig:
             "hpc_modules": "slurm_modules",
             "hpc_account": "slurm_account",
             "account": "slurm_account",
+            "relax_time": "slurm_relax_time",
+            "relax_gpus": "slurm_relax_gpus",
+            "relax_qos": "slurm_relax_qos",
         }
         normalized_data = {alias_map.get(k, k): v for k, v in data.items()}
 

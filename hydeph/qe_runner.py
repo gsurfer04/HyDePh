@@ -2474,11 +2474,18 @@ class QERunner:
                 or os.environ.get("CINECA_ACCOUNT", os.environ.get("SLURM_ACCOUNT", "cin_staff"))
             )
             part = getattr(self.config, "slurm_partition", None) or "boost_usr_prod"
-            qos = getattr(self.config, "slurm_qos", None)
-            qos_line = f"#SBATCH --qos={qos}\n" if qos else ""
+            relax_qos = getattr(self.config, "slurm_relax_qos", None) or getattr(self.config, "slurm_qos", None)
+            qos_line = f"#SBATCH --qos={relax_qos}\n" if relax_qos else ""
             nodes = getattr(self.config, "slurm_nodes", 1) or 1
-            gpus = getattr(self.config, "slurm_gpus_per_node", 4) or 4
+            relax_gpus = getattr(self.config, "slurm_relax_gpus", None)
+            if relax_gpus is None:
+                relax_gpus = 1  # 1 GPU for fast queue scheduling
             cpus_per_task = getattr(self.config, "slurm_cpus_per_task", 8) or 8
+            relax_time = (
+                getattr(self.config, "slurm_relax_time", None)
+                or getattr(self.config, "slurm_time", None)
+                or "01:00:00"
+            )
             module_block = format_slurm_module_lines(mods)
 
             slurm_content = f"""#!/bin/bash
@@ -2488,15 +2495,17 @@ class QERunner:
 #
 #  Usage:
 #    sbatch submit_relaxations_pure_qe.slurm
+#  Fast debug queue (starts immediately if <=30 min on Leonardo):
+#    sbatch --qos=boost_qos_dbg --time=00:30:00 submit_relaxations_pure_qe.slurm
 # ==============================================================================
 #SBATCH --job-name=hydeph_relax
 #SBATCH --account={acct}
 #SBATCH --partition={part}
 {qos_line}#SBATCH --nodes={nodes}
-#SBATCH --ntasks-per-node={gpus}
+#SBATCH --ntasks-per-node={relax_gpus}
 #SBATCH --cpus-per-task={cpus_per_task}
-#SBATCH --gres=gpu:{gpus}
-#SBATCH --time=04:00:00
+#SBATCH --gres=gpu:{relax_gpus}
+#SBATCH --time={relax_time}
 #SBATCH --output=hydeph_relax_%j.out
 #SBATCH --error=hydeph_relax_%j.err
 
