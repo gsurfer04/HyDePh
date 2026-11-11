@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 RY_TO_EV = float(Ry)
 RY_BOHR_TO_EV_A = float(Ry / Bohr)
+BOHR_TO_ANGSTROM = float(Bohr)
 
 
 def is_windows() -> bool:
@@ -123,9 +124,96 @@ def run_monitored_qe_subprocess(
     t_start = time.time()
     t_last_log = t_start
     last_iter = 0
-    last_step = 0
+    cur_step = 0
+    last_logged_bfgs_step = -1
+    last_logged_iter = (0, 0)
+    last_logged_scf_converged_step = -1
+    bfgs_converged_logged = False
+    scf_converged_logged = False
     sleep_interval = min(0.5, max(0.05, float(timeout) / 5.0 if timeout else 0.5))
-    calc_type = "relaxation" if mode == "relax" else "calculation"
+    is_relax = mode in ("relax", "vc-relax")
+    calc_type = "relaxation" if is_relax else "calculation"
+
+    def _poll_log() -> None:
+        nonlocal last_iter, cur_step, last_logged_bfgs_step, last_logged_iter
+        nonlocal last_logged_scf_converged_step, bfgs_converged_logged, scf_converged_logged
+        if not os.path.isfile(pw_out):
+            return
+        try:
+            with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            if not lines:
+                return
+
+            if not is_relax:
+                for line in reversed(lines[-30:]):
+                    if "iteration #" in line:
+                        m = re.search(r"iteration #\s+(\d+)", line)
+                        if m:
+                            cur_i = int(m.group(1))
+                            if cur_i != last_iter:
+                                last_iter = cur_i
+                                logger.info(f"      [pw] SCF iteration {cur_i}...")
+                        break
+                    elif "Forces acting on atoms" in line or "convergence has been achieved" in line:
+                        if not scf_converged_logged:
+                            scf_converged_logged = True
+                            logger.info("      [pw] SCF converged! Calculating atomic forces...")
+                        break
+            else:
+                tail_lines = lines[-120:]
+                tail_text = "".join(tail_lines)
+
+                # 1. BFGS final convergence check
+                m_conv = re.search(r"bfgs converged in\s+(\d+)\s+scf cycles and\s+(\d+)\s+bfgs steps", tail_text, re.IGNORECASE)
+                if m_conv and not bfgs_converged_logged:
+                    bfgs_converged_logged = True
+                    logger.info(f"      [pw relax] BFGS converged in {m_conv.group(1)} SCF cycles and {m_conv.group(2)} BFGS steps!")
+
+                # 2. BFGS step finished check
+                for m_step in re.finditer(r"number of bfgs steps\s*=\s*(\d+)", tail_text, re.IGNORECASE):
+                    step_num = int(m_step.group(1))
+                    if step_num > last_logged_bfgs_step:
+                        start_idx = max(0, m_step.start() - 600)
+                        end_idx = min(len(tail_text), m_step.end() + 600)
+                        win = tail_text[start_idx:end_idx]
+
+                        e_new = re.findall(r"energy\s+new\s*=\s*([-\d\.]+)", win)
+                        e_fin = re.findall(r"Final energy\s*=\s*([-\d\.]+)", win)
+                        e_tot = re.findall(r"!    total energy\s*=\s*([-\d\.]+)", win)
+                        e_val = float(e_new[-1]) if e_new else (float(e_fin[-1]) if e_fin else (float(e_tot[-1]) if e_tot else None))
+
+                        grad_m = re.findall(r"Gradient error\s*=\s*([\d\.E+-]+)", win)
+                        grad_val = grad_m[-1] if grad_m else None
+
+                        e_str = f" (E = {e_val * RY_TO_EV:.4f} eV" if e_val is not None else ""
+                        if grad_val:
+                            e_str += f", Grad = {grad_val} Ry/Bohr)" if e_str else f" (Grad = {grad_val} Ry/Bohr)"
+                        elif e_str:
+                            e_str += ")"
+
+                        logger.info(f"      [pw relax] BFGS Step {step_num} finished!{e_str}")
+                        last_logged_bfgs_step = step_num
+                        cur_step = max(cur_step, step_num + 1)
+
+                # 3. Step SCF convergence check
+                m_scf_conv = re.findall(r"convergence has been achieved in\s+(\d+)\s+iterations", tail_text, re.IGNORECASE)
+                if m_scf_conv and last_logged_scf_converged_step < cur_step:
+                    last_logged_scf_converged_step = cur_step
+                    logger.info(f"      [pw relax] Step {cur_step} | SCF converged in {m_scf_conv[-1]} iterations. Calculating forces...")
+
+                # 4. Step SCF iteration check
+                for line in reversed(tail_lines):
+                    if "iteration #" in line:
+                        m_it = re.search(r"iteration #\s+(\d+)", line)
+                        if m_it:
+                            it_num = int(m_it.group(1))
+                            if (cur_step, it_num) != last_logged_iter and cur_step > last_logged_scf_converged_step:
+                                last_logged_iter = (cur_step, it_num)
+                                logger.info(f"      [pw relax] Step {cur_step} | SCF iteration {it_num}...")
+                        break
+        except Exception:
+            pass
 
     try:
         with open(pw_out, "wb") as f_out:
@@ -145,7 +233,7 @@ def run_monitored_qe_subprocess(
                         proc.wait()
                     except Exception:
                         pass
-                    if mode == "relax" and allow_fallbacks and atoms_template is not None:
+                    if is_relax and allow_fallbacks and atoms_template is not None:
                         at_part, e_part = parse_qe_relaxation_output(pw_out, atoms_template, require_converged=False)
                         if at_part is not None:
                             logger.warning(
@@ -157,39 +245,12 @@ def run_monitored_qe_subprocess(
 
                 time.sleep(sleep_interval)
                 now = time.time()
-                if (now - t_last_log) >= 2.0 and os.path.isfile(pw_out):
+                if (now - t_last_log) >= 2.0:
                     t_last_log = now
-                    try:
-                        with open(pw_out, "r", encoding="utf-8", errors="replace") as f:
-                            lines = f.readlines()
-                        for line in reversed(lines[-30:]):
-                            if mode == "scf":
-                                if "iteration #" in line:
-                                    m = re.search(r"iteration #\s+(\d+)", line)
-                                    if m:
-                                        cur_iter = int(m.group(1))
-                                        if cur_iter != last_iter:
-                                            last_iter = cur_iter
-                                            logger.info(f"      [pw] SCF iteration {cur_iter}...")
-                                    break
-                                elif "Forces acting on atoms" in line:
-                                    logger.info("      [pw] SCF converged! Calculating atomic forces...")
-                                    break
-                            elif mode == "relax":
-                                if "number of scf cycles" in line or "iteration #" in line:
-                                    m = re.search(r"iteration #\s+(\d+)", line)
-                                    if m and int(m.group(1)) != last_iter:
-                                        last_iter = int(m.group(1))
-                                elif "step" in line and ("search" in line or "new bfgs" in line):
-                                    m = re.search(r"step\s+(\d+)", line)
-                                    if m and int(m.group(1)) != last_step:
-                                        last_step = int(m.group(1))
-                                        logger.info(f"      [pw relax] BFGS Step {last_step}...")
-                                    break
-                    except Exception:
-                        pass
+                    _poll_log()
 
             proc.wait()
+            _poll_log()
     except OSError as exc:
         raise RuntimeError(f"QE {calc_type} failed in {calc_dir}: {exc}") from exc
 
@@ -465,8 +526,8 @@ def write_qe_input(
         retry_lines = mix_mode_line
     else:
         retry_lines = ""
-    forc_conv_line = f"\n  forc_conv_thr = {float(getattr(config, 'relax_forc_conv_thr', 1.0e-3))}," if calculation == "relax" else ""
-    nstep_line = f"\n  nstep = {int(getattr(config, 'relax_nstep', 100))}," if calculation == "relax" else ""
+    forc_conv_line = f"\n  forc_conv_thr = {float(getattr(config, 'relax_forc_conv_thr', 1.0e-3))}," if calculation in ("relax", "vc-relax") else ""
+    nstep_line = f"\n  nstep = {int(getattr(config, 'relax_nstep', 100))}," if calculation in ("relax", "vc-relax") else ""
 
     hybrid_lines = ""
     if getattr(config, "input_dft", None):
@@ -478,6 +539,8 @@ def write_qe_input(
     if getattr(config, "ecutfock", None) is not None:
         hybrid_lines += f"\n  ecutfock = {float(config.ecutfock)},"
 
+    tstress_val = ".true." if calculation == "vc-relax" else ".false."
+
     header = f"""&CONTROL
   calculation = '{calculation}',
   restart_mode = 'from_scratch',
@@ -485,7 +548,7 @@ def write_qe_input(
   outdir = './tmp',
   prefix = 'calc',
   tprnfor = .true.,
-  tstress = .false.,{forc_conv_line}{nstep_line}
+  tstress = {tstress_val},{forc_conv_line}{nstep_line}
   disk_io = 'none'
 /
 &SYSTEM
@@ -507,9 +570,21 @@ def write_qe_input(
   diagonalization = '{diagonalization}',{david_line}{retry_lines}
 /
 """
-    if calculation == "relax":
+    if calculation in ("relax", "vc-relax"):
         header += """&IONS
   ion_dynamics = 'bfgs'
+/
+"""
+    if calculation == "vc-relax":
+        cell_dyn = getattr(config, "cell_dynamics", "bfgs")
+        cell_dofree = getattr(config, "cell_dofree", "all")
+        press = float(getattr(config, "press_kbar", getattr(config, "cell_pressure_kbar", 0.0)))
+        cell_factor = float(getattr(config, "cell_factor", 2.0))
+        header += f"""&CELL
+  cell_dynamics = '{cell_dyn}',
+  press = {press:.4f},
+  cell_dofree = '{cell_dofree}',
+  cell_factor = {cell_factor:.2f},
 /
 """
 
@@ -664,8 +739,40 @@ def parse_qe_relaxation_output(
             return None, None
 
     final_positions: List[List[float]] = []
+    final_cell: Optional[np.ndarray] = None
+    cell_lines: List[List[float]] = []
+    cell_card = ""
+    pos_card = ""
     energy_ev: Optional[float] = None
     in_final_coords = False
+    in_cell = False
+    in_pos = False
+
+    alat_ang: Optional[float] = None
+    alat_m = re.findall(r"lattice parameter \(alat\)\s*=\s*([-\d\.]+)", text, re.IGNORECASE)
+    if alat_m:
+        try:
+            alat_ang = float(alat_m[-1]) * BOHR_TO_ANGSTROM
+        except ValueError:
+            pass
+
+    def _parse_cell_scale(card_str: str, default_alat: Optional[float] = None) -> float:
+        c_low = card_str.lower()
+        if "angstrom" in c_low:
+            return 1.0
+        if "bohr" in c_low:
+            return BOHR_TO_ANGSTROM
+        if "alat" in c_low:
+            m_val = re.search(r"=\s*([-\d\.]+)", card_str)
+            if m_val:
+                try:
+                    return float(m_val.group(1)) * BOHR_TO_ANGSTROM
+                except ValueError:
+                    pass
+            if default_alat is not None:
+                return default_alat
+            return BOHR_TO_ANGSTROM
+        return default_alat if default_alat is not None else 1.0
 
     # Pass 1: Check for "Begin final coordinates" block (standard upon BFGS completion)
     for line in lines:
@@ -679,60 +786,122 @@ def parse_qe_relaxation_output(
                     pass
         if "Begin final coordinates" in line:
             in_final_coords = True
+            cell_lines = []
             final_positions = []
+            cell_card = ""
+            pos_card = ""
+            in_cell = False
+            in_pos = False
             continue
         if in_final_coords:
             if "End final coordinates" in line:
                 in_final_coords = False
                 break
-            if "ATOMIC_POSITIONS" in line:
+            if "CELL_PARAMETERS" in line:
+                in_cell = True
+                in_pos = False
+                cell_card = line
+                cell_lines = []
                 continue
-            parts = line.strip().split()
-            if len(parts) >= 4:
-                try:
-                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
-                    final_positions.append([x, y, z])
-                except ValueError:
-                    pass
-
-    # Pass 2 fallback: If "Begin final coordinates" was omitted, retrieve the final ATOMIC_POSITIONS block
-    if len(final_positions) != len(template_atoms):
-        blocks: List[List[List[float]]] = []
-        cur_block: List[List[float]] = []
-        capturing = False
-        for line in lines:
             if "ATOMIC_POSITIONS" in line:
-                if cur_block:
-                    blocks.append(cur_block)
-                cur_block = []
-                capturing = True
+                in_pos = True
+                in_cell = False
+                pos_card = line
+                final_positions = []
                 continue
-            if capturing:
-                if line.startswith("/") or line.startswith("&") or "End final" in line or "Writing" in line:
-                    capturing = False
-                    if cur_block:
-                        blocks.append(cur_block)
-                    cur_block = []
-                    continue
+            if in_cell:
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    try:
+                        cell_lines.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                    except ValueError:
+                        pass
+                if len(cell_lines) == 3:
+                    in_cell = False
+            elif in_pos:
                 parts = line.strip().split()
                 if len(parts) >= 4:
                     try:
                         x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
-                        cur_block.append([x, y, z])
+                        final_positions.append([x, y, z])
                     except ValueError:
                         pass
-        if cur_block:
-            blocks.append(cur_block)
-        for b in reversed(blocks):
-            if len(b) == len(template_atoms):
-                final_positions = b
-                break
+
+    if len(cell_lines) == 3:
+        scale = _parse_cell_scale(cell_card, alat_ang)
+        final_cell = np.array(cell_lines, dtype=float) * scale
+
+    # Pass 2 fallback: If "Begin final coordinates" was omitted or had mismatched count
+    if len(final_positions) != len(template_atoms):
+        cell_blocks: List[Tuple[str, List[List[float]]]] = []
+        pos_blocks: List[Tuple[str, List[List[float]]]] = []
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if "CELL_PARAMETERS" in line:
+                card = line
+                vecs: List[List[float]] = []
+                j = i + 1
+                while j < len(lines) and len(vecs) < 3:
+                    parts = lines[j].strip().split()
+                    if len(parts) >= 3:
+                        try:
+                            vecs.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                        except ValueError:
+                            break
+                    j += 1
+                if len(vecs) == 3:
+                    cell_blocks.append((card, vecs))
+                i = j
+                continue
+            elif "ATOMIC_POSITIONS" in line:
+                card = line
+                p_list: List[List[float]] = []
+                j = i + 1
+                while j < len(lines) and len(p_list) < len(template_atoms):
+                    parts = lines[j].strip().split()
+                    if len(parts) >= 4:
+                        try:
+                            p_list.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                        except ValueError:
+                            break
+                    j += 1
+                if len(p_list) == len(template_atoms):
+                    pos_blocks.append((card, p_list))
+                i = j
+                continue
+            i += 1
+
+        if pos_blocks:
+            pos_card, final_positions = pos_blocks[-1]
+        if cell_blocks and final_cell is None:
+            c_card, c_vecs = cell_blocks[-1]
+            c_scale = _parse_cell_scale(c_card, alat_ang)
+            final_cell = np.array(c_vecs, dtype=float) * c_scale
 
     if len(final_positions) != len(template_atoms):
         return None, None
 
+    if final_cell is None:
+        final_cell = np.array(template_atoms.cell, dtype=float)
+
+    raw_pos = np.array(final_positions, dtype=float)
+    pos_lower = pos_card.lower()
+    if "crystal" in pos_lower:
+        cart_pos = raw_pos @ final_cell
+    elif "bohr" in pos_lower:
+        cart_pos = raw_pos * BOHR_TO_ANGSTROM
+    elif "alat" in pos_lower:
+        scale = alat_ang if alat_ang is not None else 1.0
+        cart_pos = raw_pos * scale
+    else:
+        cart_pos = raw_pos
+
     at_relaxed = template_atoms.copy()
-    at_relaxed.positions = np.array(final_positions, dtype=float)
+    at_relaxed.set_cell(final_cell, scale_atoms=False)
+    at_relaxed.positions = cart_pos
+    at_relaxed.pbc = True
     if energy_ev is not None:
         at_relaxed.info["energy"] = energy_ev
 
@@ -1533,6 +1702,7 @@ class QERunner:
         force_rerun: bool = False,
         occupations_mode: Optional[str] = None,
         constrained_occupations: Optional[Union[List[List[float]], Tuple[List[float], ...]]] = None,
+        calculation: Optional[str] = None,
     ) -> Atoms:
         """Executes or reuses a Quantum ESPRESSO BFGS geometry relaxation calculation.
         
@@ -1578,11 +1748,13 @@ class QERunner:
                 pass
         os.makedirs(tmp_dir, exist_ok=True)
 
+        calc_mode = calculation or getattr(self.config, "relaxation_calculation", "relax")
+
         write_qe_input(
             atoms,
             pw_in,
             self.config,
-            calculation="relax",
+            calculation=calc_mode,
             tot_magnetization=tot_magnetization,
             nspin=nspin,
             occupations_mode=occupations_mode,
@@ -1611,7 +1783,8 @@ class QERunner:
             if pw_dir:
                 env["PATH"] = pw_dir + os.pathsep + env.get("PATH", "")
 
-        logger.info(f"      [pw relax] Starting QE BFGS relaxation in {calc_dir} (tot_magnetization={tot_magnetization})...")
+        calc_label = "QE cell & ionic vc-relax" if calc_mode == "vc-relax" else "QE BFGS relaxation"
+        logger.info(f"      [pw relax] Starting {calc_label} in {calc_dir} (tot_magnetization={tot_magnetization})...")
         t_start = time.time()
 
         at_fallback = run_monitored_qe_subprocess(
@@ -1620,7 +1793,7 @@ class QERunner:
             pw_out=pw_out,
             env=env,
             timeout=eff_timeout,
-            mode="relax",
+            mode=calc_mode,
             allow_fallbacks=getattr(self.config, "allow_fallbacks", False),
             atoms_template=atoms,
         )
@@ -2349,11 +2522,12 @@ class QERunner:
         tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
         nspin = 2 if (self.config.spin_polarized or tot_mag > 0) else 1
 
+        relax_calc = getattr(self.config, "relaxation_calculation", "relax")
         write_qe_input(
             defect_sc,
             gs_pw_in,
             self.config,
-            calculation="relax",
+            calculation=relax_calc,
             tot_magnetization=tot_mag,
             nspin=nspin,
         )
@@ -2451,7 +2625,7 @@ class QERunner:
                 start_es,
                 es_pw_in,
                 self.config,
-                calculation="relax",
+                calculation=relax_calc,
                 tot_magnetization=tot_mag,
                 nspin=2,
                 occupations_mode="from_input",

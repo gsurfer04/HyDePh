@@ -283,6 +283,17 @@ class ToolkitConfig:
     ground_state_relax_method : str
         Ground-state geometry optimization method: "auto", "foundation", or "dft".
         In "auto" (default), selects "dft" when excited_state_method is "spin_proxy" and "foundation" otherwise.
+    relaxation_calculation : str
+        Quantum ESPRESSO geometry optimization mode: "relax" (ionic positions only, default) or
+        "vc-relax" (variable-cell relaxation optimizing both unit cell lattice vectors and atomic positions).
+    cell_dynamics : str
+        Cell dynamics algorithm for variable-cell relaxation ('bfgs', 'damp', 'pr', 'none'). Default is 'bfgs'.
+    cell_dofree : str
+        Degrees of freedom permitted to optimize during vc-relax ('all', 'ibrav', 'shape', 'volume', '2Dxy', etc.). Default is 'all'.
+    press_kbar : float
+        Target hydrostatic pressure in kbar for variable-cell relaxation. Default is 0.0 kbar (ambient pressure).
+    cell_factor : float
+        Cell expansion margin factor for variable-cell relaxation FFT grids in Quantum ESPRESSO. Default is 2.0.
     relax_forc_conv_thr : float
         Force convergence threshold (Ry/Bohr) for Quantum ESPRESSO BFGS relaxations. Default is 1.0e-3.
     relax_nstep : int
@@ -484,6 +495,11 @@ class ToolkitConfig:
     excited_state_tot_magnetization: Optional[int] = None
     excited_state_spin_multiplicity: Optional[int] = None
     ground_state_relax_method: str = "auto"  # "auto", "foundation", or "dft"
+    relaxation_calculation: str = "relax"  # "relax" or "vc-relax"
+    cell_dynamics: str = "bfgs"
+    cell_dofree: str = "all"
+    press_kbar: float = 0.0
+    cell_factor: float = 2.0
     prepare_relaxation_inputs: bool = False
     prepare_dft_inputs: bool = False
     relax_forc_conv_thr: float = 1.0e-3
@@ -644,6 +660,13 @@ class ToolkitConfig:
     )
 
     def __post_init__(self):
+        if self.relaxation_calculation:
+            self.relaxation_calculation = str(self.relaxation_calculation).lower().strip()
+        if self.cell_dynamics:
+            self.cell_dynamics = str(self.cell_dynamics).lower().strip()
+        if self.cell_dofree:
+            self.cell_dofree = str(self.cell_dofree).strip()
+
         if str(self.dft_es_candidates).lower() not in ("all", "fc_path"):
             raise ValueError(
                 f"Invalid dft_es_candidates: {self.dft_es_candidates!r}. Must be 'all' or 'fc_path'."
@@ -791,6 +814,13 @@ class ToolkitConfig:
             "relax_time": "slurm_relax_time",
             "relax_gpus": "slurm_relax_gpus",
             "relax_qos": "slurm_relax_qos",
+            "relaxation_mode": "relaxation_calculation",
+            "relax_mode": "relaxation_calculation",
+            "relax_calculation": "relaxation_calculation",
+            "calculation": "relaxation_calculation",
+            "cell_pressure_kbar": "press_kbar",
+            "cell_pressure": "press_kbar",
+            "press": "press_kbar",
         }
         normalized_data = {alias_map.get(k, k): v for k, v in data.items()}
 
@@ -1085,6 +1115,27 @@ class ToolkitConfig:
             raise ValueError(
                 f"Invalid ground_state_relax_method: '{self.ground_state_relax_method}'. "
                 "Must be 'auto', 'foundation', or 'dft'."
+            )
+
+        if self.relaxation_calculation.lower() not in ("relax", "vc-relax"):
+            raise ValueError(
+                f"Invalid relaxation_calculation: '{self.relaxation_calculation}'. "
+                "Must be 'relax' or 'vc-relax'."
+            )
+
+        if self.cell_dynamics.lower() not in ("bfgs", "damp", "pr", "none"):
+            raise ValueError(
+                f"Invalid cell_dynamics: '{self.cell_dynamics}'. "
+                "Must be 'bfgs', 'damp', 'pr', or 'none'."
+            )
+
+        valid_dofree = {
+            "all", "ibrav", "x", "y", "z", "xy", "xz", "yz", "xyz", "shape", "volume", "2dxy", "2dshape"
+        }
+        if self.cell_dofree.lower() not in valid_dofree:
+            raise ValueError(
+                f"Invalid cell_dofree: '{self.cell_dofree}'. "
+                f"Must be one of: {sorted(valid_dofree)}."
             )
 
         if float(self.relax_forc_conv_thr) <= 0.0:
