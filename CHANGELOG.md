@@ -8,19 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Variable-Cell Relaxation (`vc-relax`) & Real-Time BFGS Monitoring**:
+  - Added `relaxation_calculation: str = "relax"` (`"relax"` or `"vc-relax"`, with aliases `relaxation_mode`, `relax_mode`, `relax_calculation`, `calculation`), `cell_dynamics: str = "bfgs"`, `cell_dofree: str = "all"`, `press_kbar: float = 0.0` (aliases `press`, `cell_pressure_kbar`, `cell_pressure`), and `cell_factor: float = 2.0` to `ToolkitConfig`.
+  - Updated `write_qe_input()` to enable `tstress = .true.` and append the `&CELL` namelist when `calculation == "vc-relax"`.
+  - Enhanced `parse_qe_relaxation_output()` to parse `CELL_PARAMETERS` (`angstrom`, `bohr`, `alat`) and `ATOMIC_POSITIONS` (`crystal`, `angstrom`, `bohr`, `alat`), updating both the `Atoms` unit cell vectors and Cartesian positions.
+  - Upgraded `run_monitored_qe_subprocess()` to log active SCF iterations per ionic step, SCF convergence, and completed BFGS steps with total energy (eV) and gradient error (Ry/Bohr).
+- **Configurable SLURM Relaxation Resource Allocation**:
+  - Added `slurm_relax_gpus: int = 1`, `slurm_relax_time: Optional[str] = "01:00:00"`, and `slurm_relax_qos: Optional[str] = None` (aliases `relax_gpus`, `relax_time`, `relax_qos`) to `ToolkitConfig`.
+- **Canonical Pseudopotential Path Resolution**:
+  - Added `resolve_pseudo_path(upf_path, pseudo_dir)` in `hydeph.config` (exported at package root) to resolve absolute, working-directory-relative, and `pseudo_dir`-relative UPF paths without duplicating directory prefixes.
 - **Foundation Bulk Dynamic Stability Diagnostics**:
-  - Implemented `check_foundation_bulk_stability(pristine_atoms, calc_foundation)` executing early finite-difference phonon checks on the pristine unit cell during Step 2.
-  - Detects bulk host dynamic instabilities, negative curvatures, and soft phonon branches caused by cell volume mismatch (e.g., tensile strain beyond universal potential cutoffs) before launching expensive DFT calculations.
+  - Implemented `check_foundation_bulk_stability(pristine_atoms, calc_foundation)` executing finite-difference phonon checks on the pristine unit cell during Stage 2 to detect host lattice instabilities before running DFT calculations.
 - **Acoustic Sum Rule (ASR) & Rigid Translation Projection**:
-  - Added `acoustic_sum_rule: bool = True` (default `True`) and `displacement_delta: float = 0.01` in `ToolkitConfig`.
-  - Implemented `apply_acoustic_sum_rule_and_projection()` in `hydeph.lineshape`, enforcing tensorial ASR ($\sum_j \Phi_{ij} = 0$) and projecting out center-of-mass rigid translations from the mass-weighted dynamical matrix to eliminate spurious acoustic numerical drift.
+  - Added `acoustic_sum_rule: bool = True` and `displacement_delta: float = 0.01` in `ToolkitConfig`.
+  - Implemented `apply_acoustic_sum_rule_and_projection()` in `hydeph.lineshape`, enforcing tensorial ASR ($\sum_j \Phi_{ij} = 0$) and projecting out center-of-mass rigid translations from the mass-weighted dynamical matrix.
 - **Whole-Supercell & Hybrid Rattling Strategies**:
-  - Added `rattle_mode: str = "hybrid"` (options: `"hybrid"`, `"core"`, `"whole"`, default `"hybrid"`) and `rattle_cutoff: float = 6.0` in `ToolkitConfig` and `FrameSampler`.
-  - In `"hybrid"` mode, 30% of rattle frames displace all atoms in the supercell uniformly, providing whole-supercell restoring force signals so Delta-NEP cures bulk stiffness deficiencies.
+  - Added `rattle_mode: str = "hybrid"` (`"hybrid"`, `"core"`, `"whole"`) and `rattle_cutoff: float = 6.0` in `ToolkitConfig` and `FrameSampler`.
+  - In `"hybrid"` mode, 70% of rattle frames perturb the defect core ($r < 6.0\ \text{Å}$) and 30% displace all atoms in the supercell to sample long-wavelength bulk restoring forces.
 - **Mode-Resolved Imaginary Normal Mode Diagnostics**:
-  - Enhanced imaginary mode reporting in `LineshapeEngine` with mode participation ratios ($PR$), top displaced atom breakdowns, and actionable diagnostic guidance distinguishing localized defect saddle points from bulk foundation softening.
-- **SLURM Job Array Convergence Skipping**:
-  - Enhanced `submit_dft_array_pure_qe.slurm` generation to check for `JOB DONE.` and skip already-converged calculations instantly, preventing redundant re-execution of frames previously computed locally or in earlier array tasks.
+  - Added participation ratios ($PR$) and top displaced atom breakdowns to imaginary mode warnings and errors in `LineshapeEngine`.
+- **SLURM Job Array Header & Convergence Skipping**:
+  - Included `#SBATCH --array=0-(N-1)%16` automatically in generated `submit_dft_array_pure_qe.slurm` scripts and added `JOB DONE.` checks to skip already-converged frames.
+
+### Changed
+- Reduced default SLURM relaxation allocation in `submit_relaxations_pure_qe.slurm` from 4 GPUs / 4 hours to 1 GPU / 1 hour for faster scheduler turnaround on shared cluster partitions.
+- Made `QERunner` resolve `pw_exe` lazily at execution time so cluster deck preparation (`--prepare-relax`, `--prepare-dft`, `--to-stage 2`) runs without requiring a local Quantum ESPRESSO binary.
+- Generated SLURM submission scripts (`submit_relaxations_pure_qe.slurm`, `submit_dft_array_pure_qe.slurm`, `submit_dft_pure_qe.slurm`) are now copied to the parent project directory alongside `workspace_dir`.
+
+### Fixed
+- **Relative `pseudo_dir` Resolution in Subdirectories**:
+  - Updated `write_qe_input()` to compute the exact relative path from the calculation subdirectory (`qe_gs_relax/`, `dft_calculations/frame_*/`) to the resolved UPF directory and create a local `pseudo` symlink fallback, fixing `readpp` file-not-found errors when `pseudo_dir` is relative.
+- **SLURM Workspace & Frame List Discovery**:
+  - Expanded `WORKSPACE_DIR` and `dft_frames_list.txt` lookup paths in generated SLURM scripts to search `$WORK_DIR/output` and `$WORK_DIR/../output` in addition to `$WORK_DIR` and `$WORK_DIR/hydeph_run`.
+- **Upstream ASE/NumPy Warnings & Singular Plot Limits**:
+  - Scoped warning filters around ASE Maxwell-Boltzmann initialization and `VibrationsData` to suppress upstream NumPy 2.5 shape deprecation and zero-Kelvin divide-by-zero warnings, and guarded `LineshapeEngine` against singular y-axis limits (`y_min == y_max`).
 
 ## [0.8.0] - 2026-11-06
 

@@ -22,6 +22,11 @@ slurm_gpus_per_node: 4
 slurm_cpus_per_task: 8
 gpu_pinning: true
 
+# Relaxation job allocation (Stage 1 pure-QE script; defaults tuned for rapid scheduling)
+slurm_relax_gpus: 1
+slurm_relax_time: "01:00:00"
+slurm_relax_qos: null               # e.g. "boost_qos_dbg" for fast debug queues
+
 # Environment modules (loaded in exact specified order)
 modules:
   - profile/chem-phys
@@ -55,13 +60,16 @@ hydeph config.yaml --prepare-relax
 ```
 
 This creates:
-- `qe_gs_relax/pw.in`: Ground-state BFGS relaxation deck (`occupations = 'fixed'`).
+- `qe_gs_relax/pw.in`: Ground-state BFGS relaxation deck (`occupations = 'fixed'`, supporting fixed-cell `relax` or variable-cell `vc-relax` via `relaxation_calculation`).
 - `qe_es_relax/pw.in`: Excited-state $\Delta\text{SCF}$ relaxation deck (`occupations = 'from_input'`), including symmetry-breaking Jahn-Teller distortion when `auto_jahn_teller_distortion: true`.
-- `submit_relaxations_pure_qe.slurm`: Standalone SLURM script that executes ground-state relaxation, extracts frontier Kohn-Sham eigenvalues to update the lowest-energy $\Delta\text{SCF}$ occupation card if needed, and runs excited-state relaxation.
+- `submit_relaxations_pure_qe.slurm`: Standalone SLURM script (defaulting to 1 GPU and 1 hour via `slurm_relax_gpus: 1` and `slurm_relax_time: "01:00:00"` for rapid queue scheduling) that executes ground-state relaxation, extracts frontier Kohn-Sham eigenvalues to update the lowest-energy $\Delta\text{SCF}$ occupation card if needed, and runs excited-state relaxation.
 
-Submit on the cluster:
+Submit on the cluster (from either the project root or `workspace_dir`):
 ```bash
 sbatch submit_relaxations_pure_qe.slurm
+
+# Or submit to a fast debug queue (e.g. <= 30 min on Leonardo Booster):
+sbatch --qos=boost_qos_dbg --time=00:30:00 submit_relaxations_pure_qe.slurm
 ```
 
 #### Phase B: Stage 2 Candidate Sampling & Stage 3 Input Preparation
@@ -72,15 +80,18 @@ hydeph config.yaml --to-stage 2
 ```
 *(Or explicitly pass `--prepare-dft`.)*
 
-HyDePh ingests completed relaxations, generates the candidate dataset (`candidate_frames.xyz`), writes `pw.in` files into `dft_calculations/frame_*` and `dft_calculations_es/frame_es_*`, and outputs two standalone SLURM launchers:
-1. `submit_dft_array_pure_qe.slurm` + `dft_frames_list.txt`: SLURM Job Array script where each array task labels one frame on 1 GPU.
+HyDePh ingests completed relaxations, runs the foundation bulk stability check, generates the candidate dataset (`candidate_frames.xyz`), writes `pw.in` files with resolved relative `pseudo_dir` paths into `dft_calculations/frame_*` and `dft_calculations_es/frame_es_*`, and outputs two standalone SLURM launchers (written to both `workspace_dir` and the parent directory):
+1. `submit_dft_array_pure_qe.slurm` + `dft_frames_list.txt`: SLURM Job Array script pre-configured with `#SBATCH --array=0-(N-1)%16` where each array task labels one frame on 1 GPU and skips frames that already contain `JOB DONE.`.
 2. `submit_dft_pure_qe.slurm`: Single-node multi-GPU batch script that schedules concurrent `pw.x` processes across all GPUs on the node (`CUDA_VISIBLE_DEVICES=0..G-1`).
 
 #### Phase C: Submit Candidate Frame DFT Calculations
 Submit either the job array (recommended for high throughput across many nodes) or the single-node batch script:
 
 ```bash
-# High-throughput SLURM Job Array (e.g. 80 total GS+ES frames, max 16 concurrent):
+# High-throughput SLURM Job Array (uses embedded #SBATCH --array=0-(N-1)%16 directive):
+sbatch submit_dft_array_pure_qe.slurm
+
+# Or override array range / concurrency explicitly on the command line:
 sbatch --array=0-79%16 submit_dft_array_pure_qe.slurm
 
 # Or single-node multi-GPU batch job:

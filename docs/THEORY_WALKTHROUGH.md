@@ -88,7 +88,7 @@ where $L$ is the supercell dimension and $\alpha_{\mathrm{el}}$ is the elastic d
 - **Compact covalent crystals** ($a \approx 3.5\text{--}4.5\ \text{Å}$): `(3, 3, 3)` for diamond ($215$ atoms, $L = 10.72\ \text{Å}$) or `(3, 3, 2)` for 4H-SiC ($142$ atoms, $L \approx 9.2\text{--}10.1\ \text{Å}$).
 - **Large-lattice ionic crystals** ($a > 5.5\ \text{Å}$): `(2, 2, 2)` for rocksalt alkali halides such as NaCl ($63$ atoms, $L = 11.38\ \text{Å}$).
 
-[`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around the defect cell, locates the defect site via minimum-image coordinate matching, and optimizes the Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) equilibrium geometries (`ground_state_relax_method = "auto" | "foundation" | "dft"`). When a degenerate frontier manifold is detected ($g_{\mathrm{H}} > 1$ or $g_{\mathrm{L}} > 1$) and `auto_jahn_teller_distortion = True`, HyDePh applies a symmetry-breaking displacement (`jahn_teller_amplitude`) prior to $\Delta\text{SCF}$ relaxation to lift electronic degeneracy. Using minimum-image displacements $\Delta \mathbf{R}_{\mathrm{MIC}}$, the relaxed structures define the Franck-Condon displacement vector and total mass-weighted configurational displacement [5]:
+[`DefectBuilder`](../hydeph/defect_builder.py) tiles an $N_1 \times N_2 \times N_3$ array of pristine bulk unit cells around the defect cell, locates the defect site via minimum-image coordinate matching, and optimizes the Ground State ($\mathbf{R}_{\mathrm{GS}}$) and Excited State ($\mathbf{R}_{\mathrm{ES}}$) equilibrium geometries (`ground_state_relax_method = "auto" | "foundation" | "dft"`, supporting both fixed-cell ionic relaxation `relaxation_calculation = "relax"` and variable-cell lattice optimization `relaxation_calculation = "vc-relax"` under target pressure `press_kbar` and symmetry constraints `cell_dofree`). When a degenerate frontier manifold is detected ($g_{\mathrm{H}} > 1$ or $g_{\mathrm{L}} > 1$) and `auto_jahn_teller_distortion = True`, HyDePh applies a symmetry-breaking displacement (`jahn_teller_amplitude`) prior to $\Delta\text{SCF}$ relaxation to lift electronic degeneracy. Using minimum-image displacements $\Delta \mathbf{R}_{\mathrm{MIC}}$, the relaxed structures define the Franck-Condon displacement vector and total mass-weighted configurational displacement [5]:
 
 $$
 \Delta \mathbf{R}_i = \mathrm{MIC}(\mathbf{R}_{\mathrm{ES}, i} - \mathbf{R}_{\mathrm{GS}, i}), \qquad \Delta Q = \sqrt{\sum_{i=1}^N M_i \vert \Delta \mathbf{R}_i \vert^2}
@@ -100,7 +100,7 @@ where $M_i$ is the atomic mass of site $i$. When `allow_fallbacks = False` (defa
 
 ### Stage 2: Four-Phase Active Frame Sampling
 
-[`FrameSampler`](../hydeph/frame_sampler.py) constructs a compact, diverse candidate dataset across four physical regimes:
+Prior to candidate sampling, [`check_foundation_bulk_stability`](../hydeph/pipeline.py) evaluates finite-difference phonons on the pristine bulk unit cell using the foundation potential to verify host lattice dynamic stability and warn of any soft or negative bulk curvatures. [`FrameSampler`](../hydeph/frame_sampler.py) then constructs a compact, diverse candidate dataset across four physical regimes:
 
 1. **Franck-Condon Coordinate Scan**: Linear interpolation and extrapolation along the optical transition path [5, 18]:
 
@@ -110,7 +110,7 @@ $$
 
    The ground-state minimum ($\lambda = 0$, `fc_00`) and excited-state minimum ($\lambda = 1$, `fc_01`) are tagged as **optical anchor frames**.
 
-2. **Defect-Core Rattling**: Two-tier Gaussian displacements applied within $r_{\mathrm{core}} < 6.0\ \text{Å}$ of the defect center to sample local harmonic and anharmonic force constants ($k_2, k_3, k_4$) [19]:
+2. **Defect-Core & Hybrid Rattling**: Two-tier Gaussian displacements (`rattle_mode = "hybrid" | "core" | "whole"`, default `"hybrid"`) where 70% of frames perturb atoms within $r_{\mathrm{core}} < 6.0\ \text{Å}$ (`rattle_cutoff`) of the defect center to sample local harmonic and anharmonic force constants ($k_2, k_3, k_4$) [19], and 30% displace all supercell atoms to anchor long-wavelength bulk restoring forces:
 
 $$
 \mathbf{R}_i' = \mathbf{R}_i + \boldsymbol{\eta}_i, \quad \boldsymbol{\eta}_i \sim \mathcal{N}(0, \sigma_r^2), \quad \sigma_r \in \{0.08, 0.14\}\ \text{Å}
@@ -202,13 +202,14 @@ $$
 
 ### Stage 6A: Normal Modes, Large-Supercell Phonon Embedding & Spectral Density
 
-[`LineshapeEngine`](../hydeph/lineshape.py) computes the finite-difference Hessian around the ground-state equilibrium geometry (parallelized across CPU threads via [`ParallelVibrations`](../hydeph/hpc/parallel_vib.py) when `parallel_hessian = True`) and diagonalizes the mass-weighted dynamical matrix:
+[`LineshapeEngine`](../hydeph/lineshape.py) computes the finite-difference Hessian (displacement step `displacement_delta`, default $0.01\ \text{Å}$) around the ground-state equilibrium geometry (parallelized across CPU threads via [`ParallelVibrations`](../hydeph/hpc/parallel_vib.py) when `parallel_hessian = True`) and diagonalizes the mass-weighted dynamical matrix:
 
 $$
 H_{i\alpha, j\beta} = \frac{\partial^2 V_{\mathrm{hybrid,GS}}}{\partial R_{i\alpha} \partial R_{j\beta}}, \qquad D_{i\alpha, j\beta} = \frac{H_{i\alpha, j\beta}}{\sqrt{M_i M_j}}, \qquad \sum_{j\beta} D_{i\alpha, j\beta} e_{k, j\beta} = \omega_k^2 e_{k, i\alpha}
 $$
 
-- **Imaginary Mode Guardrails & Localization ($\mathrm{IPR}_k$)**: Any mode with $\omega_k^2 < 0$ is flagged (raising a `ValueError` if imaginary modes exceed `max_imaginary_modes`). For every mode $k$, HyDePh computes the Inverse Participation Ratio:
+- **Acoustic Sum Rule & Translation Projection**: When `acoustic_sum_rule = True` (default), [`apply_acoustic_sum_rule_and_projection`](../hydeph/lineshape.py) enforces the tensorial Acoustic Sum Rule on the symmetrized force-constant matrix ($\Phi_{i\alpha, i\beta} \leftarrow \Phi_{i\alpha, i\beta} - \sum_j \Phi_{i\alpha, j\beta}$) and projects out the three center-of-mass rigid translation vectors prior to diagonalization, eliminating spurious translational drift modes.
+- **Imaginary Mode Guardrails & Localization ($\mathrm{IPR}_k$)**: Any non-acoustic mode with $\omega_k^2 < 0$ is logged with its Participation Ratio ($PR_k = \mathrm{IPR}_k^{-1}$) and top displaced atom index, raising a `ValueError` if imaginary modes exceed `max_imaginary_modes`. For every mode $k$, HyDePh computes the Inverse Participation Ratio:
 
 $$
 \mathrm{IPR}_k = \sum_{i=1}^N \left( \sum_{\alpha=x,y,z} \vert e_{k, i\alpha} \vert^2 \right)^2

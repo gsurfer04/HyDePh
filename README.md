@@ -35,12 +35,12 @@ V_{\mathrm{hybrid,ES}}(\mathbf{R}) &= V_{\mathrm{base}}(\mathbf{R}) + N_{\mathrm
 $$
 
 Key capabilities:
-1. **Defect Embedding**: Vectorized tiling of pristine bulk unit cells around a defect unit cell and automated defect coordinate detection via minimum-image distance matching.
-2. **4-Phase Active Sampling**: Generates candidate configurations across the Franck-Condon coordinate, defect-core rattling, and high-temperature foundation MD with incremental Farthest Point Sampling (FPS).
-3. **DFT Labeling & Resumption**: Drives Quantum ESPRESSO (`pw.x` / `pw.exe`) with $\Gamma$-point real wavefunctions (`K_POINTS gamma`), fixed occupations (`occupations = 'fixed'`), atom-scaled convergence thresholds, and fail-closed disk caching.
+1. **Defect Embedding & Relaxation**: Vectorized tiling of pristine bulk unit cells around a defect unit cell, minimum-image defect coordinate detection, and fixed-cell (`relax`) or variable-cell (`vc-relax`) BFGS geometry optimization with real-time step and SCF progress logging.
+2. **4-Phase Active Sampling**: Verifies foundation bulk dynamic stability, then generates candidate configurations across the Franck-Condon coordinate, hybrid core/whole-supercell rattling, and high-temperature foundation MD with incremental Farthest Point Sampling (FPS).
+3. **DFT Labeling & Resumption**: Drives Quantum ESPRESSO (`pw.x` / `pw.exe`) with $\Gamma$-point real wavefunctions (`K_POINTS gamma`), fixed occupations (`occupations = 'fixed'`), atom-scaled convergence thresholds, relative pseudopotential path resolution, and fail-closed disk caching.
 4. **Constrained $\Delta\text{SCF}$ Excited States**: Automatically selects the lowest-energy in-gap excitation across spin channels from ground-state Kohn-Sham eigenvalues, detects HOMO/LUMO orbital degeneracies, applies Jahn-Teller symmetry breaking, and extracts adiabatic Zero-Phonon Line ($E_{\mathrm{ZPL}}$), absorption, emission, and Stokes shift energies.
 5. **Paired GPU $\Delta$-NEP Training**: Fits independent ground-state and optical excited-state residuals in GPUMD with mean baseline offset subtraction ($\bar{\Delta e}_S$), automated quality control gates, and optional committee ensembles.
-6. **Large-Supercell Phonon Embedding**: Embeds localized defect vibrations and forces into large bulk phonon supercells ($L \ge 10\text{--}12\ \text{Å}$) via force or displacement projection, eliminating discrete mode-comb artifacts.
+6. **Large-Supercell Phonon Embedding & Acoustic Sum Rule**: Enforces tensorial Acoustic Sum Rule ($\sum_j \Phi_{ij} = 0$) and center-of-mass translation projection, and embeds localized defect vibrations and forces into large bulk phonon supercells ($L \ge 10\text{--}12\ \text{Å}$) via force or displacement projection.
 7. **Paired Cumulant Anharmonic Dynamics**: Computes multi-temperature emission lineshapes using NVT thermalization followed by unperturbed NVE microcanonical molecular dynamics with the physical energy-gap cumulant generating function and Linderälv Gaussian time-domain windowing.
 8. **1D Configuration Coordinate & Stokes Shift**: Evaluates paired potential surfaces along $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda (\mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}})$ to extract $\Delta Q$, asymmetric relaxation energies $\Delta E_{\mathrm{rel,GS}} \ne \Delta E_{\mathrm{rel,ES}}$, effective phonon energies $\hbar\Omega_{S}$, and Stokes shift $\Delta E_{\mathrm{Stokes}}$.
 9. **Provenance & Numerical Data Export**: Exports publication-ready figures, CSVs, `normal_modes.csv`, and `provenance.json` recording software versions, input SHA256 hashes, and execution metrics.
@@ -207,6 +207,13 @@ summary = run_pipeline(config)
 |---|---|---|---|
 | `supercell_repeat` | `tuple of int` | `(2, 2, 2)` | Supercell expansion multipliers `(nx, ny, nz)`. Physical length $L \ge 10\text{--}12\ \text{Å}$ is recommended. |
 | `ground_state_relax_method` | `str` | `"auto"` | Stage 1 relaxation backend: `"auto"`, `"foundation"`, or `"dft"`. |
+| `relaxation_calculation` | `str` | `"relax"` | Quantum ESPRESSO optimization mode: `"relax"` (fixed-cell ionic) or `"vc-relax"` (variable-cell lattice & ionic; aliases: `relaxation_mode`, `relax_mode`, `calculation`). |
+| `cell_dynamics` | `str` | `"bfgs"` | Cell dynamics algorithm for `vc-relax` (`'bfgs'`, `'damp'`, `'pr'`, `'none'`). |
+| `cell_dofree` | `str` | `"all"` | Cell degrees of freedom to optimize during `vc-relax` (`'all'`, `'ibrav'`, `'shape'`, `'volume'`, `'2Dxy'`, etc.). |
+| `press_kbar` | `float` | `0.0` | Target hydrostatic pressure in kbar for `vc-relax` (aliases: `press`, `cell_pressure_kbar`). |
+| `cell_factor` | `float` | `2.0` | Cell expansion margin factor for `vc-relax` FFT grids in QE. |
+| `relax_forc_conv_thr` | `float` | `1.0e-3` | Force convergence threshold (Ry/Bohr) for QE BFGS relaxations. |
+| `relax_nstep` | `int` | `100` | Maximum ionic steps for QE BFGS relaxations. |
 | `charge` / `tot_charge` | `float` | `0.0` | Net supercell charge in units of $e$ (`&SYSTEM tot_charge` in QE). |
 | `spin_polarized` | `bool` | `True` | Spin-unrestricted calculation (`nspin=2` in QE). |
 | `spin_multiplicity` | `int` | `2` | Spin multiplicity $2S+1$ ($1$: singlet, $2$: doublet, $3$: triplet). |
@@ -231,6 +238,8 @@ summary = run_pipeline(config)
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `random_seed` | `int` | `42` | RNG seed for rattling displacements and MD velocities. |
+| `rattle_mode` | `str` | `"hybrid"` | Rattling strategy: `"hybrid"` (70% defect core + 30% whole supercell), `"core"`, or `"whole"`. |
+| `rattle_cutoff` | `float` | `6.0` | Defect-core localization radius in Å for Gaussian rattling. |
 | `force_resample` | `bool` | `False` | Reuses existing `relaxed_gs.xyz`, `relaxed_es.xyz`, and `candidate_frames.xyz` when `False`; regenerates when `True`. |
 | `force_retrain` | `bool` | `False` | Reuses `nep_delta_gs.txt` / `nep_delta_es.txt` when cache manifest matches; retrains when `True`. |
 | `max_dft_frames` | `int` | `None` | Target total converged DFT frames. Reuses converged frames and executes remaining quota. |
@@ -269,6 +278,9 @@ summary = run_pipeline(config)
 | `dephasing_temperature_coefficient` | `float` | `5.5e-5` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). |
 | `phonon_supercell_repeat` | `tuple of int` | `None` | Supercell repeat for expanded phonon embedding calculations. |
 | `phonon_embedding_method` | `str` | `"displacement"` | Embedding mode projection: `"displacement"` or `"force"`. |
+| `acoustic_sum_rule` | `bool` | `True` | Enforces tensorial Acoustic Sum Rule ($\sum_j \Phi_{ij} = 0$) and projects out center-of-mass translations from the dynamical matrix. |
+| `displacement_delta` | `float` | `0.01` | Finite-difference displacement step (Å) for numerical Hessian evaluation. |
+| `max_imaginary_modes` | `int` | `0` | Maximum imaginary normal modes permitted before raising a `ValueError`. |
 | `phonon_y_min` / `phonon_y_max` | `float` | `None` | Explicit y-axis limits for phonon spectral density plots. |
 | `plot_configuration_coordinate` | `bool` | `True` | Generates 2-panel 1D configuration coordinate and Stokes shift figure. |
 
@@ -281,6 +293,9 @@ summary = run_pipeline(config)
 | `slurm_account` | `str` | `None` | SLURM account string (reads `$CINECA_ACCOUNT` or `$SLURM_ACCOUNT`). |
 | `slurm_partition` | `str` | `None` | Target partition (e.g. `boost_usr_prod`). |
 | `slurm_modules` / `modules` | `list of str` | `[]` | Environment modules loaded in exact sequence (e.g. `['profile/chem-phys', 'quantum-espresso/7.2--openmpi--4.1.4--cuda--11.8']`). |
+| `slurm_relax_gpus` | `int` | `1` | GPUs requested in `submit_relaxations_pure_qe.slurm` (alias: `relax_gpus`). |
+| `slurm_relax_time` | `str` | `"01:00:00"` | Walltime limit for relaxation SLURM jobs (alias: `relax_time`). |
+| `slurm_relax_qos` | `str` | `None` | Optional QoS for relaxation SLURM jobs (e.g. `"boost_qos_dbg"`; alias: `relax_qos`). |
 | `prepare_relaxation_inputs` | `bool` | `False` | Writes pure QE relaxation inputs and SLURM runner scripts. |
 | `prepare_dft_inputs` | `bool` | `False` | Writes pure QE candidate frame inputs and SLURM job array scripts. |
 | `parallel_hessian` | `bool` | `True` | Evaluates finite-difference supercell Hessian displacements in parallel via `ParallelVibrations`. |
@@ -378,7 +393,7 @@ benchmarks/
 docs/
 ├── THEORY_WALKTHROUGH.md          # Theoretical formulation & literature citations
 └── hpc_guide.md                   # HPC & SLURM cluster execution guide
-tests/                             # Automated test suite (151 unit & regression tests)
+tests/                             # Automated test suite (162 unit & regression tests)
 CHANGELOG.md                       # Release notes and history
 CONTRIBUTING.md                    # Developer and contribution guidelines
 pyproject.toml                     # Packaging metadata, CLI scripts & dependencies

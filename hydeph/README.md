@@ -22,17 +22,17 @@ See the root [`README.md`](../README.md) for full configuration tables and [`doc
 
 ## Modules
 
-- `config.py`: `ToolkitConfig` dataclass, range verification, and UPF discovery.
-- `defect_builder.py`: Vectorized supercell tiling, minimum-image defect detection, and ground/excited-state DFT optimization.
-- `frame_sampler.py`: 4-phase representative frame generation (Franck-Condon scan, core rattling, foundation MD + FPS, anchor frame priority).
-- `qe_runner.py`: Quantum ESPRESSO runner with fixed occupations, atom-scaled convergence thresholds, single-pass parsing, and constrained $\Delta\text{SCF}$ occupations.
+- `config.py`: `ToolkitConfig` dataclass, range verification, and UPF path resolution (`resolve_pseudo_path`).
+- `defect_builder.py`: Vectorized supercell tiling, minimum-image defect detection, and ground/excited-state DFT optimization (`relax` and `vc-relax`).
+- `frame_sampler.py`: 4-phase representative frame generation (Franck-Condon scan, core/whole/hybrid rattling, foundation MD + FPS, anchor frame priority).
+- `qe_runner.py`: Quantum ESPRESSO runner with fixed occupations, relative `pseudo_dir` resolution, real-time SCF and BFGS step monitoring, variable-cell parsing, and constrained $\Delta\text{SCF}$ occupations.
 - `delta_trainer.py`: Baseline subtraction, mean energy offset subtraction ($\bar{\Delta e}_S$), automated quality control gates, and GPUMD training.
 - `calculator.py`: `HybridDefectCalculator` and `PairedDefectCalculator` combining foundation potentials with paired ground- and optical excited-state $\Delta$-NEPs.
-- `lineshape.py`: Large-supercell phonon embedding, $(\hbar\omega)^3$ PL spectra, finite-$T$ DWF, normal mode decomposition, and paired cumulant NVE dynamics.
+- `lineshape.py`: Large-supercell phonon embedding, Acoustic Sum Rule projection, $(\hbar\omega)^3$ PL spectra, finite-$T$ DWF, normal mode decomposition, and paired cumulant NVE dynamics.
 - `cc_diagram.py`: Paired 1D configuration coordinate curves, vertical transition energies, and Stokes shift analysis.
 - `provenance.py`: Environmental provenance, input SHA256 hashes, and manifest tracking for scientific reproducibility.
 - `validator.py`: Dry-run CLI structure, valence, and spin validator.
-- `pipeline.py`: Pipeline orchestrator with stage resumption (`--from-stage 1..6`).
+- `pipeline.py`: Pipeline orchestrator with foundation bulk stability checks and stage resumption (`--from-stage 1..6`).
 
 ---
 
