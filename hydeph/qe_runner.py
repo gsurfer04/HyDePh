@@ -291,9 +291,6 @@ def write_qe_input(
     symbols = atoms.get_chemical_symbols()
     unique_symbols = sorted(list(set(symbols)))
 
-    # Fortran namelist parser requires forward slashes
-    clean_pseudo_dir = config.pseudo_dir.replace("\\", "/") if config.pseudo_dir else "./pseudo"
-
     # Inspect UPF files for Norm-Conserving status and valence electron counts
     meta_by_sym: Dict[str, Dict[str, Any]] = {}
     for s in unique_symbols:
@@ -308,6 +305,41 @@ def write_qe_input(
                 logger.info(f"[+] Auto-discovered pseudopotential for '{s}' during QE input prep: {os.path.basename(disc)}")
         full_upf = resolve_pseudo_path(upf_rel, config.pseudo_dir)
         meta_by_sym[s] = inspect_upf_metadata(full_upf)
+
+    # Resolve target pseudopotential directory on disk and compute exact relative path from pw_in_path
+    pw_dir = os.path.dirname(os.path.abspath(pw_in_path))
+    target_pseudo_dir = None
+    for s in unique_symbols:
+        upf_cand = config.pseudopotentials.get(s, "")
+        if upf_cand:
+            p = resolve_pseudo_path(upf_cand, config.pseudo_dir)
+            if os.path.isfile(p):
+                target_pseudo_dir = os.path.dirname(os.path.abspath(p))
+                break
+
+    if not target_pseudo_dir:
+        raw_pseudo = getattr(config, "pseudo_dir", None) or "./pseudo"
+        cand_p = os.path.abspath(raw_pseudo)
+        if os.path.isdir(cand_p):
+            target_pseudo_dir = cand_p
+        else:
+            ws_parent = os.path.dirname(os.path.abspath(getattr(config, "workspace_dir", "./output")))
+            cand_ws_p = os.path.join(ws_parent, raw_pseudo.lstrip("./\\"))
+            target_pseudo_dir = cand_ws_p if os.path.isdir(cand_ws_p) else cand_p
+
+    try:
+        rel_pseudo = os.path.relpath(target_pseudo_dir, pw_dir).replace("\\", "/")
+        clean_pseudo_dir = rel_pseudo
+    except (ValueError, Exception):
+        clean_pseudo_dir = config.pseudo_dir.replace("\\", "/") if config.pseudo_dir else "./pseudo"
+
+    try:
+        local_pseudo_link = os.path.join(pw_dir, "pseudo")
+        if not os.path.exists(local_pseudo_link) and target_pseudo_dir and os.path.isdir(target_pseudo_dir):
+            rel_to_target = os.path.relpath(target_pseudo_dir, pw_dir)
+            os.symlink(rel_to_target, local_pseudo_link)
+    except Exception:
+        pass
 
     all_nc = bool(unique_symbols) and all(meta_by_sym[s]["is_norm_conserving"] is True for s in unique_symbols)
     all_z = bool(unique_symbols) and all(meta_by_sym[s]["z_valence"] is not None for s in unique_symbols)
@@ -2486,7 +2518,7 @@ export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # Locate workspace directory containing relaxation folders
 WORKSPACE_DIR=""
-for cand in "$WORK_DIR" "$WORK_DIR/hydeph_run" "$WORK_DIR/../hydeph_run"; do
+for cand in "$WORK_DIR" "$WORK_DIR/output" "$WORK_DIR/hydeph_run" "$WORK_DIR/../output" "$WORK_DIR/../hydeph_run" "$WORK_DIR/.."; do
     if [ -d "$cand/qe_gs_relax" ]; then
         WORKSPACE_DIR="$(cd "$cand" && pwd)"
         break
@@ -2503,16 +2535,18 @@ cd "$WORKSPACE_DIR"
 
 # Resolve pseudopotentials directory
 PSEUDO_DIR=""
-for cand in "$WORKSPACE_DIR/pseudo" "$WORKSPACE_DIR/../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo"; do
+for cand in "$WORKSPACE_DIR/pseudo" "$WORKSPACE_DIR/../pseudo" "$WORKSPACE_DIR/../../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo" "$WORK_DIR/../../pseudo"; do
     if [ -d "$cand" ]; then
         PSEUDO_DIR="$(cd "$cand" && pwd)"
         break
     fi
 done
 if [ -n "$PSEUDO_DIR" ]; then
-    [ -d "$WORKSPACE_DIR/qe_gs_relax" ] && [ ! -e "$WORKSPACE_DIR/qe_gs_relax/pseudo" ] && ln -sfn "$PSEUDO_DIR" "$WORKSPACE_DIR/qe_gs_relax/pseudo"
-    [ -d "$WORKSPACE_DIR/qe_es_relax" ] && [ ! -e "$WORKSPACE_DIR/qe_es_relax/pseudo" ] && ln -sfn "$PSEUDO_DIR" "$WORKSPACE_DIR/qe_es_relax/pseudo"
-    [ -d "$WORKSPACE_DIR/qe_gs_scf" ] && [ ! -e "$WORKSPACE_DIR/qe_gs_scf/pseudo" ] && ln -sfn "$PSEUDO_DIR" "$WORKSPACE_DIR/qe_gs_scf/pseudo"
+    for sub in qe_gs_relax qe_es_relax qe_gs_scf; do
+        if [ -d "$WORKSPACE_DIR/$sub" ] && [ ! -e "$WORKSPACE_DIR/$sub/pseudo" ]; then
+            ln -sfn "$PSEUDO_DIR" "$WORKSPACE_DIR/$sub/pseudo"
+        fi
+    done
 fi
 
 # 1. Run Ground State Relaxation
@@ -2779,7 +2813,7 @@ cd "$WORK_DIR"
 
 # Locate workspace directory where dft_calculations lives
 WORKSPACE_DIR=""
-for cand in "$WORK_DIR" "$WORK_DIR/hydeph_run"; do
+for cand in "$WORK_DIR" "$WORK_DIR/output" "$WORK_DIR/hydeph_run" "$WORK_DIR/../output" "$WORK_DIR/.."; do
     if [ -d "$cand/dft_calculations" ]; then
         WORKSPACE_DIR="$(cd "$cand" && pwd)"
         break
@@ -2803,7 +2837,7 @@ export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # Resolve pseudo directory and symlink into calculation workspace
 PSEUDO_DIR=""
-for cand in "$PWD/pseudo" "$PWD/../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo"; do
+for cand in "$PWD/pseudo" "$PWD/../pseudo" "$PWD/../../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo" "$WORK_DIR/../../pseudo"; do
     if [ -d "$cand" ]; then
         PSEUDO_DIR="$(cd "$cand" && pwd)"
         break
@@ -2931,7 +2965,7 @@ export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # Locate dft_frames_list.txt across candidate paths relative to submit directory
 LIST_FILE=""
-for cand in "$WORK_DIR/dft_frames_list.txt" "$WORK_DIR/hydeph_run/dft_frames_list.txt" "$WORK_DIR/../dft_frames_list.txt"; do
+for cand in "$WORK_DIR/dft_frames_list.txt" "$WORK_DIR/output/dft_frames_list.txt" "$WORK_DIR/hydeph_run/dft_frames_list.txt" "$WORK_DIR/../dft_frames_list.txt" "$WORK_DIR/../output/dft_frames_list.txt"; do
     if [ -f "$cand" ]; then
         LIST_FILE="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
         break
@@ -2988,7 +3022,7 @@ fi
 
 # Resolve pseudo directory and ensure it is accessible inside the target frame directory
 PSEUDO_DIR=""
-for cand in "$WORKSPACE_DIR/pseudo" "$WORKSPACE_DIR/../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo"; do
+for cand in "$WORKSPACE_DIR/pseudo" "$WORKSPACE_DIR/../pseudo" "$WORKSPACE_DIR/../../pseudo" "$WORK_DIR/pseudo" "$WORK_DIR/../pseudo" "$WORK_DIR/../../pseudo"; do
     if [ -d "$cand" ]; then
         PSEUDO_DIR="$(cd "$cand" && pwd)"
         break
