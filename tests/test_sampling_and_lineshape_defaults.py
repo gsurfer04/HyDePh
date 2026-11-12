@@ -18,8 +18,12 @@ def _make_cfg(tmp_path, **kwargs):
         import ase.io
         uc = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[3.0, 3.0, 3.0], pbc=True)
         ase.io.write(str(p_file), uc)
+    pot_file = tmp_path / "pot_dummy.txt"
+    if not pot_file.exists():
+        pot_file.write_text("dummy foundation potential")
     defaults = {
         "pristine_cell_path": str(p_file),
+        "foundation_potential_path": str(pot_file),
         "workspace_dir": str(tmp_path / "ws"),
     }
     defaults.update(kwargs)
