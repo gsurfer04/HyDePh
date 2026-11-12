@@ -1,6 +1,5 @@
 """Tests for Delta-SCF spec resolution, in-gap level diagram, and state continuity checks."""
 
-import os
 import json
 import pytest
 from ase import Atoms
@@ -9,7 +8,6 @@ from hydeph.config import ToolkitConfig
 from hydeph.qe_runner import (
     resolve_delta_scf_spec,
     parse_qe_band_gap,
-    build_delta_scf_occupations,
     QERunner,
 )
 

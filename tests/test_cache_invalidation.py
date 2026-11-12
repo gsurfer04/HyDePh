@@ -7,7 +7,6 @@ from ase import Atoms
 from hydeph.config import ToolkitConfig
 from hydeph.qe_runner import check_pw_in_matches_atoms, extract_and_attach_adiabatic_energetics
 from hydeph.provenance import compute_atoms_hash, write_stage_manifest, verify_stage_manifest
-from hydeph.frame_sampler import FrameSampler
 
 
 def test_check_pw_in_matches_atoms_invalidation_cases(tmp_path):

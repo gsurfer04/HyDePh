@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import logging
 from typing import Tuple, Optional, List, Dict, Any
 import numpy as np
@@ -14,11 +13,9 @@ from ase.optimize import BFGS
 from ase.constraints import FixAtoms
 from calorine.calculators import CPUNEP
 
-from .config import ToolkitConfig, resolve_pseudo_path
+from .config import ToolkitConfig
 from .calculator import load_foundation_calculator
 from .qe_runner import (
-    build_delta_scf_occupations,
-    inspect_upf_metadata,
     parse_qe_band_gap,
     resolve_delta_scf_spec,
 )

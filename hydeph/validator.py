@@ -7,6 +7,7 @@ foundation potential, and planned DFT job budgets without running calculations.
 from __future__ import annotations
 
 import os
+import json
 import logging
 from typing import Dict, Any, List
 import numpy as np
