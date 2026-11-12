@@ -79,21 +79,34 @@ Run end-to-end calculations directly from a YAML or TOML configuration file:
 hydeph config.yaml
 ```
 
+Dedicated subcommands for modular analysis and HPC management:
+```bash
+# Check workspace execution progress, stage completion, and pending DFT tasks
+hydeph status [workspace|config.yaml]
+
+# Display Delta-NEP training/test parity metrics, small-displacement gates, and QC summary
+hydeph qc [workspace|config.yaml]
+
+# Sweep smearing and dephasing parameters directly without rerunning Stages 1-5
+hydeph lineshape config.yaml --smearing 5.0 --dephasing 1.0
+
+# Systematic convergence scan across phonon supercell expansion and smearing
+hydeph converge config.yaml --repeats 1 2 3 --smearings 2.0 5.0
+
+# Validate configuration and dry-run defect setup without running DFT
+hydeph validate config.yaml
+```
+
 Stage control, worker concurrency, and HPC input preparation flags:
 ```bash
 # Resume from a specific stage (1..6)
-hydeph config.yaml --from-stage 3 --max-dft 30 --workers 1
+hydeph run config.yaml --from-stage 3 --max-dft 30 --workers 1
 
 # Pre-generate Stage 1 pure-QE relaxation decks and SLURM runner script
 hydeph config.yaml --prepare-relax
 
 # Run Stages 1-2 and pre-generate Stage 3 candidate pw.in decks and SLURM job array
 hydeph config.yaml --to-stage 2
-```
-
-Validate configuration and dry-run defect setup without running DFT:
-```bash
-hydeph validate config.yaml
 ```
 
 ### 3. Python API
@@ -207,7 +220,8 @@ summary = run_pipeline(config)
 |---|---|---|---|
 | `supercell_repeat` | `tuple of int` | `(2, 2, 2)` | Supercell expansion multipliers `(nx, ny, nz)`. Physical length $L \ge 10\text{--}12\ \text{Å}$ is recommended. |
 | `ground_state_relax_method` | `str` | `"auto"` | Stage 1 relaxation backend: `"auto"`, `"foundation"`, or `"dft"`. |
-| `relaxation_calculation` | `str` | `"relax"` | Quantum ESPRESSO optimization mode: `"relax"` (fixed-cell ionic) or `"vc-relax"` (variable-cell lattice & ionic; aliases: `relaxation_mode`, `relax_mode`, `calculation`). |
+| `relaxation_calculation` | `str` | `"relax"` | Quantum ESPRESSO optimization mode: `"relax"` (fixed-cell ionic) or `"vc-relax"` (variable-cell lattice & ionic; restricted to bulk unless `allow_defect_vc_relax=True`). |
+| `allow_defect_vc_relax` | `bool` | `False` | Explicit opt-in safety guard required to run `vc-relax` on supercells with defects. |
 | `cell_dynamics` | `str` | `"bfgs"` | Cell dynamics algorithm for `vc-relax` (`'bfgs'`, `'damp'`, `'pr'`, `'none'`). |
 | `cell_dofree` | `str` | `"all"` | Cell degrees of freedom to optimize during `vc-relax` (`'all'`, `'ibrav'`, `'shape'`, `'volume'`, `'2Dxy'`, etc.). |
 | `press_kbar` | `float` | `0.0` | Target hydrostatic pressure in kbar for `vc-relax` (aliases: `press`, `cell_pressure_kbar`). |
@@ -216,7 +230,7 @@ summary = run_pipeline(config)
 | `relax_nstep` | `int` | `100` | Maximum ionic steps for QE BFGS relaxations. |
 | `charge` / `tot_charge` | `float` | `0.0` | Net supercell charge in units of $e$ (`&SYSTEM tot_charge` in QE). |
 | `spin_polarized` | `bool` | `True` | Spin-unrestricted calculation (`nspin=2` in QE). |
-| `spin_multiplicity` | `int` | `2` | Spin multiplicity $2S+1$ ($1$: singlet, $2$: doublet, $3$: triplet). |
+| `spin_multiplicity` | `int` | *(required if spin_polarized)* | Spin multiplicity $2S+1$ ($1$: singlet, $2$: doublet, $3$: triplet). Required when `spin_polarized=True`. |
 | `tot_magnetization` | `int` | `None` | Unpaired electrons $2S$; synchronized with `spin_multiplicity`. |
 | `excited_state_method` | `str` | `"delta_scf"` | Method for excited state: `"delta_scf"` (constrained occupations), `"spin_proxy"`, or `"synthetic"`. |
 | `paired_delta_nep` | `bool` | `True` | Trains independent $\Delta V_{\mathrm{GS}}$ and $\Delta V_{\mathrm{ES}}$ models for separate ground and excited surfaces. |
@@ -226,7 +240,7 @@ summary = run_pipeline(config)
 | `delta_scf_homo_degeneracy` | `int` | `None` | Degeneracy of HOMO state for symmetric hole occupation; auto-detected when `None`. |
 | `delta_scf_lumo_degeneracy` | `int` | `None` | Degeneracy of LUMO state ($1$ for singlet, $2$ for doublet, etc.) for symmetric orbital filling; auto-detected when `None`. |
 | `delta_scf_spin_channel` | `int` | `None` | Spin channel for excitation ($1$: up, $2$: down); auto-selected via lowest excitation energy when `None`. |
-| `auto_jahn_teller_distortion` | `bool` | `True` | Applies symmetry-breaking distortion (`jahn_teller_amplitude`) prior to $\Delta\text{SCF}$ relaxation when degenerate orbitals are detected. |
+| `auto_jahn_teller_distortion` | `bool` | `True` | Applies symmetry-breaking distortion (`jahn_teller_amplitude`) prior to $\Delta\text{SCF}$ relaxation when integer filling on degenerate orbitals is detected, finding the low-symmetry Jahn-Teller minimum. Fractional fillings ($e^{0.5}e^{0.5}$) preserve high symmetry. |
 | `ecutwfc` | `float` | `None` | Kinetic energy cutoff for wavefunctions in Ry (auto-derived from element hardness and UPF metadata when `None`). |
 | `ecutrho` | `float` | `None` | Kinetic energy cutoff for charge density in Ry (auto-derived: $4 \times \text{ecutwfc}$ for norm-conserving, $\ge 8 \times$ for ultrasoft/PAW). |
 | `conv_thr` | `str` | `None` | SCF convergence threshold in QE (defaults to $10^{-10}\ \text{Ry/atom}$). |
@@ -274,10 +288,10 @@ summary = run_pipeline(config)
 | `anharmonic_md_steps` | `int` | `2500` | NVE production steps per trajectory for energy-gap autocorrelation sampling. |
 | `anharmonic_n_trajectories` | `int` | `1` | Number of independent NVE trajectories for ensemble averaging. |
 | `anharmonic_acf_damping_meV` | `float` | `2.0` | Gaussian time-domain window width $\gamma_{\mathrm{acf}}$ for smoothing autocorrelation truncation noise. |
-| `dephasing_gamma_meV` | `float` | `1.5` | Base ZPL dephasing width $\gamma_0$ in meV. |
-| `dephasing_temperature_coefficient` | `float` | `5.5e-5` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). |
+| `dephasing_gamma_meV` | `float` | `1.0` | Base ZPL instrument/lifetime dephasing width $\gamma_0$ in meV. |
+| `dephasing_temperature_coefficient` | `float` | `0.0` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). Defaults to 0.0 (no artificial thermal broadening). |
 | `phonon_supercell_repeat` | `tuple of int` | `None` | Supercell repeat for expanded phonon embedding calculations. |
-| `phonon_embedding_method` | `str` | `"displacement"` | Embedding mode projection: `"displacement"` or `"force"`. |
+| `phonon_embedding_method` | `str` | `"force"` | Embedding mode projection: `"force"` (Alkauskas/Razinkovas) or `"displacement"`. |
 | `acoustic_sum_rule` | `bool` | `True` | Enforces tensorial Acoustic Sum Rule ($\sum_j \Phi_{ij} = 0$) and projects out center-of-mass translations from the dynamical matrix. |
 | `displacement_delta` | `float` | `0.01` | Finite-difference displacement step (Å) for numerical Hessian evaluation. |
 | `max_imaginary_modes` | `int` | `0` | Maximum imaginary normal modes permitted before raising a `ValueError`. |
@@ -323,11 +337,15 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 
 ## Benchmark Systems
 
-| System | Host ($\Theta_D$) | Supercell ($N_{\mathrm{atoms}}$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | Adiabatic $E_{\mathrm{ZPL}}$ | Key Spectroscopic Result |
-|---|---|---|---|---|---|---|
-| **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3\times 3\times 3$ ($215$) | $2.91$ | $0.562$ | $1.716\ \mathrm{eV}$ | Sharp ZPL ($\mathrm{DWF}_0 = 5.46\%$) visible up to $300\ \mathrm{K}$; $64.6\ \mathrm{meV}$ $a_1$ resonance & smooth sideband wing |
-| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $3\times 3\times 2$ ($142$, $5\times 5\times 2$ emb) | $1.48$ ($2.51$) | $0.481$ ($0.763$) | $1.096\ \mathrm{eV}$ | Attested 3 peaks reproduced at $-34, -73, -96\ \mathrm{meV}$; distinct prominent ZPL preserved at $300\ \mathrm{K}$ ($\mathrm{DWF}_0 = 22.80\%$ in $a_1$ manifold) [Jin et al. PRM 2021] |
-| **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $11.58$ | $2.220$ | $1.274\ \mathrm{eV}$ | Strong coupling ($\Delta E_{\mathrm{Stokes}} = 0.671\ \mathrm{eV}$); smooth FWHM broadening $163.8 \to 263.1\ \mathrm{meV}$ ($10\text{--}300\ \mathrm{K}$) |
+| System | Host ($\Theta_D$) | Supercell ($N_{\mathrm{atoms}}$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | Adiabatic $E_{\mathrm{ZPL}}$ | Stokes Shift | Key Spectroscopic Result |
+|---|---|---|---|---|---|---|---|
+| **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3\times 3\times 3$ ($215$) | $2.31$ | $0.534$ | $2.125\ \mathrm{eV}$ | $235.1\ \mathrm{meV}$ | Sharp ZPL ($\mathrm{DWF}_0 = 9.97\%$) visible up to $300\ \mathrm{K}$; $64.6\ \mathrm{meV}$ $a_1$ resonance & smooth sideband wing |
+| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $3\times 3\times 2$ ($142$, $5\times 5\times 2$ emb) | $2.92$ | $0.763$ | $1.096\ \mathrm{eV}$ | $273.6\ \mathrm{meV}$ | Attested 3 peaks reproduced at $-34, -73, -96\ \mathrm{meV}$; distinct prominent ZPL preserved at $300\ \mathrm{K}$ [Jin et al. PRM 2021] |
+| **CsI F-Center** | Large-lattice ionic ($125\ \mathrm{K}$) | $2\times 2\times 2$ ($15$) | $14.89$ | $4.330$ | $0.694\ \mathrm{eV}$ | $193.2\ \mathrm{meV}$ | Ultra-strong vibronic coupling ($S \gg 10$); zero DWF with physical Gaussian broadening across temperatures |
+| **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $11.58$ | $2.220$ | $1.274\ \mathrm{eV}$ | $560.1\ \mathrm{meV}$ | Strong coupling ($\Delta E_{\mathrm{Stokes}} = 0.560\ \mathrm{eV}$); smooth FWHM broadening $163.8 \to 263.1\ \mathrm{meV}$ ($10\text{--}300\ \mathrm{K}$) |
+
+> [!NOTE]
+> The 4H-SiC benchmark distinguishes the fast foundation-phonon test from the full $\Delta\text{SCF}$ pipeline run. The full pipeline uses embedded $5\times 5\times 2$ supercell phonons driven by exact $\Delta\text{SCF}$ forces to reproduce the experimental Jin et al. vibronic features.
 
 ### 4H-SiC $kk$-Divacancy Benchmark Reproduction (Jin et al., PRM 2021)
 
@@ -370,10 +388,16 @@ For environments without GPU support, HyDePh detects Windows paths, Microsoft MP
 hydeph/
 ├── __init__.py                    # Package exports and version metadata
 ├── __main__.py                    # CLI entrypoint (python -m hydeph)
+├── cli_commands.py                # Dedicated subcommands (status, qc, lineshape, converge)
 ├── config.py                      # ToolkitConfig dataclass, file I/O & validation
 ├── defect_builder.py              # Supercell embedding & defect coordinate locator
 ├── frame_sampler.py               # 4-phase frame sampler (FC, rattle, streamed MD+FPS)
-├── qe_runner.py                   # Quantum ESPRESSO runner (Gamma-point, Delta-SCF)
+├── qe/                            # Modular Quantum ESPRESSO subsystem
+│   ├── io.py                      # Input deck generation & executable resolution
+│   ├── parsers.py                 # Structured output parsing & eigenvalue analysis
+│   ├── runner.py                  # Process execution, concurrent workers & state continuity
+│   └── slurm.py                   # Standalone HPC decks & SLURM array script generator
+├── qe_runner.py                   # Backward-compatible re-exports for QE subsystem
 ├── delta_trainer.py               # Baseline subtraction, GPUMD training & QC gates
 ├── calculator.py                  # HybridDefectCalculator & PairedDefectCalculator
 ├── lineshape.py                   # Quantum generating functions & NVE cumulant dynamics
@@ -389,11 +413,15 @@ hydeph/
 benchmarks/
 ├── diamond-nvminus/               # Diamond NV- benchmark data & figures
 ├── 4H-SiC/                        # 4H-SiC kk divacancy benchmark data & figures
+├── CsI/                           # CsI F-center ultra-strong coupling benchmark
 └── NaCl/                          # NaCl F-center benchmark data & figures
 docs/
 ├── THEORY_WALKTHROUGH.md          # Theoretical formulation & literature citations
 └── hpc_guide.md                   # HPC & SLURM cluster execution guide
-tests/                             # Automated test suite (162 unit & regression tests)
+scripts/
+├── run_benchmarks.py              # Automated turnkey benchmark execution runner
+└── verify_benchmarks.py           # Rigorous physical invariant & sum-rule validator
+tests/                             # Automated test suite (191 unit, regression & integration tests)
 CHANGELOG.md                       # Release notes and history
 CONTRIBUTING.md                    # Developer and contribution guidelines
 pyproject.toml                     # Packaging metadata, CLI scripts & dependencies

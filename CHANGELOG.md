@@ -5,6 +5,55 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-11-12
+
+### Added
+- **Modular Quantum ESPRESSO Subsystem (`hydeph.qe`)**:
+  - Refactored and split the monolithic `qe_runner.py` into modular components under `hydeph/qe/`:
+    - `io.py`: Input deck generation (`write_qe_input`), executable resolution (`resolve_pw_executable`), and deck validation.
+    - `parsers.py`: Structured output parsing, SCF convergence extraction, and band-gap analysis.
+    - `runner.py`: Unified labeling loops, concurrent process management, and failure recovery.
+    - `slurm.py`: Standalone HPC deck generators and SLURM batch/array scripts.
+  - Re-exported all legacy symbols through `hydeph.qe_runner` for complete backward compatibility.
+- **CLI Subcommand Suite**:
+  - Added dedicated CLI subcommands in `hydeph/cli_commands.py`:
+    - `hydeph status [workspace|config.yaml]`: Inspects stage completion status, manifests, and pending/failed DFT frame pools.
+    - `hydeph qc [workspace|config.yaml]`: Displays training and test parity metrics, small-displacement force gates, and Franck-Condon path errors.
+    - `hydeph lineshape config.yaml [--smearing] [--dephasing]`: Direct stage-6 spectroscopy sweep without re-running earlier stages.
+    - `hydeph converge config.yaml [--repeats] [--smearings]`: Systematic convergence scanner across supercell sizes and smearing parameters.
+- **Stage Manifests & Incremental Checkpoint Provenance**:
+  - Implemented `write_stage_manifest()` generating `stage_{1..6}_manifest.json` with input SHA256 hashes, output files, tool versions, and upstream manifest hashes.
+  - Added `incremental_provenance.json` tracking stage-by-stage outcomes, timestamps, and environment metadata across interrupted runs.
+- **Verification & Benchmark Infrastructure**:
+  - Added `scripts/run_benchmarks.py` and `scripts/verify_benchmarks.py` automating benchmark sweeps and physical invariant validation across diamond NV-, 4H-SiC, CsI, and NaCl.
+  - Added new integration tests (`test_cli_subcommands.py`, `test_embedding_conservation.py`, `test_golden_end_to_end.py`), expanding the test suite to 191 automated tests with a 100% pass rate.
+- **Physical Excited-State Surface Dynamics in Anharmonic Cumulant**:
+  - Propagates emission trajectories directly on the excited-state surface $V_{\mathrm{ES}}(\mathbf{R})$ (when available) and samples the true instantaneous energy gap $\Delta U(\mathbf{R}(t)) = V_{\mathrm{ES}}(\mathbf{R}(t)) - V_{\mathrm{GS}}(\mathbf{R}(t))$.
+  - Implemented exact classical-to-quantum fluctuation-dissipation relation $S_{\mathrm{MD}}(\hbar\omega) = \frac{\tilde{C}_{\mathrm{cl}}(\hbar\omega)}{2 k_B T_{\mathrm{equil}} \hbar\omega}$ using measured NVE equilibration temperature $T_{\mathrm{equil}}$.
+  - Removed artificial post-hoc scaling and harmonic blending ($w_{\mathrm{md}} = \text{clip}(T/77)$); reported $S_{\mathrm{anh}}$ as an independent physical observable.
+- **Enhanced Quality Control & Committee Epistemic Uncertainty**:
+  - Added unrefined pre-BFGS force gate testing hybrid potential fidelity at $\mathbf{R}_{\mathrm{GS}}^{\mathrm{DFT}}$.
+  - Implemented dedicated excited-state $\Delta$-NEP QC report (`delta_nep_qc_report.json`) and parity plots.
+  - Added bootstrap committee training and uncertainty propagation (`total_S_std`, $S_k^{\mathrm{std}}$, and spectral confidence bands).
+- **Physical Sampling & Lineshape Defaults**:
+  - Added small-amplitude Hessian rattle frames ($\sigma \in [0.01, 0.03]\ \text{Å}$) for direct force curvature supervision.
+  - Centered half of rattle and MD frames around $\mathbf{R}_{\mathrm{ES}}$ (`at_es`).
+  - Defaulted `dephasing_temperature_coefficient = 0.0` and `dephasing_gamma_meV = 1.0` to eliminate artificial thermal broadening by default.
+  - Scaled auto-smearing $\sigma$ inversely with phonon supercell dimension.
+
+### Changed
+- **Strict Configuration Guardrails**:
+  - `spin_multiplicity` is now strictly required when `spin_polarized=True` (silent default of 2 removed).
+  - Variable-cell relaxation (`vc-relax`) is restricted to pristine bulk cells; defect supercells require explicit `allow_defect_vc_relax=True`.
+  - Upgraded `pyproject.toml` ruff target version to `py310`.
+  - Removed `is_mocked` and test-inspection branches across core modules via dependency injection.
+
+### Fixed
+- **Cache Invalidation & Silent Fallback Elimination**:
+  - Expanded `check_pw_in_matches_atoms` to validate atomic coordinates, cell vectors, cutoffs, charge, spin multiplicity, $k$-points, and $\Delta\text{SCF}$ occupation cards.
+  - Removed silent fallbacks to unrelaxed frames or incomplete acoustic sum rules.
+  - Fixed per-manifold Jahn-Teller trigger to require integer occupations on degenerate manifolds.
+
 ## [0.9.0] - 2026-11-11
 
 ### Added
