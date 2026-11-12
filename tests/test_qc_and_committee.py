@@ -1,7 +1,6 @@
 """Unit tests for Phase 5: QC Gates, ES QC, Bootstrap Committee Ensembles, and DFT Mode Validation."""
 
 import os
-import json
 import pytest
 import numpy as np
 from ase import Atoms
@@ -188,7 +187,7 @@ def test_shared_baseline_energy_offset(tmp_path):
     trainer.calc_foundation = calc_base
 
     frames_gs = _make_mock_frames(n_frames=4, has_fc=False)
-    delta_gs = trainer.compute_delta_dataset(frames_gs)
+    _ = trainer.compute_delta_dataset(frames_gs)
     gs_offset = trainer.energy_offset_per_atom
 
     frames_es = _make_mock_frames(n_frames=4, has_fc=False)

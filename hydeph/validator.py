@@ -9,9 +9,10 @@ from __future__ import annotations
 import os
 import json
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import numpy as np
 import ase.io
+from ase import Atoms
 
 from .config import ToolkitConfig, discover_pseudopotential, resolve_pseudo_path
 from .defect_builder import detect_defect_sites

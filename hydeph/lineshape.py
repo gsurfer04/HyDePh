@@ -1802,7 +1802,7 @@ class LineshapeEngine:
                     an_harm + a_std,
                     color=col,
                     alpha=0.20,
-                    label=rf'Harmonic $\pm 1\sigma$',
+                    label=r'Harmonic $\pm 1\sigma$',
                 )
 
             e_xlim_T, e_ylim_T = self.get_smart_lineshape_limits(
