@@ -81,7 +81,7 @@ class HybridDefectCalculator(Calculator):
         self.calc_base = load_foundation_calculator(
             potential_path=foundation_pot_path,
             existing_calc=calc_base,
-            allow_missing=False,
+            allow_missing=bool(calc_delta is not None),
         )
 
         raw_paths: List[str] = []
@@ -147,9 +147,13 @@ class HybridDefectCalculator(Calculator):
         if not req_props:
             return
 
-        self.calc_base.calculate(atoms, req_props, system_changes)
-        e_base = float(self.calc_base.results.get('energy', 0.0))
-        f_base = np.asarray(self.calc_base.results.get('forces', np.zeros((len(atoms), 3))), dtype=float)
+        if self.calc_base is not None:
+            self.calc_base.calculate(atoms, req_props, system_changes)
+            e_base = float(self.calc_base.results.get('energy', 0.0))
+            f_base = np.asarray(self.calc_base.results.get('forces', np.zeros((len(atoms), 3))), dtype=float)
+        else:
+            e_base = 0.0
+            f_base = np.zeros((len(atoms), 3), dtype=float)
 
         e_deltas: List[float] = []
         f_deltas: List[np.ndarray] = []

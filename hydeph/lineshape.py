@@ -794,25 +794,34 @@ class LineshapeEngine:
                             _, m_a = lineshape_dict[T]
                             member_lineshapes[T].append(m_a * m_factor)
                     else:
-                        m_calc = HybridDefectCalculator(
-                            calc_base=self.calc.calc_base,
-                            calc_delta=self.calc.calc_deltas[m_idx],
-                            energy_offset_per_atom=self.calc.energy_offset_per_atom,
-                        )
+                        if isinstance(self.calc, HybridDefectCalculator):
+                            m_calc = HybridDefectCalculator(
+                                calc_base=self.calc.calc_base,
+                                calc_delta=self.calc.calc_deltas[m_idx],
+                                energy_offset_per_atom=self.calc.energy_offset_per_atom,
+                            )
+                        else:
+                            m_calc = self.calc.calc_deltas[m_idx]
+
                         m_f_es = f_es_mode
                         if use_force and hasattr(self, "calc_es") and self.calc_es is not None:
                             if getattr(self.calc_es, "is_committee", False):
                                 es_idx = min(m_idx, len(self.calc_es.calc_deltas) - 1)
                                 m_es_delta = self.calc_es.calc_deltas[es_idx]
                             else:
-                                m_es_delta = self.calc_es.calc_delta
-                            m_calc_es = HybridDefectCalculator(
-                                calc_base=self.calc.calc_base,
-                                calc_delta=m_es_delta,
-                                energy_offset_per_atom=getattr(
-                                    self.calc_es, "energy_offset_per_atom", self.calc.energy_offset_per_atom
-                                ),
-                            )
+                                m_es_delta = getattr(self.calc_es, "calc_delta", self.calc_es)
+
+                            if isinstance(self.calc_es, HybridDefectCalculator):
+                                m_calc_es = HybridDefectCalculator(
+                                    calc_base=self.calc_es.calc_base,
+                                    calc_delta=m_es_delta,
+                                    energy_offset_per_atom=getattr(
+                                        self.calc_es, "energy_offset_per_atom", self.calc.energy_offset_per_atom
+                                    ),
+                                )
+                            else:
+                                m_calc_es = m_es_delta
+
                             at_probe = at_gs.copy()
                             at_probe.calc = m_calc_es
                             m_f_es = at_probe.get_forces().copy()
