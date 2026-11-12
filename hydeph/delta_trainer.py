@@ -273,7 +273,11 @@ class DeltaTrainer:
         else:
             self.calc_foundation = None
 
-    def compute_delta_dataset(self, labeled_frames: List[Atoms]) -> List[Atoms]:
+    def compute_delta_dataset(
+        self,
+        labeled_frames: List[Atoms],
+        shared_offset_per_atom: Optional[float] = None,
+    ) -> List[Atoms]:
         """Computes Delta E and Delta F for each DFT-labeled frame relative to the foundation potential."""
         delta_frames = []
         logger.info("\n[-] Evaluating foundation potential to extract Delta E and Delta F...")
@@ -320,15 +324,22 @@ class DeltaTrainer:
         subtract_offset = getattr(self.config, "subtract_mean_energy_offset", True)
         offset_per_atom = 0.0
         if subtract_offset and delta_frames:
-            offset_per_atom = float(np.mean([fr.info["energy"] / len(fr) for fr in delta_frames]))
+            if shared_offset_per_atom is not None:
+                offset_per_atom = float(shared_offset_per_atom)
+                logger.info(
+                    f"[+] Using shared baseline mean energy offset: {offset_per_atom:.4f} eV/atom "
+                    f"({offset_per_atom * 1000.0:.1f} meV/atom)"
+                )
+            else:
+                offset_per_atom = float(np.mean([fr.info["energy"] / len(fr) for fr in delta_frames]))
+                logger.info(
+                    f"[+] Subtracted baseline mean energy offset: {offset_per_atom:.4f} eV/atom "
+                    f"({offset_per_atom * 1000.0:.1f} meV/atom)"
+                )
             for fr in delta_frames:
                 fr.info["raw_delta_energy"] = float(fr.info["energy"])
                 fr.info["delta_energy_offset_per_atom"] = offset_per_atom
                 fr.info["energy"] = float(fr.info["energy"] - len(fr) * offset_per_atom)
-            logger.info(
-                f"[+] Subtracted baseline mean energy offset: {offset_per_atom:.4f} eV/atom "
-                f"({offset_per_atom * 1000.0:.1f} meV/atom)"
-            )
         self.energy_offset_per_atom = offset_per_atom
 
         max_d_f = max(np.abs(f.arrays["forces"]).max() for f in delta_frames)
@@ -476,10 +487,30 @@ class DeltaTrainer:
             with open(os.path.join(self.config.workspace_dir, f"{pot_base}_0{pot_ext}.offset.json"), "w", encoding="utf-8") as f:
                 json.dump(offset_data, f, indent=2)
 
+            # Pin anchor frames (lambda=0, lambda=1) in all bootstrap members
+            anchor_train = [
+                fr for fr in train_frames
+                if fr.info.get("sample_type") == "franck_condon"
+                and (
+                    (fr.info.get("lambda") is not None and (
+                        abs(float(fr.info["lambda"]) - 0.0) < 1e-4 or
+                        abs(float(fr.info["lambda"]) - 1.0) < 1e-4
+                    ))
+                    or str(fr.info.get("frame_id", "")) in ("fc_00", "fc_01")
+                )
+            ]
+            non_anchor_train = [fr for fr in train_frames if fr not in anchor_train]
+
             for m in range(1, committee_size):
                 m_dir = os.path.join(train_dir, f"model_{m}")
                 os.makedirs(m_dir, exist_ok=True)
-                ase.io.write(os.path.join(m_dir, "train.xyz"), train_frames, format="extxyz")
+                rng_m = np.random.RandomState(seed + m * 37 + 101)
+                if non_anchor_train:
+                    boot_idx = rng_m.choice(len(non_anchor_train), size=len(non_anchor_train), replace=True)
+                    m_train_frames = anchor_train + [non_anchor_train[i] for i in boot_idx]
+                else:
+                    m_train_frames = list(train_frames)
+                ase.io.write(os.path.join(m_dir, "train.xyz"), m_train_frames, format="extxyz")
                 ase.io.write(os.path.join(m_dir, "test.xyz"), test_frames, format="extxyz")
                 m_nep_in = os.path.join(m_dir, "nep.in")
                 write_delta_nep_in(
@@ -530,6 +561,133 @@ class DeltaTrainer:
         return pot_dest
 
 
+def plot_delta_nep_parity(
+    qc_gs: Dict[str, Any],
+    qc_es: Optional[Dict[str, Any]] = None,
+    save_path: Optional[str] = None,
+) -> str:
+    """Exports a publication-ready dual-panel parity plot for Delta-NEP potentials.
+
+    Columns:
+      - Left column: Ground State (GS)
+      - Right column (if available): Optical Excited State (ES)
+    Rows:
+      - Top row: Energy parity (DFT vs Hybrid Delta-NEP)
+      - Bottom row: Force component parity (DFT vs Hybrid Delta-NEP)
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_cols = 2 if qc_es is not None else 1
+    fig, axes = plt.subplots(2, n_cols, figsize=(5.5 * n_cols, 10.0), squeeze=False)
+
+    states = [("Ground State (GS)", qc_gs)]
+    if qc_es is not None:
+        states.append(("Excited State (ES)", qc_es))
+
+    for col, (state_name, qc_data) in enumerate(states):
+        parity = qc_data.get("parity_data", {})
+        train_p = parity.get("train", {})
+        test_p = parity.get("test", {})
+
+        # 1. Energy Parity (Top Row)
+        ax_e = axes[0, col]
+        e_tr_true = np.array(train_p.get("e_true", []))
+        e_tr_pred = np.array(train_p.get("e_pred", []))
+        e_te_true = np.array(test_p.get("e_true", []))
+        e_te_pred = np.array(test_p.get("e_pred", []))
+
+        all_e = (
+            np.concatenate([e_tr_true, e_tr_pred, e_te_true, e_te_pred])
+            if len(e_tr_true) > 0
+            else np.array([0.0])
+        )
+        e_min = float(np.min(all_e)) - 0.05
+        e_max = float(np.max(all_e)) + 0.05
+
+        ax_e.plot([e_min, e_max], [e_min, e_max], "k--", alpha=0.6, label="Ideal (y = x)")
+        if len(e_tr_true) > 0:
+            ax_e.scatter(
+                e_tr_true,
+                e_tr_pred,
+                color="#1f77b4",
+                alpha=0.6,
+                s=25,
+                label=f"Train (RMSE: {qc_data.get('train_energy_rmse_meV_atom', 0.0):.1f} meV/at)",
+            )
+        if len(e_te_true) > 0:
+            ax_e.scatter(
+                e_te_true,
+                e_te_pred,
+                color="#ff7f0e",
+                marker="s",
+                alpha=0.8,
+                s=35,
+                label=f"Test (RMSE: {qc_data.get('test_energy_rmse_meV_atom', 0.0):.1f} meV/at)",
+            )
+
+        ax_e.set_xlim(e_min, e_max)
+        ax_e.set_ylim(e_min, e_max)
+        ax_e.set_xlabel(r"DFT Potential Energy $E_{\mathrm{DFT}}$ (eV)")
+        ax_e.set_ylabel(r"Hybrid Potential Energy $E_{\mathrm{Hyb}}$ (eV)")
+        ax_e.set_title(f"{state_name} - Energy Parity")
+        ax_e.grid(True, linestyle=":", alpha=0.5)
+        ax_e.legend(loc="upper left", framealpha=0.9, fontsize=9)
+
+        # 2. Force Parity (Bottom Row)
+        ax_f = axes[1, col]
+        f_tr_true = np.array(train_p.get("f_true", [])).flatten()
+        f_tr_pred = np.array(train_p.get("f_pred", [])).flatten()
+        f_te_true = np.array(test_p.get("f_true", [])).flatten()
+        f_te_pred = np.array(test_p.get("f_pred", [])).flatten()
+
+        all_f = (
+            np.concatenate([f_tr_true, f_tr_pred, f_te_true, f_te_pred])
+            if len(f_tr_true) > 0
+            else np.array([-1.0, 1.0])
+        )
+        f_lim = max(0.5, float(np.max(np.abs(all_f))) * 1.1)
+
+        ax_f.plot([-f_lim, f_lim], [-f_lim, f_lim], "k--", alpha=0.6, label="Ideal (y = x)")
+        if len(f_tr_true) > 0:
+            idx_sub = np.linspace(0, len(f_tr_true) - 1, min(2000, len(f_tr_true)), dtype=int)
+            ax_f.scatter(
+                f_tr_true[idx_sub],
+                f_tr_pred[idx_sub],
+                color="#1f77b4",
+                alpha=0.3,
+                s=15,
+                label=f"Train (RMSE: {qc_data.get('train_force_rmse_eV_A', 0.0):.3f} eV/Å)",
+            )
+        if len(f_te_true) > 0:
+            idx_sub_te = np.linspace(0, len(f_te_true) - 1, min(1000, len(f_te_true)), dtype=int)
+            ax_f.scatter(
+                f_te_true[idx_sub_te],
+                f_te_pred[idx_sub_te],
+                color="#ff7f0e",
+                marker="s",
+                alpha=0.5,
+                s=20,
+                label=f"Test (RMSE: {qc_data.get('test_force_rmse_eV_A', 0.0):.3f} eV/Å)",
+            )
+
+        ax_f.set_xlim(-f_lim, f_lim)
+        ax_f.set_ylim(-f_lim, f_lim)
+        ax_f.set_xlabel(r"DFT Force Component $F_{i,\alpha}$ (eV/Å)")
+        ax_f.set_ylabel(r"Hybrid Force Component $F_{i,\alpha}$ (eV/Å)")
+        ax_f.set_title(f"{state_name} - Force Parity")
+        ax_f.grid(True, linestyle=":", alpha=0.5)
+        ax_f.legend(loc="upper left", framealpha=0.9, fontsize=9)
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        plt.savefig(save_path, dpi=200)
+    plt.close(fig)
+    return save_path or ""
+
+
 def evaluate_delta_nep_quality_control(
     calc_hybrid: HybridDefectCalculator,
     labeled_frames: List[Atoms],
@@ -537,14 +695,27 @@ def evaluate_delta_nep_quality_control(
     workspace_dir: str,
     config: ToolkitConfig,
     test_fraction: float = 0.20,
+    state_label: str = "ground_state",
+    at_ref: Optional[Atoms] = None,
+    pre_refinement_force: Optional[float] = None,
+    refinement_displacement: Optional[float] = None,
+    write_files: bool = True,
 ) -> Dict[str, Any]:
     """Computes comprehensive Quality Control metrics for the trained Delta-NEP potential.
 
     Evaluates:
       1. Train and held-out test energy RMSE (meV/atom) and force RMSE (eV/A).
-      2. Residual forces on the DFT ground-state minimum.
-      3. Energy agreement along the Franck-Condon path and Delta E_rel.
-      4. Quality threshold gates (max_test_force_rmse_eV_A, max_gs_residual_force_eV_A).
+      2. Residual forces on the DFT minimum geometry (pre- and post-refinement).
+      3. Relative displacement introduced by any hybrid equilibrium refinement.
+      4. Force RMSE on small-amplitude displacement frames (<= 0.05 A).
+      5. Energy agreement along the Franck-Condon path (referenced to lambda=0.0) and Delta E_rel.
+      6. Quality threshold gates:
+         - max_test_force_rmse_eV_A
+         - max_gs_residual_force_eV_A
+         - max_refinement_displacement_A
+         - max_fc_path_error_meV
+         - max_erel_error_pct
+         - max_small_displacement_force_rmse_eV_A
 
     Writes `delta_nep_qc_report.json` and `delta_nep_parity.json` to `workspace_dir`.
 
@@ -553,7 +724,7 @@ def evaluate_delta_nep_quality_control(
     Dict[str, Any]
         Quality Control evaluation dictionary.
     """
-    logger.info("\n[-] Evaluating Delta-NEP Quality Control (train/test parity & gates)...")
+    logger.info(f"\n[-] Evaluating Delta-NEP Quality Control for {state_label} (train/test parity & gates)...")
 
     seed = config.random_seed
     train_frames, test_frames = stratified_train_test_split(
@@ -561,6 +732,8 @@ def evaluate_delta_nep_quality_control(
     )
     if not test_frames:
         test_frames = list(train_frames)
+
+    target_ref = at_ref if at_ref is not None else at_gs
 
     def _eval_frames(frames: List[Atoms]):
         e_true = []
@@ -608,16 +781,44 @@ def evaluate_delta_nep_quality_control(
     train_res = _eval_frames(train_frames)
     test_res = _eval_frames(test_frames)
 
-    # Franck-Condon path verification
+    # Small displacement frames force evaluation
+    small_disp_frames = []
+    if target_ref is not None:
+        from .defect_builder import mic_displacement
+        for fr in labeled_frames:
+            if len(fr) == len(target_ref):
+                try:
+                    dr = mic_displacement(fr.positions, target_ref.positions, target_ref.cell)
+                    rms_dr = float(np.sqrt(np.mean(np.sum(dr ** 2, axis=1))))
+                    if rms_dr <= 0.05:
+                        small_disp_frames.append(fr)
+                except Exception:
+                    pass
+
+    if small_disp_frames:
+        small_disp_res = _eval_frames(small_disp_frames)
+        small_disp_force_rmse = small_disp_res["force_rmse_eV_A"]
+        gate_small_disp_force = small_disp_force_rmse <= config.max_small_displacement_force_rmse_eV_A
+    else:
+        small_disp_force_rmse = None
+        gate_small_disp_force = True
+
+    # Franck-Condon path verification (referenced to lambda = 0.0)
     fc_frames = [f for f in labeled_frames if f.info.get("sample_type") == "franck_condon"]
     fc_max_err_meV = 0.0
     erel_err_meV = 0.0
+    erel_err_pct = 0.0
     erel_dft = 0.0
     erel_hyb = 0.0
+    f1 = None
 
     if fc_frames:
         fc_frames.sort(key=lambda f: float(f.info.get("lambda", 0.0)))
-        f0 = fc_frames[0]
+        # Locate lambda = 0.0 frame as physical ground state reference
+        f0 = next(
+            (f for f in fc_frames if abs(float(f.info.get("lambda", 999.0)) - 0.0) < 1e-4),
+            min(fc_frames, key=lambda f: abs(float(f.info.get("lambda", 0.0)) - 0.0)),
+        )
         at0 = f0.copy()
         at0.calc = calc_hybrid
         e0_hyb = float(at0.get_potential_energy())
@@ -633,67 +834,75 @@ def evaluate_delta_nep_quality_control(
         fc_max_err_meV = float(np.max(fc_errs))
 
         # Check lambda=1 frame
-        f1 = next((f for f in fc_frames if abs(float(f.info.get("lambda", 0.0)) - 1.0) < 1e-4), None)
+        f1 = next((f for f in fc_frames if abs(float(f.info.get("lambda", 999.0)) - 1.0) < 1e-4), None)
         if f1 is not None:
             at1 = f1.copy()
             at1.calc = calc_hybrid
             erel_hyb = float(at1.get_potential_energy()) - e0_hyb
             erel_dft = get_frame_energy(f1) - e0_dft
             erel_err_meV = float(abs(erel_hyb - erel_dft) * 1000.0)
+            erel_err_pct = float(erel_err_meV / (abs(erel_dft) * 1000.0) * 100.0) if abs(erel_dft) > 1e-5 else 0.0
 
-    # GS residual force at DFT minimum
-    at_gs_eval = at_gs.copy()
-    at_gs_eval.calc = calc_hybrid
-    gs_res_f = np.asarray(at_gs_eval.get_forces(), dtype=float)
-    max_gs_res_force = float(np.abs(gs_res_f).max())
+    # Residual force at DFT minimum
+    at_eval = target_ref.copy()
+    at_eval.calc = calc_hybrid
+    res_f = np.asarray(at_eval.get_forces(), dtype=float)
+    calc_res_force = float(np.abs(res_f).max())
 
-    # Quality Gate evaluation
+    eff_res_force = pre_refinement_force if pre_refinement_force is not None else calc_res_force
+    gate_residual_force = eff_res_force <= config.max_gs_residual_force_eV_A
+
+    gate_refinement_disp = (
+        (float(refinement_displacement) <= config.max_refinement_displacement_A)
+        if refinement_displacement is not None
+        else True
+    )
+
     gate_test_force = test_res["force_rmse_eV_A"] <= config.max_test_force_rmse_eV_A
-    gate_gs_force = max_gs_res_force <= config.max_gs_residual_force_eV_A
-    qc_passed = bool(gate_test_force and gate_gs_force)
+    gate_fc_path = (fc_max_err_meV <= config.max_fc_path_error_meV) if fc_frames else True
+    gate_erel = (erel_err_pct <= config.max_erel_error_pct) if (fc_frames and f1 is not None) else True
+
+    qc_passed = bool(
+        gate_test_force
+        and gate_residual_force
+        and gate_refinement_disp
+        and gate_fc_path
+        and gate_erel
+        and gate_small_disp_force
+    )
 
     logger.info("-" * 78)
-    logger.info("[+] DELTA-NEP QUALITY CONTROL REPORT:")
-    logger.info(f"    • Train Energy RMSE: {train_res['energy_rmse_meV_atom']:.2f} meV/atom | Force RMSE: {train_res['force_rmse_eV_A']:.4f} eV/A")
+    logger.info(f"[+] DELTA-NEP QUALITY CONTROL REPORT ({state_label.upper()}):")
     logger.info(
-        f"    • Test Energy RMSE:  {test_res['energy_rmse_meV_atom']:.2f} meV/atom | Force RMSE: {test_res['force_rmse_eV_A']:.4f} eV/A "
+        f"    • Train Energy RMSE: {train_res['energy_rmse_meV_atom']:.2f} meV/atom | "
+        f"Force RMSE: {train_res['force_rmse_eV_A']:.4f} eV/A"
+    )
+    logger.info(
+        f"    • Test Energy RMSE:  {test_res['energy_rmse_meV_atom']:.2f} meV/atom | "
+        f"Force RMSE: {test_res['force_rmse_eV_A']:.4f} eV/A "
         f"(Gate <= {config.max_test_force_rmse_eV_A:.3f} eV/A: {'PASSED' if gate_test_force else 'FAILED'})"
     )
+    if small_disp_force_rmse is not None:
+        logger.info(
+            f"    • Small-Disp Force RMSE: {small_disp_force_rmse:.4f} eV/A "
+            f"(Gate <= {config.max_small_displacement_force_rmse_eV_A:.3f} eV/A: {'PASSED' if gate_small_disp_force else 'FAILED'})"
+        )
     logger.info(
-        f"    • GS Residual Force: {max_gs_res_force:.4f} eV/A "
-        f"(Gate <= {config.max_gs_residual_force_eV_A:.3f} eV/A: {'PASSED' if gate_gs_force else 'FAILED'})"
+        f"    • Pre-Refinement DFT Residual Force: {eff_res_force:.4f} eV/A "
+        f"(Gate <= {config.max_gs_residual_force_eV_A:.3f} eV/A: {'PASSED' if gate_residual_force else 'FAILED'})"
     )
+    if refinement_displacement is not None:
+        logger.info(
+            f"    • Refinement Displacement: {refinement_displacement:.4f} A "
+            f"(Gate <= {config.max_refinement_displacement_A:.3f} A: {'PASSED' if gate_refinement_disp else 'FAILED'})"
+        )
     if fc_frames:
-        logger.info(f"    • FC Path Energy Max Error: {fc_max_err_meV:.2f} meV | Delta E_rel Error: {erel_err_meV:.2f} meV")
+        logger.info(
+            f"    • FC Path Max Error: {fc_max_err_meV:.2f} meV (Gate <= {config.max_fc_path_error_meV:.1f} meV: {'PASSED' if gate_fc_path else 'FAILED'}) | "
+            f"Delta E_rel Error: {erel_err_meV:.2f} meV / {erel_err_pct:.1f}% (Gate <= {config.max_erel_error_pct:.1f}%: {'PASSED' if gate_erel else 'FAILED'})"
+        )
     logger.info(f"    • QC Gate Overall Status: {'PASSED' if qc_passed else 'FAILED'}")
     logger.info("-" * 78)
-
-    qc_report = {
-        "qc_passed": qc_passed,
-        "train_energy_rmse_meV_atom": train_res["energy_rmse_meV_atom"],
-        "train_force_rmse_eV_A": train_res["force_rmse_eV_A"],
-        "test_energy_rmse_meV_atom": test_res["energy_rmse_meV_atom"],
-        "test_force_rmse_eV_A": test_res["force_rmse_eV_A"],
-        "gs_residual_force_max_eV_A": max_gs_res_force,
-        "fc_path_energy_max_err_meV": fc_max_err_meV,
-        "delta_erel_dft_eV": erel_dft,
-        "delta_erel_hybrid_eV": erel_hyb,
-        "delta_erel_error_meV": erel_err_meV,
-        "thresholds": {
-            "max_test_force_rmse_eV_A": config.max_test_force_rmse_eV_A,
-            "max_gs_residual_force_eV_A": config.max_gs_residual_force_eV_A,
-        },
-        "gates": {
-            "test_force_rmse_gate": gate_test_force,
-            "gs_residual_force_gate": gate_gs_force,
-        },
-        "is_committee": getattr(calc_hybrid, "is_committee", False),
-        "committee_size": len(getattr(calc_hybrid, "calc_deltas", [])) if getattr(calc_hybrid, "is_committee", False) else 1,
-    }
-
-    report_path = os.path.join(workspace_dir, "delta_nep_qc_report.json")
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(qc_report, f, indent=2)
 
     parity_data = {
         "train": {
@@ -709,14 +918,64 @@ def evaluate_delta_nep_quality_control(
             "f_pred": test_res["f_pred"],
         },
     }
-    parity_path = os.path.join(workspace_dir, "delta_nep_parity.json")
-    with open(parity_path, "w", encoding="utf-8") as f:
-        json.dump(parity_data, f, indent=2)
+
+    qc_report = {
+        "state_label": state_label,
+        "qc_passed": qc_passed,
+        "train_energy_rmse_meV_atom": train_res["energy_rmse_meV_atom"],
+        "train_force_rmse_eV_A": train_res["force_rmse_eV_A"],
+        "test_energy_rmse_meV_atom": test_res["energy_rmse_meV_atom"],
+        "test_force_rmse_eV_A": test_res["force_rmse_eV_A"],
+        "small_disp_force_rmse_eV_A": small_disp_force_rmse,
+        "gs_residual_force_max_eV_A": calc_res_force,
+        "pre_refinement_force_eV_A": eff_res_force,
+        "refinement_displacement_A": refinement_displacement,
+        "fc_path_energy_max_err_meV": fc_max_err_meV,
+        "delta_erel_dft_eV": erel_dft,
+        "delta_erel_hybrid_eV": erel_hyb,
+        "delta_erel_error_meV": erel_err_meV,
+        "delta_erel_error_pct": erel_err_pct,
+        "thresholds": {
+            "max_test_force_rmse_eV_A": config.max_test_force_rmse_eV_A,
+            "max_gs_residual_force_eV_A": config.max_gs_residual_force_eV_A,
+            "max_refinement_displacement_A": config.max_refinement_displacement_A,
+            "max_fc_path_error_meV": config.max_fc_path_error_meV,
+            "max_erel_error_pct": config.max_erel_error_pct,
+            "max_small_displacement_force_rmse_eV_A": config.max_small_displacement_force_rmse_eV_A,
+        },
+        "gates": {
+            "test_force_rmse_gate": gate_test_force,
+            "gs_residual_force_gate": gate_residual_force,
+            "refinement_displacement_gate": gate_refinement_disp,
+            "fc_path_energy_gate": gate_fc_path,
+            "erel_error_gate": gate_erel,
+            "small_disp_force_gate": gate_small_disp_force,
+        },
+        "is_committee": getattr(calc_hybrid, "is_committee", False),
+        "committee_size": (
+            len(getattr(calc_hybrid, "calc_deltas", []))
+            if getattr(calc_hybrid, "is_committee", False)
+            else 1
+        ),
+        "parity_data": parity_data,
+    }
+
+    if write_files:
+        suffix = f"_{state_label}" if state_label != "ground_state" else ""
+        report_path = os.path.join(workspace_dir, f"delta_nep_qc_report{suffix}.json")
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(qc_report, f, indent=2)
+
+        parity_path = os.path.join(workspace_dir, f"delta_nep_parity{suffix}.json")
+        with open(parity_path, "w", encoding="utf-8") as f:
+            json.dump(parity_data, f, indent=2)
 
     if not qc_passed and not getattr(config, "allow_fallbacks", False):
+        failed_gates = [k for k, v in qc_report["gates"].items() if not v]
         raise ValueError(
-            f"Delta-NEP Quality Gate Failed: test force RMSE ({test_res['force_rmse_eV_A']:.4f} eV/A) exceeds {config.max_test_force_rmse_eV_A} eV/A "
-            f"or GS residual force ({max_gs_res_force:.4f} eV/A) exceeds {config.max_gs_residual_force_eV_A} eV/A. "
+            f"Delta-NEP Quality Gate Failed for {state_label}: {', '.join(failed_gates)}. "
+            f"(Test force RMSE: {test_res['force_rmse_eV_A']:.4f} eV/A [gate <= {config.max_test_force_rmse_eV_A}], "
+            f"Residual force: {eff_res_force:.4f} eV/A [gate <= {config.max_gs_residual_force_eV_A}]). "
             "Set allow_fallbacks=True to continue despite quality gate violation."
         )
 

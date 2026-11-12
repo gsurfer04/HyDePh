@@ -587,6 +587,13 @@ class ToolkitConfig:
     nep_committee_size: int = 1
     max_test_force_rmse_eV_A: float = 0.15
     max_gs_residual_force_eV_A: float = 0.05
+    max_refinement_displacement_A: float = 0.05
+    max_erel_error_pct: float = 15.0
+    max_fc_path_error_meV: float = 35.0
+    max_small_displacement_force_rmse_eV_A: float = 0.08
+    validate_dft_modes: bool = False
+    dft_modes_to_validate: int = 5
+    dft_mode_displacement_A: float = 0.02
     subtract_mean_energy_offset: bool = True
 
     enable_anharmonic: bool = True
@@ -1243,6 +1250,20 @@ class ToolkitConfig:
             raise ValueError(f"Invalid max_test_force_rmse_eV_A: {self.max_test_force_rmse_eV_A}. Must be > 0.")
         if float(self.max_gs_residual_force_eV_A) <= 0.0:
             raise ValueError(f"Invalid max_gs_residual_force_eV_A: {self.max_gs_residual_force_eV_A}. Must be > 0.")
+        if float(self.max_refinement_displacement_A) <= 0.0:
+            raise ValueError(f"Invalid max_refinement_displacement_A: {self.max_refinement_displacement_A}. Must be > 0.")
+        if float(self.max_erel_error_pct) <= 0.0:
+            raise ValueError(f"Invalid max_erel_error_pct: {self.max_erel_error_pct}. Must be > 0.")
+        if float(self.max_fc_path_error_meV) <= 0.0:
+            raise ValueError(f"Invalid max_fc_path_error_meV: {self.max_fc_path_error_meV}. Must be > 0.")
+        if float(self.max_small_displacement_force_rmse_eV_A) <= 0.0:
+            raise ValueError(
+                f"Invalid max_small_displacement_force_rmse_eV_A: {self.max_small_displacement_force_rmse_eV_A}. Must be > 0."
+            )
+        if int(self.dft_modes_to_validate) < 1:
+            raise ValueError(f"Invalid dft_modes_to_validate: {self.dft_modes_to_validate}. Must be >= 1.")
+        if float(self.dft_mode_displacement_A) <= 0.0:
+            raise ValueError(f"Invalid dft_mode_displacement_A: {self.dft_mode_displacement_A}. Must be > 0.")
         if int(self.nep_batch) < 1:
             raise ValueError(f"Invalid nep_batch: {self.nep_batch}. Must be >= 1.")
         if float(self.nep_cutoff_radial) <= 0.0 or float(self.nep_cutoff_angular) <= 0.0:

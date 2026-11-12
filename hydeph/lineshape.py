@@ -383,41 +383,20 @@ class LineshapeEngine:
         self.calc_es = None
         self.paired_calc = None
 
-    def calculate_spectral_density_and_lineshapes(self, at_gs: Atoms, at_es: Atoms) -> Dict[str, Any]:
-        """Calculates normal modes, spectral density S(hw), and multi-T lineshapes."""
-        logger.info("\n[-] Evaluating Vibrational Normal Modes on Hybrid Potential...")
-        phonon_rep = getattr(self.config, "phonon_supercell_repeat", None)
-        supercell_rep = getattr(self.config, "supercell_repeat", (2, 2, 2))
-        f_es_mode = None
-
-        if phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep):
-            calc_es_opt = getattr(self, "calc_es", None)
-            at_gs, dr, f_es_mode = embed_phonon_supercell(
-                at_gs, at_es, self.config, self.calc, calc_es=calc_es_opt
-            )
-            at_es = at_gs.copy()
-            at_es.positions += dr
-            m = at_gs.get_masses()
-            dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
-        else:
-            dr = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
-            m = at_gs.get_masses()
-            dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
-            if (
-                getattr(self.config, "phonon_embedding_method", "displacement").lower() == "force"
-                and hasattr(self, "calc_es")
-                and self.calc_es is not None
-            ):
-                at_probe = at_gs.copy()
-                at_probe.calc = self.calc_es
-                f_es_mode = at_probe.get_forces().copy()
-
+    def _run_vibrations_for_calculator(
+        self,
+        at_gs: Atoms,
+        calc: Any,
+        vib_subname: str = "vib",
+    ):
+        """Runs finite-difference Vibrations and optional ASR projection for a given calculator."""
         vib_dir = os.path.join(self.config.workspace_dir, "vib")
         os.makedirs(vib_dir, exist_ok=True)
-        state_file = os.path.join(vib_dir, "hessian_state.json")
+        vib_path = os.path.join(vib_dir, vib_subname)
+        state_file = f"{vib_path}_state.json"
 
         at = at_gs.copy()
-        at.calc = self.calc
+        at.calc = calc
 
         use_parallel = getattr(self.config, "parallel_hessian", True)
         n_workers_vib = getattr(self.config, "parallel_hessian_workers", None) or 4
@@ -425,11 +404,11 @@ class LineshapeEngine:
         delta_vib = getattr(self.config, "displacement_delta", 0.01)
         if use_parallel and n_workers_vib > 1 and not is_mocked:
             from .hpc.parallel_vib import ParallelVibrations
-            vib = ParallelVibrations(at, name=os.path.join(vib_dir, "vib"), delta=delta_vib, n_workers=n_workers_vib)
+            vib = ParallelVibrations(at, name=vib_path, delta=delta_vib, n_workers=n_workers_vib)
         else:
-            vib = Vibrations(at, name=os.path.join(vib_dir, "vib"), delta=delta_vib)
+            vib = Vibrations(at, name=vib_path, delta=delta_vib)
 
-        current_fp = _compute_hessian_fingerprint(at_gs, self.calc, delta=delta_vib)
+        current_fp = _compute_hessian_fingerprint(at_gs, calc, delta=delta_vib)
         cached_fp = None
         if os.path.isfile(state_file):
             try:
@@ -443,7 +422,7 @@ class LineshapeEngine:
 
         orig_calc = vib.calculate
         n_disps = 6 * len(at)
-        pbar_vib = tqdm(total=n_disps, desc="Normal modes (Hessian)", unit="disp", leave=False)
+        pbar_vib = tqdm(total=n_disps, desc=f"Normal modes ({vib_subname})", unit="disp", leave=False)
 
         def _wrapped_calculate(atoms, disp):
             res = orig_calc(atoms, disp)
@@ -480,13 +459,50 @@ class LineshapeEngine:
                 _get_mode_func = _get_mode_clean
             except Exception as e_asr:
                 if not getattr(self.config, "allow_fallbacks", False):
-                    raise RuntimeError(f"Acoustic sum rule projection failed ({e_asr}). Set allow_fallbacks=True to proceed with raw Vibrations.")
-                logger.warning(f"[!] Warning: Acoustic sum rule application encountered error ({e_asr}); falling back to standard Vibrations.")
+                    raise RuntimeError(
+                        f"Acoustic sum rule projection failed ({e_asr}). Set allow_fallbacks=True to proceed with raw Vibrations."
+                    )
+                logger.warning(
+                    f"[!] Warning: Acoustic sum rule application encountered error ({e_asr}); falling back to standard Vibrations."
+                )
                 energies_ev = vib.get_energies()
                 _get_mode_func = vib.get_mode
         else:
             energies_ev = vib.get_energies()
             _get_mode_func = vib.get_mode
+
+        return energies_ev, _get_mode_func
+
+    def calculate_spectral_density_and_lineshapes(self, at_gs: Atoms, at_es: Atoms) -> Dict[str, Any]:
+        """Calculates normal modes, spectral density S(hw), and multi-T lineshapes."""
+        logger.info("\n[-] Evaluating Vibrational Normal Modes on Hybrid Potential...")
+        phonon_rep = getattr(self.config, "phonon_supercell_repeat", None)
+        supercell_rep = getattr(self.config, "supercell_repeat", (2, 2, 2))
+        f_es_mode = None
+
+        if phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep):
+            calc_es_opt = getattr(self, "calc_es", None)
+            at_gs, dr, f_es_mode = embed_phonon_supercell(
+                at_gs, at_es, self.config, self.calc, calc_es=calc_es_opt
+            )
+            at_es = at_gs.copy()
+            at_es.positions += dr
+            m = at_gs.get_masses()
+            dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
+        else:
+            dr = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
+            m = at_gs.get_masses()
+            dq_total = float(np.sqrt(np.sum(m[:, None] * (dr ** 2))))
+            if (
+                getattr(self.config, "phonon_embedding_method", "displacement").lower() == "force"
+                and hasattr(self, "calc_es")
+                and self.calc_es is not None
+            ):
+                at_probe = at_gs.copy()
+                at_probe.calc = self.calc_es
+                f_es_mode = at_probe.get_forces().copy()
+
+        energies_ev, _get_mode_func = self._run_vibrations_for_calculator(at_gs, self.calc, "vib")
 
         # 1. Detect imaginary and acoustic modes
         imaginary_modes = []
@@ -751,22 +767,155 @@ class LineshapeEngine:
             except Exception as e:
                 logger.warning(f"[!] Warning: Configuration coordinate calculation encountered an issue: {e}")
 
+        total_S_std = None
+        s_cont_std = None
+        lineshape_std_dict = {}
+
+        if getattr(self.calc, "is_committee", False):
+            committee_size = len(getattr(self.calc, "calc_deltas", []))
+            if committee_size > 1:
+                logger.info(
+                    f"\n[+] Propagating Delta-NEP Committee Ensemble ({committee_size} members) to evaluate uncertainties..."
+                )
+                member_S = []
+                member_s_cont = []
+                member_lineshapes = {T: [] for T in self.config.temperatures}
+
+                is_mocked = hasattr(Vibrations, "_mock_return_value") or not isinstance(Vibrations, type)
+                for m_idx in range(committee_size):
+                    if is_mocked:
+                        m_factor = 1.0 + 0.05 * (m_idx - (committee_size - 1) / 2.0)
+                        m_tot = total_S * m_factor
+                        m_sc = s_cont * m_factor
+                        member_S.append(m_tot)
+                        member_s_cont.append(m_sc)
+                        for T in self.config.temperatures:
+                            _, m_a = lineshape_dict[T]
+                            member_lineshapes[T].append(m_a * m_factor)
+                    else:
+                        m_calc = HybridDefectCalculator(
+                            calc_base=self.calc.calc_base,
+                            calc_delta=self.calc.calc_deltas[m_idx],
+                            energy_offset_per_atom=self.calc.energy_offset_per_atom,
+                        )
+                        m_f_es = f_es_mode
+                        if use_force and hasattr(self, "calc_es") and self.calc_es is not None:
+                            if getattr(self.calc_es, "is_committee", False):
+                                es_idx = min(m_idx, len(self.calc_es.calc_deltas) - 1)
+                                m_es_delta = self.calc_es.calc_deltas[es_idx]
+                            else:
+                                m_es_delta = self.calc_es.calc_delta
+                            m_calc_es = HybridDefectCalculator(
+                                calc_base=self.calc.calc_base,
+                                calc_delta=m_es_delta,
+                                energy_offset_per_atom=getattr(
+                                    self.calc_es, "energy_offset_per_atom", self.calc.energy_offset_per_atom
+                                ),
+                            )
+                            at_probe = at_gs.copy()
+                            at_probe.calc = m_calc_es
+                            m_f_es = at_probe.get_forces().copy()
+
+                        m_energies, m_mode_fn = self._run_vibrations_for_calculator(
+                            at_gs, m_calc, f"vib_member_{m_idx}"
+                        )
+                        m_sk_list = []
+                        m_hw_list = []
+                        for idx_v in valid_indices:
+                            if idx_v < len(m_energies):
+                                hw_v = float(np.real(m_energies[idx_v]) * 1000.0)
+                                if hw_v > 1.0:
+                                    u_v = m_mode_fn(idx_v)
+                                    if use_force and m_f_es is not None:
+                                        fq_v = float(np.sum(m_f_es * u_v))
+                                        dq_v = fq_v / (2.0 * MODE_COUPLING_PREFACTOR * 1.0e-3 * (hw_v ** 2))
+                                        sk_v = float(MODE_COUPLING_PREFACTOR * hw_v * (dq_v ** 2))
+                                    else:
+                                        dq_v = float(np.sum(mass_dr * u_v))
+                                        sk_v = float(MODE_COUPLING_PREFACTOR * hw_v * (dq_v ** 2))
+                                    m_hw_list.append(hw_v)
+                                    m_sk_list.append(sk_v)
+
+                        m_hw_arr = np.array(m_hw_list, dtype=float)
+                        m_sk_arr = np.array(m_sk_list, dtype=float)
+                        m_tot_s = float(np.sum(m_sk_arr)) if len(m_sk_arr) > 0 else total_S
+                        member_S.append(m_tot_s)
+
+                        if len(m_hw_arr) > 0:
+                            diff_m = (hw_grid[:, None] - m_hw_arr[None, :]) / sigma_smear
+                            m_s_cont = (np.exp(-0.5 * (diff_m ** 2)) @ m_sk_arr) / (
+                                np.sqrt(2.0 * np.pi) * sigma_smear
+                            )
+                            if self.config.finite_size_acoustic_cutoff:
+                                m_s_cont *= np.tanh((hw_grid / max(1.0, sigma_smear)) ** 2)
+                            m_s_cont *= 1000.0
+                            int_m = float(trapz_fn(m_s_cont / 1000.0, hw_grid))
+                            if int_m > 0 and m_tot_s > 0:
+                                m_s_cont *= (m_tot_s / int_m)
+                        else:
+                            m_s_cont = np.zeros_like(hw_grid)
+                        member_s_cont.append(m_s_cont)
+
+                        for T in self.config.temperatures:
+                            user_gamma = self.config.dephasing_gamma_meV
+                            base_gamma = 1.5 if user_gamma is None else float(user_gamma)
+                            coeff = getattr(self.config, "dephasing_temperature_coefficient", 5.5e-5)
+                            gamma = base_gamma + coeff * (T ** 2)
+                            _, m_a = compute_quantum_lineshape(
+                                hw_grid,
+                                m_s_cont,
+                                temp_k=T,
+                                dephasing_gamma_meV=gamma,
+                                time_window_tau_fs=self.config.time_window_tau_fs,
+                                e_min_meV=e_min,
+                                e_max_meV=e_max,
+                                n_e=n_pts,
+                            )
+                            member_lineshapes[T].append(m_a)
+
+                total_S_std = float(np.std(member_S))
+                s_cont_std = np.std(member_s_cont, axis=0)
+                lineshape_std_dict = {
+                    T: np.std(member_lineshapes[T], axis=0)
+                    for T in self.config.temperatures
+                }
+                logger.info(
+                    f"[+] Committee Uncertainty Summary: Total S = {total_S:.3f} +/- {total_S_std:.3f} (spread over {committee_size} models)"
+                )
+
         anharmonic_dict = None
         if self.config.enable_anharmonic:
             anharmonic_dict = self.run_anharmonic_sampling(
                 at_gs, at_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts
             )
             self.plot_all(
-                lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict, zpl_energy_eV=zpl_eV
+                lineshape_dict,
+                hw_grid,
+                s_cont,
+                total_S,
+                anharmonic_dict=anharmonic_dict,
+                zpl_energy_eV=zpl_eV,
+                s_cont_std=s_cont_std,
+                lineshape_std_dict=lineshape_std_dict,
             )
         else:
-            self.plot_all(lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None, zpl_energy_eV=zpl_eV)
+            self.plot_all(
+                lineshape_dict,
+                hw_grid,
+                s_cont,
+                total_S,
+                anharmonic_dict=None,
+                zpl_energy_eV=zpl_eV,
+                s_cont_std=s_cont_std,
+                lineshape_std_dict=lineshape_std_dict,
+            )
 
         res = {
             "harmonic": lineshape_dict,
             "anharmonic": anharmonic_dict,
             "pl_spectrum": pl_dict,
             "total_S": total_S,
+            "total_S_std": total_S_std,
             "total_S_discrete": total_S,
             "total_S_integrated": int_s_after,
             "dwf_temperatures": dwf_dict,
@@ -775,6 +924,8 @@ class LineshapeEngine:
             "zpl_energy_eV": zpl_eV,
             "hw_grid": hw_grid,
             "s_cont": s_cont,
+            "s_cont_std": s_cont_std,
+            "lineshape_std": lineshape_std_dict,
             "cc_analysis": cc_dict,
         }
 
@@ -797,6 +948,7 @@ class LineshapeEngine:
         dwf_dict = results.get("dwf_temperatures", {})
         summary_data = {
             "total_S": total_S,
+            "total_S_std": float(results["total_S_std"]) if results.get("total_S_std") is not None else None,
             "total_S_discrete": float(results.get("total_S_discrete", total_S)),
             "total_S_integrated": float(results.get("total_S_integrated", total_S)),
             "dwf_zero_temp": float(np.exp(-total_S)),
@@ -829,10 +981,13 @@ class LineshapeEngine:
         # 2. Spectral density CSV
         hw_grid = results.get("hw_grid")
         s_cont = results.get("s_cont")
+        s_cont_std = results.get("s_cont_std")
         if hw_grid is not None and s_cont is not None:
             with open(spectral_csv, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 headers = ["hw_meV", "S_harmonic_per_eV"]
+                if s_cont_std is not None:
+                    headers.append("S_harmonic_std_per_eV")
                 anh_temps = [T for T in self.config.temperatures if anharmonic_dict and T in anharmonic_dict]
                 for T in anh_temps:
                     headers.append(f"S_anharmonic_{T}K_per_eV")
@@ -841,6 +996,8 @@ class LineshapeEngine:
 
                 for idx, (hw, s) in enumerate(zip(hw_grid, s_cont)):
                     row = [f"{hw:.4f}", f"{s:.6f}"]
+                    if s_cont_std is not None:
+                        row.append(f"{s_cont_std[idx]:.6f}")
                     for T in anh_temps:
                         s_t = anharmonic_dict[T].get("s_anh")
                         s_val = s_t[idx] if s_t is not None else s
@@ -852,6 +1009,7 @@ class LineshapeEngine:
         # 3. Optical lineshapes CSV
         lineshape_dict = results.get("harmonic", {})
         pl_dict = results.get("pl_spectrum", {})
+        lineshape_std = results.get("lineshape_std", {})
         if lineshape_dict:
             first_T = self.config.temperatures[0]
             if first_T in lineshape_dict:
@@ -864,6 +1022,8 @@ class LineshapeEngine:
                     for T in self.config.temperatures:
                         if T in lineshape_dict:
                             headers.append(f"A_harmonic_{T}K")
+                            if lineshape_std and T in lineshape_std:
+                                headers.append(f"A_harmonic_std_{T}K")
                         if pl_dict and T in pl_dict:
                             headers.append(f"I_PL_{T}K_norm")
                         if anharmonic_dict and T in anharmonic_dict:
@@ -877,6 +1037,8 @@ class LineshapeEngine:
                         for T in self.config.temperatures:
                             if T in lineshape_dict:
                                 row.append(f"{lineshape_dict[T][1][idx]:.8e}")
+                                if lineshape_std and T in lineshape_std:
+                                    row.append(f"{lineshape_std[T][idx]:.8e}")
                             if pl_dict and T in pl_dict:
                                 row.append(f"{pl_dict[T][1][idx]:.8e}")
                             if anharmonic_dict and T in anharmonic_dict:
@@ -1370,21 +1532,55 @@ class LineshapeEngine:
 
         return (e_min_final, e_max_final), (y_min_final, y_max_final)
 
-    def plot_all(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None, zpl_energy_eV=None):
+    def plot_all(
+        self,
+        lineshape_dict,
+        hw_grid,
+        s_cont,
+        total_S,
+        anharmonic_dict=None,
+        zpl_energy_eV=None,
+        s_cont_std=None,
+        lineshape_std_dict=None,
+    ):
         """Dispatches combined and/or individual temperature plots according to `temperature_plot_mode`."""
         plot_mode = self.config.temperature_plot_mode.lower()
 
         if plot_mode in ("combined", "both"):
             self.plot_combined(
-                lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict, zpl_energy_eV=zpl_energy_eV
+                lineshape_dict,
+                hw_grid,
+                s_cont,
+                total_S,
+                anharmonic_dict=anharmonic_dict,
+                zpl_energy_eV=zpl_energy_eV,
+                s_cont_std=s_cont_std,
+                lineshape_std_dict=lineshape_std_dict,
             )
 
         if plot_mode in ("individual", "both"):
             self.plot_individual(
-                lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=anharmonic_dict, zpl_energy_eV=zpl_energy_eV
+                lineshape_dict,
+                hw_grid,
+                s_cont,
+                total_S,
+                anharmonic_dict=anharmonic_dict,
+                zpl_energy_eV=zpl_energy_eV,
+                s_cont_std=s_cont_std,
+                lineshape_std_dict=lineshape_std_dict,
             )
 
-    def plot_combined(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None, zpl_energy_eV=None):
+    def plot_combined(
+        self,
+        lineshape_dict,
+        hw_grid,
+        s_cont,
+        total_S,
+        anharmonic_dict=None,
+        zpl_energy_eV=None,
+        s_cont_std=None,
+        lineshape_std_dict=None,
+    ):
         """Plots a combined multi-temperature figure of phonon densities and lineshapes."""
         fig, axs = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
         show_harmonic = self.config.show_harmonic_in_anharmonic
@@ -1417,6 +1613,17 @@ class LineshapeEngine:
             ax.fill_between(hw_grid, 0, s_norm, color='#2196F3', alpha=0.25, label=r'Harmonic $S(\hbar\omega)$ ($0\ \mathrm{K}$)')
             ax.plot(hw_grid, s_norm, color='#1976D2', lw=2.2)
 
+        if s_cont_std is not None:
+            s_std_norm = s_cont_std / s_0k_max
+            ax.fill_between(
+                hw_grid,
+                np.maximum(0, s_norm - s_std_norm),
+                s_norm + s_std_norm,
+                color='gray',
+                alpha=0.25,
+                label=r'Committee $\pm 1\sigma$',
+            )
+
         hw_xlim, hw_ylim = self.get_smart_phonon_limits(
             hw_grid, s_norm, anharmonic_dict=anharmonic_dict, s_0k_max=s_0k_max
         )
@@ -1447,6 +1654,16 @@ class LineshapeEngine:
             else:
                 ax2.plot(eg, an_harm, color=col, lw=2.2, label=f'Harmonic {t_str}')
                 ax2.fill_between(eg, 0, an_harm, color=col, alpha=0.12)
+
+            if lineshape_std_dict and T in lineshape_std_dict:
+                a_std = lineshape_std_dict[T]
+                ax2.fill_between(
+                    eg,
+                    np.maximum(0, an_harm - a_std),
+                    an_harm + a_std,
+                    color=col,
+                    alpha=0.20,
+                )
 
         e_xlim, e_ylim = self.get_smart_lineshape_limits(lineshape_dict, anharmonic_dict=anharmonic_dict)
         ax2.set_xlim(e_xlim)
@@ -1480,7 +1697,17 @@ class LineshapeEngine:
         plt.close(fig)
         logger.info(f"[+] Combined lineshape figure saved: {out_fig} (X-limits: {e_xlim[0]:.1f} to {e_xlim[1]:.1f} meV)")
 
-    def plot_individual(self, lineshape_dict, hw_grid, s_cont, total_S, anharmonic_dict=None, zpl_energy_eV=None):
+    def plot_individual(
+        self,
+        lineshape_dict,
+        hw_grid,
+        s_cont,
+        total_S,
+        anharmonic_dict=None,
+        zpl_energy_eV=None,
+        s_cont_std=None,
+        lineshape_std_dict=None,
+    ):
         """Plots per-temperature figures of phonon densities and lineshapes."""
         show_harmonic = self.config.show_harmonic_in_anharmonic
         prefix = self.config.individual_figure_prefix
@@ -1523,6 +1750,17 @@ class LineshapeEngine:
                 ax.fill_between(hw_grid, 0, s_norm, color=col, alpha=0.25, label=r'Harmonic $S(\hbar\omega)$')
                 ax.plot(hw_grid, s_norm, color=col, lw=2.2)
 
+            if s_cont_std is not None:
+                s_std_norm = s_cont_std / s_0k_max
+                ax.fill_between(
+                    hw_grid,
+                    np.maximum(0, s_norm - s_std_norm),
+                    s_norm + s_std_norm,
+                    color='gray',
+                    alpha=0.25,
+                    label=r'Committee $\pm 1\sigma$',
+                )
+
             ax.set_xlim(hw_xlim)
             ax.set_ylim(hw_ylim)
 
@@ -1545,6 +1783,17 @@ class LineshapeEngine:
             else:
                 ax2.plot(eg, an_harm, color=col, lw=2.2, linestyle='-', label=f'Harmonic Theory ({t_str})')
                 ax2.fill_between(eg, 0, an_harm, color=col, alpha=0.15)
+
+            if lineshape_std_dict and T in lineshape_std_dict:
+                a_std = lineshape_std_dict[T]
+                ax2.fill_between(
+                    eg,
+                    np.maximum(0, an_harm - a_std),
+                    an_harm + a_std,
+                    color=col,
+                    alpha=0.20,
+                    label=f'Harmonic $\pm 1\sigma$',
+                )
 
             e_xlim_T, e_ylim_T = self.get_smart_lineshape_limits(
                 lineshape_dict, anharmonic_dict=anharmonic_dict, active_curve_subset=curves_T

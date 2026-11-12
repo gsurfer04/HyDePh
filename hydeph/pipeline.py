@@ -547,7 +547,10 @@ def run_pipeline(
 
         if labeled_frames_es:
             logger.info("\n[-] Extracting Excited-State Delta Baselines & Training ES Delta-NEP...")
-            delta_frames_es = trainer.compute_delta_dataset(labeled_frames_es)
+            gs_offset = getattr(trainer, "energy_offset_per_atom", 0.0)
+            delta_frames_es = trainer.compute_delta_dataset(
+                labeled_frames_es, shared_offset_per_atom=gs_offset
+            )
             delta_pot_es_path = trainer.train_delta_nep(
                 delta_frames_es, pot_filename="nep_delta_es.txt", subdir="delta_nep_training_es"
             )
@@ -624,12 +627,18 @@ def run_pipeline(
         paired_calc = PairedDefectCalculator(hybrid_calc, hybrid_calc_es)
         logger.info(f"[+] Paired Hybrid Potential assembled: GS ({delta_pot_path}) and ES ({delta_pot_es_path})")
 
+    at_gs_orig = at_gs.copy()
+    at_es_orig = at_es.copy()
+
     at_test = at_gs.copy()
     at_test.calc = hybrid_calc
     e_hybrid = at_test.get_potential_energy()
     f_hybrid = at_test.get_forces()
     max_f = float(np.abs(f_hybrid).max())
     logger.info(f"[+] Ground State evaluated on Hybrid Potential: E = {e_hybrid:.4f} eV, Max F = {max_f:.4f} eV/A")
+
+    pre_refinement_gs_max_force = max_f
+    refinement_max_displacement_A = 0.0
 
     if max_f > 0.015 or 5 in force_stages:
         logger.info("[-] Refining Ground State equilibrium on Hybrid Potential...")
@@ -645,18 +654,77 @@ def run_pipeline(
         at_es_hybrid.info = dict(at_es.info)
         e_opt = at_gs_hybrid.get_potential_energy()
         f_opt = float(np.abs(at_gs_hybrid.get_forces()).max())
-        logger.info(f"[+] Refined GS equilibrium on Hybrid Potential: E = {e_opt:.4f} eV, Max F = {f_opt:.4f} eV/A")
+        refinement_max_displacement_A = float(
+            np.max(
+                np.linalg.norm(
+                    mic_displacement(at_gs_hybrid.positions, at_gs_orig.positions, at_gs_orig.cell),
+                    axis=1,
+                )
+            )
+        )
+        logger.info(
+            f"[+] Refined GS equilibrium on Hybrid Potential: E = {e_opt:.4f} eV, Max F = {f_opt:.4f} eV/A "
+            f"(Max disp = {refinement_max_displacement_A:.4f} A)"
+        )
         at_gs = at_gs_hybrid
         at_es = at_es_hybrid
 
-    # Evaluate Delta-NEP Quality Control & Gate Verification
-    qc_report = evaluate_delta_nep_quality_control(
+    # Evaluate Delta-NEP Quality Control & Gate Verification (GS)
+    qc_gs = evaluate_delta_nep_quality_control(
         calc_hybrid=hybrid_calc,
         labeled_frames=labeled_frames,
         at_gs=at_gs,
+        at_ref=at_gs_orig,
         workspace_dir=config.workspace_dir,
         config=config,
+        state_label="ground_state",
+        pre_refinement_force=pre_refinement_gs_max_force,
+        refinement_displacement=refinement_max_displacement_A,
     )
+
+    qc_es = None
+    if hybrid_calc_es is not None and labeled_frames_es:
+        qc_es = evaluate_delta_nep_quality_control(
+            calc_hybrid=hybrid_calc_es,
+            labeled_frames=labeled_frames_es,
+            at_gs=at_es,
+            at_ref=at_es_orig,
+            workspace_dir=config.workspace_dir,
+            config=config,
+            state_label="excited_state",
+        )
+
+    # Combined dual-state QC report and dual-panel parity plot
+    from .delta_trainer import plot_delta_nep_parity
+    parity_png_path = os.path.join(config.workspace_dir, "delta_nep_parity.png")
+    try:
+        plot_delta_nep_parity(qc_gs, qc_es, save_path=parity_png_path)
+        logger.info(f"[+] Exported Delta-NEP parity plot: {parity_png_path}")
+    except Exception as exc:
+        logger.warning(f"[!] Could not export parity plot: {exc}")
+
+    combined_qc = {
+        "ground_state": qc_gs,
+        "excited_state": qc_es,
+        "qc_passed": bool(qc_gs["qc_passed"] and (qc_es["qc_passed"] if qc_es else True)),
+        # Backwards compatibility aliases
+        "train_energy_rmse_meV_atom": qc_gs["train_energy_rmse_meV_atom"],
+        "train_force_rmse_eV_A": qc_gs["train_force_rmse_eV_A"],
+        "test_energy_rmse_meV_atom": qc_gs["test_energy_rmse_meV_atom"],
+        "test_force_rmse_eV_A": qc_gs["test_force_rmse_eV_A"],
+        "gs_residual_force_max_eV_A": qc_gs["gs_residual_force_max_eV_A"],
+        "pre_refinement_gs_max_force_eV_A": qc_gs.get("pre_refinement_force_eV_A"),
+        "refinement_max_displacement_A": qc_gs.get("refinement_displacement_A"),
+        "fc_path_energy_max_err_meV": qc_gs.get("fc_path_energy_max_err_meV", 0.0),
+        "delta_erel_error_meV": qc_gs.get("delta_erel_error_meV", 0.0),
+        "delta_erel_error_pct": qc_gs.get("delta_erel_error_pct", 0.0),
+        "thresholds": qc_gs["thresholds"],
+        "gates": qc_gs["gates"],
+    }
+    with open(os.path.join(config.workspace_dir, "delta_nep_qc_report.json"), "w", encoding="utf-8") as f:
+        json.dump(combined_qc, f, indent=2)
+
+    qc_report = combined_qc
 
     if eff_to_stage <= 5:
         logger.info(f"\n[+] Pipeline stopped after Stage 5 as requested (--to-stage {eff_to_stage}).")

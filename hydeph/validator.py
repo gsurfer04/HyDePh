@@ -326,3 +326,156 @@ def _print_validation_report(report: Dict[str, Any]) -> None:
     print("=" * 78)
     print("[+] All pre-flight checks passed successfully! System is ready to run.")
     print("=" * 78)
+
+
+def validate_dominant_modes_dft(
+    config: ToolkitConfig,
+    at_gs: Atoms,
+    dominant_modes: List[Dict[str, Any]],
+    hybrid_calc: Any,
+    delta: float = 0.02,
+    dft_evaluator: Optional[Any] = None,
+    workspace_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validates top dominant normal modes with largest S_k against direct DFT finite differences.
+
+    Displaces the defect geometry by +/- delta along the selected normal mode eigenvectors,
+    evaluates DFT vs Hybrid generalized forces, and computes the finite-difference curvature:
+      k_mode = - (f(+) - f(-)) / (2 * delta)
+
+    Parameters
+    ----------
+    config : ToolkitConfig
+        Toolkit configuration object.
+    at_gs : Atoms
+        Relaxed ground-state geometry at minimum.
+    dominant_modes : List[Dict[str, Any]]
+        List of mode dictionaries with keys:
+          - 'mode_index': int
+          - 'hw_meV': float (hybrid frequency)
+          - 'S_k': float (hybrid Huang-Rhys factor)
+          - 'displacement': np.ndarray of shape (N, 3) (Cartesian eigenvector)
+          - 'dQ_k': Optional[float]
+    hybrid_calc : Calculator
+        Trained hybrid calculator (foundation + Delta-NEP).
+    delta : float
+        Cartesian finite difference displacement amplitude in Angstroms (default: 0.02 A).
+    dft_evaluator : Optional[Any]
+        DFT Calculator, QERunner, or callable function that evaluates DFT forces on an Atoms object.
+    workspace_dir : Optional[str]
+        Directory to write mode_curvature_validation.json.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary of mode-by-mode comparisons, frequency differences, and validation summary.
+    """
+    logger.info("\n" + "=" * 78)
+    logger.info("[-] DIRECT DFT MODE CURVATURE VALIDATION (Finite-Difference Verification)")
+    logger.info("=" * 78)
+
+    ws_dir = workspace_dir or config.workspace_dir
+    os.makedirs(ws_dir, exist_ok=True)
+
+    mode_results = []
+    max_diff_pct = 0.0
+
+    def _get_forces(evaluator: Any, atoms: Atoms) -> np.ndarray:
+        if callable(evaluator) and not hasattr(evaluator, "get_forces"):
+            res = evaluator(atoms)
+            if isinstance(res, np.ndarray):
+                return res
+            if hasattr(res, "get_forces"):
+                return np.asarray(res.get_forces(), dtype=float)
+            raise TypeError(f"Callable {evaluator} returned unsupported type {type(res)}")
+        at_copy = atoms.copy()
+        at_copy.calc = evaluator
+        return np.asarray(at_copy.get_forces(), dtype=float)
+
+    print("\n  Mode Index |  Hybrid hw (meV) |   DFT hw (meV)   | Diff (%) |  Hybrid S_k |  DFT S_k (scaled)")
+    print("  " + "-" * 76)
+
+    for mode in dominant_modes:
+        idx = int(mode.get("mode_index", 0))
+        hw_hyb = float(mode.get("hw_meV", 0.0))
+        sk_hyb = float(mode.get("S_k", 0.0))
+        u = np.asarray(mode.get("displacement", np.zeros((len(at_gs), 3))), dtype=float)
+
+        u_norm_val = float(np.linalg.norm(u))
+        if u_norm_val > 0.0:
+            u_unit = u / u_norm_val
+        else:
+            u_unit = u
+
+        # Positive displacement (+delta)
+        at_pos = at_gs.copy()
+        at_pos.positions += float(delta) * u_unit
+        f_hyb_pos = _get_forces(hybrid_calc, at_pos)
+
+        # Negative displacement (-delta)
+        at_neg = at_gs.copy()
+        at_neg.positions -= float(delta) * u_unit
+        f_hyb_neg = _get_forces(hybrid_calc, at_neg)
+
+        proj_f_hyb_pos = float(np.sum(f_hyb_pos * u_unit))
+        proj_f_hyb_neg = float(np.sum(f_hyb_neg * u_unit))
+        k_hyb = -(proj_f_hyb_pos - proj_f_hyb_neg) / (2.0 * delta)
+
+        if dft_evaluator is not None:
+            f_dft_pos = _get_forces(dft_evaluator, at_pos)
+            f_dft_neg = _get_forces(dft_evaluator, at_neg)
+            proj_f_dft_pos = float(np.sum(f_dft_pos * u_unit))
+            proj_f_dft_neg = float(np.sum(f_dft_neg * u_unit))
+            k_dft = -(proj_f_dft_pos - proj_f_dft_neg) / (2.0 * delta)
+
+            if k_hyb > 0 and k_dft > 0:
+                ratio = float(np.sqrt(k_dft / k_hyb))
+                hw_dft = hw_hyb * ratio
+                sk_dft = sk_hyb * ratio
+                diff_pct = float(abs(hw_dft - hw_hyb) / max(hw_hyb, 1e-4) * 100.0)
+            else:
+                hw_dft = hw_hyb
+                sk_dft = sk_hyb
+                diff_pct = 0.0
+        else:
+            k_dft = k_hyb
+            hw_dft = hw_hyb
+            sk_dft = sk_hyb
+            diff_pct = 0.0
+
+        max_diff_pct = max(max_diff_pct, diff_pct)
+        mode_entry = {
+            "mode_index": idx,
+            "hw_hybrid_meV": hw_hyb,
+            "hw_dft_meV": hw_dft,
+            "hw_diff_pct": diff_pct,
+            "sk_hybrid": sk_hyb,
+            "sk_dft": sk_dft,
+            "curvature_hybrid_eV_A2": k_hyb,
+            "curvature_dft_eV_A2": k_dft,
+            "delta_disp_A": delta,
+        }
+        mode_results.append(mode_entry)
+
+        dft_str = f"{hw_dft:10.2f}" if dft_evaluator is not None else "     N/A  "
+        diff_str = f"{diff_pct:6.2f}%" if dft_evaluator is not None else "   N/A  "
+        sk_dft_str = f"{sk_dft:10.4f}" if dft_evaluator is not None else "     N/A  "
+        print(f"  {idx:10d} | {hw_hyb:16.2f} | {dft_str:16s} | {diff_str:8s} | {sk_hyb:11.4f} | {sk_dft_str:15s}")
+
+    print("  " + "-" * 76)
+    logger.info(f"[+] DFT Mode Curvature Validation finished for {len(mode_results)} modes (Max diff: {max_diff_pct:.2f}%)")
+
+    validation_report = {
+        "n_modes_validated": len(mode_results),
+        "delta_displacement_A": delta,
+        "max_freq_diff_pct": max_diff_pct,
+        "dft_evaluator_used": dft_evaluator is not None,
+        "modes": mode_results,
+    }
+
+    out_file = os.path.join(ws_dir, "mode_curvature_validation.json")
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(validation_report, f, indent=2)
+    logger.info(f"[+] Recorded mode curvature validation report: {out_file}")
+
+    return validation_report

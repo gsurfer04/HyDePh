@@ -12,12 +12,12 @@ from .config import ToolkitConfig, discover_pseudopotential, resolve_pseudo_path
 from .defect_builder import DefectBuilder, detect_defect_sites, apply_jahn_teller_distortion
 from .frame_sampler import FrameSampler, get_rattle_sigma
 from .qe_runner import QERunner, extract_and_attach_adiabatic_energetics, resolve_delta_scf_spec
-from .delta_trainer import DeltaTrainer, evaluate_delta_nep_quality_control
+from .delta_trainer import DeltaTrainer, evaluate_delta_nep_quality_control, plot_delta_nep_parity
 from .calculator import HybridDefectCalculator, PairedDefectCalculator, load_foundation_calculator
 from .lineshape import LineshapeEngine
 from .cc_diagram import ConfigurationCoordinateEngine, plot_configuration_coordinate
 from .pipeline import run_pipeline, setup_logging
-from .validator import validate_workflow
+from .validator import validate_workflow, validate_dominant_modes_dft
 
 __version__ = "0.9.0"
 
@@ -38,6 +38,7 @@ __all__ = [
     "resolve_delta_scf_spec",
     "DeltaTrainer",
     "evaluate_delta_nep_quality_control",
+    "plot_delta_nep_parity",
     "HybridDefectCalculator",
     "PairedDefectCalculator",
     "load_foundation_calculator",
@@ -47,4 +48,5 @@ __all__ = [
     "run_pipeline",
     "setup_logging",
     "validate_workflow",
+    "validate_dominant_modes_dft",
 ]
