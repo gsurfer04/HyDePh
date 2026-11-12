@@ -1605,20 +1605,20 @@ def check_pw_in_matches_atoms(
         if config is not None:
             # 1. ecutwfc
             if getattr(config, "ecutwfc", None) is not None:
-                m_wfc = re.search(r"ecutwfc\s*=\s*([-\d.Ee+]+)", text, re.IGNORECASE)
-                if not m_wfc or abs(float(m_wfc.group(1)) - float(config.ecutwfc)) > 1e-3:
+                m_wfc = re.search(r"ecutwfc\s*=\s*([-\d.EeDd+]+)", text, re.IGNORECASE)
+                if not m_wfc or abs(float(m_wfc.group(1).replace("d", "e").replace("D", "e")) - float(config.ecutwfc)) > 1e-3:
                     return False
 
             # 2. ecutrho
             if getattr(config, "ecutrho", None) is not None:
-                m_rho = re.search(r"ecutrho\s*=\s*([-\d.Ee+]+)", text, re.IGNORECASE)
-                if not m_rho or abs(float(m_rho.group(1)) - float(config.ecutrho)) > 1e-3:
+                m_rho = re.search(r"ecutrho\s*=\s*([-\d.EeDd+]+)", text, re.IGNORECASE)
+                if not m_rho or abs(float(m_rho.group(1).replace("d", "e").replace("D", "e")) - float(config.ecutrho)) > 1e-3:
                     return False
 
             # 3. tot_charge
             if getattr(config, "tot_charge", None) is not None:
-                m_chg = re.search(r"tot_charge\s*=\s*([-\d.Ee+]+)", text, re.IGNORECASE)
-                if not m_chg or abs(float(m_chg.group(1)) - float(config.tot_charge)) > 1e-3:
+                m_chg = re.search(r"tot_charge\s*=\s*([-\d.EeDd+]+)", text, re.IGNORECASE)
+                if not m_chg or abs(float(m_chg.group(1).replace("d", "e").replace("D", "e")) - float(config.tot_charge)) > 1e-3:
                     return False
 
             # 4. tot_magnetization
@@ -1638,9 +1638,9 @@ def check_pw_in_matches_atoms(
 
             # 6. conv_thr
             if getattr(config, "conv_thr", None) is not None:
-                m_thr = re.search(r"conv_thr\s*=\s*([-\d.Ee+]+)", text, re.IGNORECASE)
+                m_thr = re.search(r"conv_thr\s*=\s*([-\d.EeDd+]+)", text, re.IGNORECASE)
                 if m_thr:
-                    val_thr = float(m_thr.group(1))
+                    val_thr = float(m_thr.group(1).replace("d", "e").replace("D", "e"))
                     cfg_thr = float(config.conv_thr)
                     if abs(val_thr - cfg_thr) / max(1e-15, cfg_thr) > 0.05:
                         return False
