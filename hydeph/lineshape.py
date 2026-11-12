@@ -19,6 +19,7 @@ from scipy.signal import fftconvolve, correlate
 
 from .config import ToolkitConfig
 from .defect_builder import mic_displacement
+from .calculator import HybridDefectCalculator
 
 try:
     from tqdm import tqdm
