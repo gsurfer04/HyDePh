@@ -87,10 +87,21 @@ def _make_mock_frames(n_frames=10, has_fc=True):
     return frames
 
 
+def _make_cfg(tmp_path, **kwargs):
+    default_kwargs = {
+        "pristine_cell_path": "dummy.xyz",
+        "foundation_potential_path": "dummy.txt",
+        "workspace_dir": str(tmp_path),
+        "pseudopotentials": {"C": "C.upf"},
+    }
+    default_kwargs.update(kwargs)
+    return ToolkitConfig(**default_kwargs)
+
+
 def test_qc_lambda_0_reference(tmp_path):
     """Test that lambda=0.0 is selected as reference f0 rather than lambda=-0.2."""
-    cfg = ToolkitConfig(
-        workspace_dir=str(tmp_path),
+    cfg = _make_cfg(
+        tmp_path,
         allow_fallbacks=True,
     )
     frames = _make_mock_frames(n_frames=8, has_fc=True)
@@ -118,8 +129,8 @@ def test_qc_lambda_0_reference(tmp_path):
 
 def test_qc_pre_refinement_force_gate(tmp_path):
     """Test that pre-refinement force gate fails loud when unrefined residual force is too high."""
-    cfg = ToolkitConfig(
-        workspace_dir=str(tmp_path),
+    cfg = _make_cfg(
+        tmp_path,
         max_gs_residual_force_eV_A=0.03,
         allow_fallbacks=False,
     )
@@ -143,8 +154,8 @@ def test_qc_pre_refinement_force_gate(tmp_path):
 
 def test_qc_refinement_displacement_gate(tmp_path):
     """Test that excessive hybrid refinement displacement fails the gate when allow_fallbacks=False."""
-    cfg = ToolkitConfig(
-        workspace_dir=str(tmp_path),
+    cfg = _make_cfg(
+        tmp_path,
         max_refinement_displacement_A=0.04,
         allow_fallbacks=False,
     )
@@ -167,8 +178,8 @@ def test_qc_refinement_displacement_gate(tmp_path):
 
 def test_shared_baseline_energy_offset(tmp_path):
     """Test that DeltaTrainer applies a shared baseline energy offset to ES dataset."""
-    cfg = ToolkitConfig(
-        workspace_dir=str(tmp_path),
+    cfg = _make_cfg(
+        tmp_path,
         subtract_mean_energy_offset=True,
     )
     trainer = DeltaTrainer(cfg)
@@ -190,8 +201,8 @@ def test_shared_baseline_energy_offset(tmp_path):
 
 def test_dual_state_qc_and_parity_plot(tmp_path):
     """Test dual-state QC evaluation and plot_delta_nep_parity generation."""
-    cfg = ToolkitConfig(
-        workspace_dir=str(tmp_path),
+    cfg = _make_cfg(
+        tmp_path,
         allow_fallbacks=True,
     )
     frames_gs = _make_mock_frames(n_frames=8, has_fc=True)
@@ -231,8 +242,8 @@ def test_dual_state_qc_and_parity_plot(tmp_path):
 
 def test_committee_uncertainty_in_lineshape(tmp_path):
     """Test that LineshapeEngine computes uncertainty bands when calculator is a committee."""
-    cfg = ToolkitConfig(
-        workspace_dir=str(tmp_path),
+    cfg = _make_cfg(
+        tmp_path,
         temperatures=[10.0, 300.0],
         enable_anharmonic=False,
         export_normal_modes=False,
@@ -269,8 +280,8 @@ def test_committee_uncertainty_in_lineshape(tmp_path):
 
 def test_validate_dominant_modes_dft(tmp_path):
     """Test validate_dominant_modes_dft helper."""
-    cfg = ToolkitConfig(
-        workspace_dir=str(tmp_path),
+    cfg = _make_cfg(
+        tmp_path,
     )
     at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]], cell=np.eye(3) * 10.0, pbc=True)
     dominant_modes = [
