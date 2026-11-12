@@ -19,6 +19,7 @@ def test_fixed_occupations_default(tmp_path):
     cfg = ToolkitConfig(
         pristine_cell_path="dummy.xyz",
         pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=1,
     )
     assert cfg.qe_occupations == "fixed"
     write_qe_input(atoms, str(pw_in), cfg)
@@ -33,6 +34,7 @@ def test_fixed_occupations_default(tmp_path):
         qe_occupations="smearing",
         smearing="fermi-dirac",
         degauss=0.01,
+        spin_multiplicity=1,
     )
     pw_smear = tmp_path / "pw_smear.in"
     write_qe_input(atoms, str(pw_smear), cfg_smear)
@@ -50,6 +52,7 @@ def test_atom_scaled_conv_thr(tmp_path):
     cfg = ToolkitConfig(
         pristine_cell_path="dummy.xyz",
         pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=1,
     )
     assert cfg.conv_thr is None
     write_qe_input(atoms10, str(pw10), cfg)
@@ -68,6 +71,7 @@ def test_atom_scaled_conv_thr(tmp_path):
         pristine_cell_path="dummy.xyz",
         pseudopotentials={"C": "C.upf"},
         conv_thr="5.0d-6",
+        spin_multiplicity=1,
     )
     pw_exp = tmp_path / "pw_exp.in"
     write_qe_input(atoms200, str(pw_exp), cfg_explicit)
@@ -126,6 +130,7 @@ def test_hybrid_dft_hse_support(tmp_path):
         pristine_cell_path=str(pristine_file),
         foundation_potential_path=str(nep_file),
         pseudopotentials={"C": str(upf_file)},
+        spin_multiplicity=2,
         input_dft="hse",
         exx_fraction=0.25,
         nqx=(1, 1, 1),
@@ -147,6 +152,7 @@ def test_hybrid_dft_hse_support(tmp_path):
         pristine_cell_path=str(pristine_file),
         foundation_potential_path=str(nep_file),
         pseudopotentials={"C": str(upf_file)},
+        spin_multiplicity=2,
         input_dft="hse",
         exx_fraction=1.5,
     )
@@ -157,6 +163,7 @@ def test_hybrid_dft_hse_support(tmp_path):
         pristine_cell_path=str(pristine_file),
         foundation_potential_path=str(nep_file),
         pseudopotentials={"C": str(upf_file)},
+        spin_multiplicity=2,
         input_dft="hse",
         nqx=(1, 0, 1),
     )

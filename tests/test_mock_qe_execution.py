@@ -33,7 +33,8 @@ def test_qe_runner_cache_hit(tmp_path):
     cfg = ToolkitConfig(
         pristine_cell_path=str(tmp_path),
         pseudo_dir=str(tmp_path),
-        pseudopotentials={"Li": "fake.UPF", "Cl": "fake.UPF"}
+        pseudopotentials={"Li": "fake.UPF", "Cl": "fake.UPF"},
+        spin_multiplicity=2,
     )
     from hydeph.qe_runner import write_qe_input
     write_qe_input(atoms, str(calc_dir / "pw.in"), cfg)
@@ -58,7 +59,8 @@ def test_qe_runner_error_includes_guidance(tmp_path):
     cfg = ToolkitConfig(
         pristine_cell_path=str(tmp_path),
         pseudo_dir=str(tmp_path),
-        pseudopotentials={"Li": "fake.UPF", "Cl": "fake.UPF"}
+        pseudopotentials={"Li": "fake.UPF", "Cl": "fake.UPF"},
+        spin_multiplicity=2,
     )
     from hydeph.qe_runner import write_qe_input
     write_qe_input(atoms, str(calc_dir / "pw.in"), cfg)

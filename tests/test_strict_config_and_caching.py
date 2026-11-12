@@ -210,6 +210,7 @@ def test_comprehensive_range_validation(tmp_path):
             "pristine_cell_path": str(pristine_file),
             "foundation_potential_path": str(nep_file),
             "pseudopotentials": {"C": str(upf_file)},
+            "spin_multiplicity": 2,
         }
         base.update(kwargs)
         return ToolkitConfig(**base)
@@ -277,6 +278,7 @@ def test_export_resolved_manifest(tmp_path):
         foundation_potential_path=str(nep_file),
         pseudopotentials={"C": str(upf_file)},
         workspace_dir=str(ws),
+        spin_multiplicity=2,
     )
     cfg.validate()
 

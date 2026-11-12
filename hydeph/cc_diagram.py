@@ -17,29 +17,7 @@ from ase import Atoms
 from .config import ToolkitConfig
 from .defect_builder import mic_displacement
 
-try:
-    from tqdm import tqdm
-except ImportError:
-    class _DummyPbar:
-        def __init__(self, iterable=None, *args, **kwargs):
-            self.iterable = iterable if iterable is not None else []
-        def __iter__(self):
-            return iter(self.iterable)
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def update(self, *args, **kwargs):
-            pass
-        def close(self):
-            pass
-        def set_postfix(self, *args, **kwargs):
-            pass
-        def set_description(self, *args, **kwargs):
-            pass
-
-    def tqdm(iterable=None, *args, **kwargs):
-        return _DummyPbar(iterable, *args, **kwargs)
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 

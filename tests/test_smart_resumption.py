@@ -28,6 +28,7 @@ def test_frame_sampler_labels(tmp_path):
         n_phonon_frames=3,
         n_md_frames=3,
         random_seed=42,
+        spin_multiplicity=2,
     )
     
     sampler = FrameSampler(cfg)
@@ -66,6 +67,7 @@ def test_candidate_dataset_caching(tmp_path):
         pseudopotentials={"Li": "Li.upf", "Cl": "Cl.upf"},
         workspace_dir=str(ws),
         force_resample=False,
+        spin_multiplicity=2,
     )
     sampler = FrameSampler(cfg)
     
@@ -173,6 +175,7 @@ K_POINTS (automatic)
         workspace_dir=str(ws),
         max_dft_frames=4,
         dft_resume_mode="target_total",
+        spin_multiplicity=2,
     )
     
     runner = QERunner(cfg, n_procs=1, pw_exe="pw.exe")
@@ -245,6 +248,7 @@ def test_resume_cleans_incomplete_scratch(tmp_path):
         pseudo_dir=str(tmp_path),
         pseudopotentials={"Li": "Li.upf", "Cl": "Cl.upf"},
         workspace_dir=str(tmp_path),
+        spin_multiplicity=2,
     )
     runner = QERunner(cfg, n_procs=1, pw_exe="pw.exe")
     
@@ -331,6 +335,7 @@ def test_qe_retry_after_rest_succeeds(tmp_path):
         workspace_dir=str(ws),
         retry_failed_dft=True,
         replace_failed_frames=False,
+        spin_multiplicity=2,
     )
     runner = QERunner(cfg, n_procs=1, pw_exe="pw.exe")
 
@@ -393,6 +398,7 @@ def test_qe_second_failure_ignored_when_replace_disabled(tmp_path):
         workspace_dir=str(ws),
         retry_failed_dft=True,
         replace_failed_frames=False,
+        spin_multiplicity=2,
     )
     runner = QERunner(cfg, n_procs=1, pw_exe="pw.exe")
 
@@ -442,6 +448,7 @@ def test_qe_second_failure_replaced_when_enabled(tmp_path):
         workspace_dir=str(ws),
         retry_failed_dft=True,
         replace_failed_frames=True,
+        spin_multiplicity=2,
     )
     runner = QERunner(cfg, n_procs=1, pw_exe="pw.exe")
 

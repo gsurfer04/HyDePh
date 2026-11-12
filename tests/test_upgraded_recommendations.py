@@ -268,6 +268,7 @@ def test_qe_gamma_kpoints_and_universal_masses(tmp_path):
         pristine_cell_path=str(tmp_path),
         kpoints=(1, 1, 1),
         pseudopotentials={"Ga": "Ga.UPF", "As": "As.UPF"},
+        spin_multiplicity=2,
     )
     write_qe_input(at, str(pw_in), cfg)
     text = pw_in.read_text()
@@ -333,6 +334,7 @@ def test_qe_speed_optimizations_upf_and_omp(tmp_path, monkeypatch):
         n_procs_qe=2,
         n_workers_qe=2,
         auto_spin_parity=True,
+        spin_multiplicity=2,
     )
     write_qe_input(at, str(pw_in), cfg)
     text = pw_in.read_text()

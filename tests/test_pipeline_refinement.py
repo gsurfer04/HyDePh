@@ -54,6 +54,7 @@ def test_pipeline_hybrid_refinement_executes_cleanly(tmp_path):
         plot_configuration_coordinate=True,
         zpl_energy_eV=1.925,
         allow_fallbacks=True,
+        spin_multiplicity=2,
     )
 
     at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[4, 4, 4], pbc=True)

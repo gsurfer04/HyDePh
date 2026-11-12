@@ -14,36 +14,16 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from ase import Atoms
-from ase.vibrations import Vibrations
+from ase.vibrations import Vibrations as _AseVibrations
 from scipy.signal import fftconvolve, correlate
 
 from .config import ToolkitConfig
 from .defect_builder import mic_displacement
 from .calculator import HybridDefectCalculator
 
-try:
-    from tqdm import tqdm
-except ImportError:
-    class _DummyPbar:
-        def __init__(self, iterable=None, *args, **kwargs):
-            self.iterable = iterable if iterable is not None else []
-        def __iter__(self):
-            return iter(self.iterable)
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def update(self, *args, **kwargs):
-            pass
-        def close(self):
-            pass
-        def set_postfix(self, *args, **kwargs):
-            pass
-        def set_description(self, *args, **kwargs):
-            pass
+from tqdm import tqdm
 
-    def tqdm(iterable=None, *args, **kwargs):
-        return _DummyPbar(iterable, *args, **kwargs)
+Vibrations = _AseVibrations
 
 logger = logging.getLogger(__name__)
 
@@ -397,11 +377,12 @@ def apply_acoustic_sum_rule_and_projection(H_2d: np.ndarray, atoms: Atoms) -> np
 class LineshapeEngine:
     """Calculates phonon normal modes, spectral densities S(hw), Huang-Rhys factor, and lineshapes."""
 
-    def __init__(self, config: ToolkitConfig, hybrid_calc):
+    def __init__(self, config: ToolkitConfig, hybrid_calc, calc_es: Optional[Any] = None, vibrations_cls: Optional[Any] = None):
         self.config = config
         self.calc = hybrid_calc
-        self.calc_es = None
+        self.calc_es = calc_es
         self.paired_calc = None
+        self.vibrations_cls = vibrations_cls
 
     def _run_vibrations_for_calculator(
         self,
@@ -420,13 +401,13 @@ class LineshapeEngine:
 
         use_parallel = getattr(self.config, "parallel_hessian", True)
         n_workers_vib = getattr(self.config, "parallel_hessian_workers", None) or 4
-        is_mocked = hasattr(Vibrations, "_mock_return_value") or not isinstance(Vibrations, type)
         delta_vib = getattr(self.config, "displacement_delta", 0.01)
-        if use_parallel and n_workers_vib > 1 and not is_mocked:
+        vib_cls = self.vibrations_cls if self.vibrations_cls is not None else Vibrations
+        if use_parallel and n_workers_vib > 1 and vib_cls is _AseVibrations and Vibrations is _AseVibrations:
             from .hpc.parallel_vib import ParallelVibrations
             vib = ParallelVibrations(at, name=vib_path, delta=delta_vib, n_workers=n_workers_vib)
         else:
-            vib = Vibrations(at, name=vib_path, delta=delta_vib)
+            vib = vib_cls(at, name=vib_path, delta=delta_vib)
 
         current_fp = _compute_hessian_fingerprint(at_gs, calc, delta=delta_vib)
         cached_fp = None
@@ -463,20 +444,24 @@ class LineshapeEngine:
 
         use_asr = getattr(self.config, "acoustic_sum_rule", True)
         _get_mode_func = None
-        if use_asr and not is_mocked:
+        if use_asr and hasattr(vib, "get_vibrations"):
             try:
                 vdata = vib.get_vibrations()
-                H_raw = vdata.get_hessian_2d()
-                H_clean = apply_acoustic_sum_rule_and_projection(H_raw, at)
-                from ase.vibrations.data import VibrationsData
-                vdata_clean = VibrationsData(at, H_clean.reshape(len(at), 3, len(at), 3))
-                energies_ev = vdata_clean.get_energies()
-                all_modes_arr = vdata_clean.get_modes()
+                H_raw = getattr(vdata, "get_hessian_2d", lambda: None)()
+                if isinstance(H_raw, np.ndarray):
+                    H_clean = apply_acoustic_sum_rule_and_projection(H_raw, at)
+                    from ase.vibrations.data import VibrationsData
+                    vdata_clean = VibrationsData(at, H_clean.reshape(len(at), 3, len(at), 3))
+                    energies_ev = vdata_clean.get_energies()
+                    all_modes_arr = vdata_clean.get_modes()
 
-                def _get_mode_clean(idx):
-                    return all_modes_arr[idx]
+                    def _get_mode_clean(idx):
+                        return all_modes_arr[idx]
 
-                _get_mode_func = _get_mode_clean
+                    _get_mode_func = _get_mode_clean
+                else:
+                    energies_ev = vib.get_energies()
+                    _get_mode_func = vib.get_mode
             except Exception as e_asr:
                 if not getattr(self.config, "allow_fallbacks", False):
                     raise RuntimeError(
@@ -858,26 +843,15 @@ class LineshapeEngine:
                 member_s_cont = []
                 member_lineshapes = {T: [] for T in self.config.temperatures}
 
-                is_mocked = hasattr(Vibrations, "_mock_return_value") or not isinstance(Vibrations, type)
                 for m_idx in range(committee_size):
-                    if is_mocked:
-                        m_factor = 1.0 + 0.05 * (m_idx - (committee_size - 1) / 2.0)
-                        m_tot = total_S * m_factor
-                        m_sc = s_cont * m_factor
-                        member_S.append(m_tot)
-                        member_s_cont.append(m_sc)
-                        for T in self.config.temperatures:
-                            _, m_a = lineshape_dict[T]
-                            member_lineshapes[T].append(m_a * m_factor)
+                    if isinstance(self.calc, HybridDefectCalculator):
+                        m_calc = HybridDefectCalculator(
+                            calc_base=self.calc.calc_base,
+                            calc_delta=self.calc.calc_deltas[m_idx],
+                            energy_offset_per_atom=self.calc.energy_offset_per_atom,
+                        )
                     else:
-                        if isinstance(self.calc, HybridDefectCalculator):
-                            m_calc = HybridDefectCalculator(
-                                calc_base=self.calc.calc_base,
-                                calc_delta=self.calc.calc_deltas[m_idx],
-                                energy_offset_per_atom=self.calc.energy_offset_per_atom,
-                            )
-                        else:
-                            m_calc = self.calc.calc_deltas[m_idx]
+                        m_calc = self.calc.calc_deltas[m_idx]
 
                         m_f_es = f_es_mode
                         if use_force and hasattr(self, "calc_es") and self.calc_es is not None:
@@ -1004,6 +978,7 @@ class LineshapeEngine:
             "total_S_std": total_S_std,
             "total_S_discrete": total_S,
             "total_S_integrated": int_s_after,
+            "delta_q": dq_total,
             "s_outside_dft_fraction": float(s_outside_fraction),
             "s_outside_dft_total": float(s_outside_total),
             "acoustic_cutoff_moment_before": moment_before,

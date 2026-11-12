@@ -21,6 +21,13 @@ from .qe_runner import QERunner
 from .delta_trainer import DeltaTrainer, evaluate_delta_nep_quality_control
 from .calculator import HybridDefectCalculator, PairedDefectCalculator
 from .lineshape import LineshapeEngine
+from .provenance import (
+    write_stage_manifest,
+    update_incremental_provenance,
+    calculate_file_sha256,
+    generate_provenance_manifest,
+    write_provenance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,12 +133,14 @@ def check_foundation_bulk_stability(
     pristine_atoms: Atoms,
     calc_foundation,
     delta: float = 0.01,
+    supercell_repeat: Optional[Tuple[int, int, int]] = None,
 ) -> Tuple[int, float]:
     """Evaluates whether the foundation potential is dynamically stable on the pristine bulk cell.
 
-    Computes a finite-difference numerical Hessian on the pristine bulk cell using the foundation
-    calculator and diagonalizes the mass-weighted dynamical matrix. If imaginary modes are present,
-    it indicates that the foundation model possesses unphysical negative curvatures or soft phonon
+    Computes a finite-difference numerical Hessian on the pristine bulk cell (or supercell if
+    supercell_repeat is provided) using the foundation calculator and diagonalizes the
+    mass-weighted dynamical matrix. If imaginary modes are present, it indicates that the
+    foundation model possesses unphysical negative curvatures or zone-boundary soft phonon
     branches at this lattice volume.
 
     Parameters
@@ -142,17 +151,25 @@ def check_foundation_bulk_stability(
         Initialized foundation potential calculator (e.g. CPUNEP).
     delta : float
         Displacement magnitude in Angstroms.
+    supercell_repeat : tuple of int, optional
+        Supercell expansion multipliers (nx, ny, nz) to diagnose zone-boundary phonon instabilities.
+        Default is (2, 2, 2).
 
     Returns
     -------
     Tuple[int, float]
         (number_of_imaginary_modes, worst_imaginary_frequency_in_meV)
     """
-    natoms = len(pristine_atoms)
-    if natoms == 0 or calc_foundation is None:
+    if len(pristine_atoms) == 0 or calc_foundation is None:
         return 0, 0.0
 
-    at = pristine_atoms.copy()
+    if supercell_repeat is not None and any(int(r) > 1 for r in supercell_repeat):
+        eval_atoms = pristine_atoms.repeat(supercell_repeat)
+    else:
+        eval_atoms = pristine_atoms.copy()
+
+    natoms = len(eval_atoms)
+    at = eval_atoms.copy()
     at.calc = calc_foundation
     H = np.zeros((3 * natoms, 3 * natoms))
     r = 0
@@ -173,7 +190,7 @@ def check_foundation_bulk_stability(
 
     H_sym = 0.5 * (H + H.T)
     from ase.vibrations.data import VibrationsData
-    vib = VibrationsData(pristine_atoms, H_sym.reshape(natoms, 3, natoms, 3))
+    vib = VibrationsData(eval_atoms, H_sym.reshape(natoms, 3, natoms, 3))
     energies = vib.get_energies()
     im_modes = [e for e in energies if abs(e.imag) * 1000.0 > 1.0]
     worst = float(max([abs(e.imag) * 1000.0 for e in im_modes], default=0.0))
@@ -339,6 +356,15 @@ def run_pipeline(
         dq_fc = float(np.sqrt(np.sum(m[:, None] * (dq_vec ** 2))))
         logger.info(f"[+] Loaded relaxed GS ({len(at_gs)} atoms) and ES (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
 
+    stage_1_inputs = {}
+    if config.pristine_cell_path and os.path.isfile(config.pristine_cell_path):
+        stage_1_inputs["pristine_cell"] = calculate_file_sha256(config.pristine_cell_path)
+    if config.foundation_potential_path and os.path.isfile(config.foundation_potential_path):
+        stage_1_inputs["foundation_potential"] = calculate_file_sha256(config.foundation_potential_path)
+    s1_outs = [f for f in ["relaxed_gs.xyz", "relaxed_es.xyz", "delta_scf_spec.json"] if os.path.isfile(os.path.join(config.workspace_dir, f))]
+    write_stage_manifest(config.workspace_dir, 1, config.to_dict(), stage_1_inputs, output_files=s1_outs)
+    update_incremental_provenance(config.workspace_dir, 1, {"at_gs_atoms": len(at_gs), "at_es_atoms": len(at_es), "dq_fc": dq_fc})
+
     if eff_to_stage <= 1:
         logger.info(f"\n[+] Pipeline stopped after Stage 1 as requested (--to-stage {eff_to_stage}).")
         return {
@@ -359,7 +385,9 @@ def run_pipeline(
     if shared_foundation is not None and config.pristine_cell_path and os.path.isfile(config.pristine_cell_path):
         try:
             pris_cell_diag = ase.io.read(config.pristine_cell_path)
-            n_im_pris, worst_im_pris = check_foundation_bulk_stability(pris_cell_diag, shared_foundation)
+            n_im_pris, worst_im_pris = check_foundation_bulk_stability(
+                pris_cell_diag, shared_foundation, supercell_repeat=(2, 2, 2)
+            )
             if n_im_pris > 0:
                 logger.warning(
                     f"\n[!] WARNING: Foundation potential exhibits {n_im_pris} imaginary phonon mode(s) "
@@ -385,6 +413,15 @@ def run_pipeline(
             )
         candidate_frames = ase.io.read(cand_xyz, index=":")
         logger.info(f"[+] Loaded {len(candidate_frames)} candidate frames from {cand_xyz}")
+
+    stage_2_inputs = {}
+    if os.path.isfile(gs_xyz):
+        stage_2_inputs["relaxed_gs"] = calculate_file_sha256(gs_xyz)
+    if os.path.isfile(es_xyz):
+        stage_2_inputs["relaxed_es"] = calculate_file_sha256(es_xyz)
+    s2_outs = [f for f in ["candidate_frames.xyz", "configuration_coordinate_curve.csv", "configuration_coordinate_data.json"] if os.path.isfile(os.path.join(config.workspace_dir, f))]
+    write_stage_manifest(config.workspace_dir, 2, config.to_dict(), stage_2_inputs, output_files=s2_outs)
+    update_incremental_provenance(config.workspace_dir, 2, {"n_candidates": len(candidate_frames)})
 
     # Pre-generate DFT input decks and standalone SLURM runner scripts if stopping at stage 2 or requested
     dft_inputs_res = None
@@ -523,6 +560,13 @@ def run_pipeline(
                 from .qe_runner import extract_and_attach_adiabatic_energetics
                 extract_and_attach_adiabatic_energetics(labeled_frames, labeled_frames_es, at_gs=at_gs, at_es=at_es)
 
+    stage_3_inputs = {}
+    if os.path.isfile(cand_xyz):
+        stage_3_inputs["candidate_frames"] = calculate_file_sha256(cand_xyz)
+    s3_outs = [f for f in ["labeled_dft_frames.xyz", "labeled_frames_es.xyz", "labeled_frames.xyz"] if os.path.isfile(os.path.join(config.workspace_dir, f))]
+    write_stage_manifest(config.workspace_dir, 3, config.to_dict(), stage_3_inputs, output_files=s3_outs)
+    update_incremental_provenance(config.workspace_dir, 3, {"n_labeled_gs": len(labeled_frames), "n_labeled_es": len(labeled_frames_es)})
+
     if eff_to_stage <= 3:
         logger.info(f"\n[+] Pipeline stopped after Stage 3 as requested (--to-stage {eff_to_stage}).")
         return {
@@ -574,6 +618,13 @@ def run_pipeline(
             logger.info(f"[+] Reusing existing trained ES Delta-NEP: {delta_pot_es_path}")
         else:
             delta_pot_es_path = None
+
+    stage_4_inputs = {}
+    if os.path.isfile(labeled_xyz):
+        stage_4_inputs["labeled_dft_frames"] = calculate_file_sha256(labeled_xyz)
+    s4_outs = [f for f in ["nep_delta_gs.txt", "nep_delta_es.txt", "nep_delta.txt", "delta_nep_parity.json", "delta_nep_qc_report.json"] if os.path.isfile(os.path.join(config.workspace_dir, f))]
+    write_stage_manifest(config.workspace_dir, 4, config.to_dict(), stage_4_inputs, output_files=s4_outs)
+    update_incremental_provenance(config.workspace_dir, 4, {"delta_pot": delta_pot_path})
 
     if eff_to_stage <= 4:
         logger.info(f"\n[+] Pipeline stopped after Stage 4 as requested (--to-stage {eff_to_stage}).")
@@ -727,6 +778,15 @@ def run_pipeline(
 
     qc_report = combined_qc
 
+    stage_5_inputs = {}
+    if delta_pot_path and os.path.isfile(delta_pot_path):
+        stage_5_inputs["delta_pot"] = calculate_file_sha256(delta_pot_path)
+    if config.foundation_potential_path and os.path.isfile(config.foundation_potential_path):
+        stage_5_inputs["foundation_potential"] = calculate_file_sha256(config.foundation_potential_path)
+    s5_outs = [f for f in ["delta_nep_qc_report.json", "delta_nep_parity.png", "delta_nep_parity.json"] if os.path.isfile(os.path.join(config.workspace_dir, f))]
+    write_stage_manifest(config.workspace_dir, 5, config.to_dict(), stage_5_inputs, output_files=s5_outs)
+    update_incremental_provenance(config.workspace_dir, 5, {"status": "assembled", "qc_passed": qc_report.get("all_passed", True)})
+
     if eff_to_stage <= 5:
         logger.info(f"\n[+] Pipeline stopped after Stage 5 as requested (--to-stage {eff_to_stage}).")
         return {
@@ -755,8 +815,6 @@ def run_pipeline(
     cc_figure = cc_analysis.get("figure_path") if cc_analysis else None
     failed_dft = [e["frame_id"] for e in getattr(qe, "last_failed_entries", [])]
 
-    from .provenance import generate_provenance_manifest, write_provenance
-
     manifest = generate_provenance_manifest(
         config=config,
         at_gs=at_gs,
@@ -769,7 +827,17 @@ def run_pipeline(
     prov_path = write_provenance(config.workspace_dir, manifest)
     logger.info(f"[+] Provenance manifest recorded: {prov_path}")
 
+    stage_6_inputs = {}
+    if os.path.isfile(gs_xyz):
+        stage_6_inputs["relaxed_gs"] = calculate_file_sha256(gs_xyz)
+    if os.path.isfile(es_xyz):
+        stage_6_inputs["relaxed_es"] = calculate_file_sha256(es_xyz)
+    s6_outs = [f for f in ["optical_lineshapes.csv", "spectral_density.csv", "lineshape_summary.json", "normal_modes.csv"] if os.path.isfile(os.path.join(config.workspace_dir, f))]
+    write_stage_manifest(config.workspace_dir, 6, config.to_dict(), stage_6_inputs, output_files=s6_outs)
+    update_incremental_provenance(config.workspace_dir, 6, {"total_s": lineshapes.get("total_S_discrete", 0.0) if isinstance(lineshapes, dict) else 0.0})
+
     summary = {
+        "pipeline_completed": True,
         "workspace_dir": config.workspace_dir,
         "delta_potential": delta_pot_path,
         "n_dft_frames": len(labeled_frames),
@@ -870,8 +938,32 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Optional override for number of concurrent DFT workers",
     )
 
+    # status subcommand
+    p_status = subparsers.add_parser("status", help="Print stage manifest table, artifact counts, and recommended next step")
+    p_status.add_argument("target", help="Path to config file or workspace directory")
+
+    # qc subcommand
+    p_qc = subparsers.add_parser("qc", help="Display Delta-NEP Ground-State and Excited-State Quality Control gate metrics")
+    p_qc.add_argument("target", help="Path to config file or workspace directory")
+
+    # lineshape subcommand
+    p_lineshape = subparsers.add_parser("lineshape", help="Run Stage 6 lineshapes directly on existing relaxed structures")
+    p_lineshape.add_argument("config_path", help="Path to YAML, TOML, or JSON configuration file")
+    p_lineshape.add_argument("--smearing", type=float, default=None, help="Phonon broadening/smearing in meV")
+    p_lineshape.add_argument("--dephasing", type=float, default=None, help="Instrument dephasing gamma in meV")
+    p_lineshape.add_argument("--tau", type=float, default=None, help="Gaussian time-domain apodization tau in fs")
+    p_lineshape.add_argument("--embedding", type=str, default=None, choices=["displacement", "force"], help="Phonon embedding method")
+    p_lineshape.add_argument("--temperatures", type=str, default=None, help="Comma-separated temperatures in Kelvin (e.g. '10,77,300')")
+
+    # converge subcommand
+    p_converge = subparsers.add_parser("converge", help="Scan supercell sizes and smearing parameters for convergence")
+    p_converge.add_argument("config_path", help="Path to YAML, TOML, or JSON configuration file")
+    p_converge.add_argument("--supercells", type=str, default=None, help="Semicolon-separated supercell sizes (e.g. '1,1,1;2,2,2')")
+    p_converge.add_argument("--smearings", type=str, default=None, help="Comma-separated smearing values in meV (e.g. '2.0,5.0,10.0')")
+
     # Route `hydeph config.yaml [options]` without explicit 'run' subcommand
-    if raw_args and raw_args[0] not in ("run", "validate", "-h", "--help"):
+    known_subs = ("run", "validate", "status", "qc", "lineshape", "converge", "-h", "--help")
+    if raw_args and raw_args[0] not in known_subs:
         raw_args.insert(0, "run")
 
     args = parser.parse_args(raw_args)
@@ -886,6 +978,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as exc:
             logger.error(f"[X] Validation Failed: {exc}")
             return 1
+
+    elif args.subcommand == "status":
+        from .cli_commands import cli_status
+        return cli_status(args.target)
+
+    elif args.subcommand == "qc":
+        from .cli_commands import cli_qc
+        return cli_qc(args.target)
+
+    elif args.subcommand == "lineshape":
+        setup_logging(console=True)
+        from .cli_commands import cli_lineshape
+        return cli_lineshape(args.config_path, args)
+
+    elif args.subcommand == "converge":
+        setup_logging(console=True)
+        from .cli_commands import cli_converge
+        return cli_converge(args.config_path, args)
 
     elif args.subcommand == "run":
         setup_logging(console=True)

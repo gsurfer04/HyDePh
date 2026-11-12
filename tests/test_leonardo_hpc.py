@@ -232,6 +232,7 @@ def test_toolkit_config_hpc_extensions(tmp_path):
         slurm_account="cin_project_123",
         parallel_hessian=True,
         parallel_hessian_workers=8,
+        spin_multiplicity=2,
     )
 
     assert cfg.hpc_scheduler == "slurm"

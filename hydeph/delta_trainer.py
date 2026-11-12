@@ -16,34 +16,11 @@ from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 import ase.io
 from ase import Atoms
-from calorine.calculators import CPUNEP
 
 from .config import ToolkitConfig
 from .calculator import load_foundation_calculator, HybridDefectCalculator
 
-try:
-    from tqdm import tqdm
-except ImportError:
-    class _DummyPbar:
-        def __init__(self, iterable=None, *args, **kwargs):
-            self.iterable = iterable if iterable is not None else []
-        def __iter__(self):
-            return iter(self.iterable)
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def update(self, *args, **kwargs):
-            pass
-        def close(self):
-            pass
-        def set_postfix(self, *args, **kwargs):
-            pass
-        def set_description(self, *args, **kwargs):
-            pass
-
-    def tqdm(iterable=None, *args, **kwargs):
-        return _DummyPbar(iterable, *args, **kwargs)
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -268,8 +245,6 @@ class DeltaTrainer:
                 existing_calc=None,
                 allow_missing=False,
             )
-        elif CPUNEP is not None and getattr(CPUNEP, "__module__", "").startswith("unittest.mock"):
-            self.calc_foundation = CPUNEP(config.foundation_potential_path)
         else:
             self.calc_foundation = None
 

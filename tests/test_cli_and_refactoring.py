@@ -212,6 +212,7 @@ def test_pipeline_stage_resumption_missing_artifacts(tmp_path):
         foundation_potential_path=str(pot_file),
         pw_exe=str(pw_exe),
         workspace_dir=str(tmp_path / "ws_empty"),
+        spin_multiplicity=2,
     )
 
     from hydeph.pipeline import run_pipeline

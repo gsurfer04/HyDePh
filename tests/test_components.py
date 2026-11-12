@@ -131,7 +131,7 @@ def test_generic_excited_state_generation(tmp_path):
         mock_calc.get_forces.return_value = np.zeros((len(atoms), 3))
         mock_nep.return_value = mock_calc
 
-        builder = DefectBuilder(cfg)
+        builder = DefectBuilder(cfg, calc_foundation=mock_calc)
         builder.vac_pos = np.array([2.0, 2.0, 2.0])
         
         at_es, dq_fc = builder.generate_excited_state_geometry(atoms)
@@ -161,8 +161,12 @@ def test_user_supplied_excited_state_cell(tmp_path):
         workspace_dir=str(tmp_path)
     )
 
-    with patch("hydeph.defect_builder.CPUNEP"):
-        builder = DefectBuilder(cfg)
+    with patch("hydeph.defect_builder.CPUNEP") as mock_nep:
+        mock_calc = MagicMock()
+        mock_calc.get_potential_energy.return_value = -100.0
+        mock_calc.get_forces.return_value = np.zeros((len(atoms_gs), 3))
+        mock_nep.return_value = mock_calc
+        builder = DefectBuilder(cfg, calc_foundation=mock_calc)
         at_es, dq_fc = builder.generate_excited_state_geometry(atoms_gs)
         assert len(at_es) == len(atoms_gs)
         assert dq_fc > 0.0
@@ -727,6 +731,7 @@ def test_toolkit_config_auto_discover_pseudopotentials(tmp_path):
         pristine_cell_path=str(pristine_file),
         foundation_potential_path=str(pot_file),
         pseudo_dir=str(pseudo_dir),
+        spin_multiplicity=2,
     )
     assert cfg.pseudopotentials == {}
     cfg.validate()
@@ -743,6 +748,7 @@ def test_toolkit_config_auto_discover_pseudopotentials(tmp_path):
         foundation_potential_path=str(pot_file),
         pseudo_dir=str(pseudo_dir),
         pseudopotentials={"Cs": "Cs_custom.upf"},
+        spin_multiplicity=2,
     )
     cfg2.validate()
     assert os.path.basename(cfg2.pseudopotentials["Cs"]) == "Cs_custom.upf"
@@ -772,6 +778,7 @@ def test_toolkit_config_pseudo_dir_default_no_duplicate_path(tmp_path, monkeypat
     cfg = ToolkitConfig(
         pristine_cell_path=str(pristine_file),
         foundation_potential_path=str(pot_file),
+        spin_multiplicity=2,
     )
     assert cfg.pseudo_dir == "./pseudo"
     cfg.validate()
@@ -786,6 +793,7 @@ def test_toolkit_config_pseudo_dir_default_no_duplicate_path(tmp_path, monkeypat
         pristine_cell_path=str(pristine_file),
         foundation_potential_path=str(pot_file),
         pseudopotentials={"C": "./pseudo/C.upf"},
+        spin_multiplicity=2,
     )
     cfg2.validate()
     assert "./pseudo/./pseudo" not in cfg2.pseudopotentials["C"]
@@ -811,6 +819,7 @@ def test_write_qe_input_auto_discovery_and_error_handling(tmp_path):
         pristine_cell_path="dummy.xyz",
         pseudo_dir=str(pseudo_dir),
         pseudopotentials={},
+        spin_multiplicity=2,
     )
 
     out_file = tmp_path / "pw.in"

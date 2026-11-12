@@ -337,6 +337,7 @@ def test_defect_builder_atomic_write_extxyz_and_numpy_defect_positions(tmp_path)
         workspace_dir=ws,
         excited_state_method="spin_proxy",
         ground_state_relax_method="dft",
+        spin_multiplicity=3,
     )
 
     mock_qe = MockRelaxationQERunner(cfg, delta_d=0.08)

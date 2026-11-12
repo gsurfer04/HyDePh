@@ -23,6 +23,7 @@ def _make_cfg(tmp_path, **kwargs):
         "pristine_cell_path": str(p_file),
         "foundation_potential_path": str(pot_file),
         "workspace_dir": str(tmp_path / "ws"),
+        "spin_multiplicity": 2,
     }
     defaults.update(kwargs)
     return ToolkitConfig(**defaults)
@@ -106,6 +107,7 @@ def test_embed_phonon_supercell_propagates_zpl_metadata(tmp_path):
         phonon_supercell_repeat=(2, 2, 2),
         defect_type="vacancy",
         defect_site_index=1,
+        spin_multiplicity=2,
     )
 
     class MockCalc:

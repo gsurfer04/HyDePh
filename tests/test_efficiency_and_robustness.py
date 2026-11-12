@@ -242,6 +242,7 @@ def test_qe_runner_parallel_workers_and_timeout(tmp_path):
         pseudo_dir=str(pseudo_dir),
         pseudopotentials={"Li": "Li.UPF", "Cl": "Cl.UPF"},
         pw_exe=str(mock_pw),
+        spin_multiplicity=2,
         n_workers_qe=2,
         qe_timeout_s=0.25,
         retry_failed_dft=True,

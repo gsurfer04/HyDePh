@@ -7,12 +7,52 @@ import sys
 import json
 import hashlib
 from datetime import datetime, timezone
+import subprocess
 from typing import Dict, Any, Optional, List
 
 import numpy as np
 import ase
 import hydeph
 from .config import resolve_pseudo_path
+
+
+def get_git_commit(repo_path: Optional[str] = None) -> Optional[str]:
+    """Retrieves current git commit hash if running from a git repository."""
+    try:
+        cur_dir = repo_path or os.path.dirname(os.path.abspath(__file__))
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cur_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def get_environment_metadata() -> Dict[str, Any]:
+    """Assembles environment and dependency software versions."""
+    meta: Dict[str, Any] = {
+        "python_version": sys.version.split()[0],
+        "platform": sys.platform,
+        "hydeph_version": hydeph.__version__,
+        "numpy_version": np.__version__,
+        "ase_version": getattr(ase, "__version__", "unknown"),
+        "git_commit": get_git_commit(),
+    }
+    for mod in ("scipy", "calorine", "matplotlib", "yaml", "tqdm"):
+        try:
+            m = __import__(mod)
+            meta[f"{mod}_version"] = getattr(m, "__version__", "unknown")
+        except ImportError:
+            pass
+    return meta
 
 
 def calculate_file_sha256(filepath: str) -> Optional[str]:
@@ -83,8 +123,7 @@ def generate_provenance_manifest(
     manifest: Dict[str, Any] = {
         "timestamp_utc": now_iso,
         "hydeph_version": hydeph.__version__,
-        "python_version": sys.version,
-        "ase_version": getattr(ase, "__version__", "unknown"),
+        "environment": get_environment_metadata(),
         "allow_fallbacks": getattr(config, "allow_fallbacks", False),
         "total_walltime_s": total_time_s,
         "origins": {
@@ -102,6 +141,19 @@ def generate_provenance_manifest(
             "spin_multiplicity": getattr(config, "spin_multiplicity", None),
             "tot_charge": getattr(config, "tot_charge", None),
             "kpoints": list(getattr(config, "kpoints", (1, 1, 1))),
+            "input_dft": getattr(config, "input_dft", None),
+            "exx_fraction": getattr(config, "exx_fraction", None),
+            "qe_occupations": getattr(config, "qe_occupations", "fixed"),
+            "smearing": getattr(config, "smearing", None),
+            "degauss": getattr(config, "degauss", None),
+        },
+        "lineshape_parameters": {
+            "temperatures": list(getattr(config, "temperatures", [10.0, 77.0, 150.0, 300.0])),
+            "phonon_supercell_repeat": list(getattr(config, "phonon_supercell_repeat", [])) if getattr(config, "phonon_supercell_repeat", None) else None,
+            "phonon_embedding_method": getattr(config, "phonon_embedding_method", "force"),
+            "dephasing_gamma_meV": getattr(config, "dephasing_gamma_meV", 1.0),
+            "dephasing_temperature_coefficient": getattr(config, "dephasing_temperature_coefficient", 0.0),
+            "finite_size_acoustic_cutoff": getattr(config, "finite_size_acoustic_cutoff", False),
         },
         "models": {
             "foundation_potential": {
@@ -119,6 +171,75 @@ def generate_provenance_manifest(
         },
     }
     return manifest
+
+
+def update_incremental_provenance(
+    workspace_dir: str,
+    stage_idx: int,
+    stage_data: Dict[str, Any],
+    config=None,
+    filename: str = "incremental_provenance.json",
+) -> str:
+    """Incrementally updates incremental_provenance.json with per-stage outcomes, metadata, and timestamps."""
+    os.makedirs(workspace_dir, exist_ok=True)
+    prov_path = os.path.join(workspace_dir, filename)
+
+    existing: Dict[str, Any] = {}
+    if os.path.isfile(prov_path):
+        try:
+            with open(prov_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+
+    if not existing:
+        env_meta = get_environment_metadata()
+        existing = {
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "hydeph_version": hydeph.__version__,
+            "git_commit": env_meta.get("git_commit"),
+            "environment": env_meta,
+            "stages": {},
+        }
+
+    if "environment" not in existing:
+        env_meta = get_environment_metadata()
+        existing["environment"] = env_meta
+        if "git_commit" not in existing:
+            existing["git_commit"] = env_meta.get("git_commit")
+    if "stages" not in existing:
+        existing["stages"] = {}
+
+    existing["latest_stage_completed"] = max(existing.get("latest_stage_completed", 0), stage_idx)
+    existing["last_updated_utc"] = datetime.now(timezone.utc).isoformat()
+    existing["stages"][f"stage_{stage_idx}"] = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        **stage_data,
+    }
+
+    if config is not None:
+        if "dft_parameters" not in existing:
+            existing["dft_parameters"] = {
+                "ecutwfc": getattr(config, "ecutwfc", None),
+                "ecutrho": getattr(config, "ecutrho", None),
+                "conv_thr": getattr(config, "conv_thr", None),
+                "spin_multiplicity": getattr(config, "spin_multiplicity", None),
+                "tot_charge": getattr(config, "tot_charge", None),
+                "kpoints": list(getattr(config, "kpoints", (1, 1, 1))),
+                "input_dft": getattr(config, "input_dft", None),
+                "exx_fraction": getattr(config, "exx_fraction", None),
+            }
+        spec_path = os.path.join(workspace_dir, "delta_scf_spec.json")
+        if os.path.isfile(spec_path):
+            try:
+                with open(spec_path, "r", encoding="utf-8") as sf:
+                    existing["delta_scf_spec"] = json.load(sf)
+            except Exception:
+                pass
+
+    with open(prov_path, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2, default=str)
+    return prov_path
 
 
 def write_provenance(
@@ -177,7 +298,7 @@ def write_stage_manifest(
         "outputs": out_hashes,
     }
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f, indent=2, default=str)
     return manifest_path
 
 

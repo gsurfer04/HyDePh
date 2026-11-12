@@ -11,7 +11,6 @@ from ase import Atoms
 from ase.geometry import find_mic
 from ase.optimize import BFGS
 from ase.constraints import FixAtoms
-from calorine.calculators import CPUNEP
 
 from .config import ToolkitConfig
 from .calculator import load_foundation_calculator
@@ -276,8 +275,6 @@ class DefectBuilder:
                 existing_calc=None,
                 allow_missing=False,
             )
-        elif CPUNEP is not None and getattr(CPUNEP, "__module__", "").startswith("unittest.mock"):
-            self.calc_foundation = CPUNEP(config.foundation_potential_path)
         else:
             self.calc_foundation = None
         self.calc_qe = calc_qe

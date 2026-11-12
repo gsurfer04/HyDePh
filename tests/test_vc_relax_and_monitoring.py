@@ -47,12 +47,14 @@ def test_config_vc_relax_options_and_validation(tmp_path, dummy_pseudo):
     assert cfg.press_kbar == 0.0
     assert cfg.cell_factor == 2.0
 
-    # 2. Configured vc-relax
+    # 2. Configured vc-relax on pristine cell
     cfg_vc = ToolkitConfig(
         pristine_cell_path=str(cell_file),
         foundation_potential_path=str(nep_file),
         pseudo_dir=dummy_pseudo,
         pseudopotentials={"Cs": "Cs.upf", "I": "I.upf"},
+        defect_type="none",
+        spin_multiplicity=1,
         relaxation_calculation="vc-relax",
         cell_dynamics="bfgs",
         cell_dofree="shape",
@@ -63,6 +65,31 @@ def test_config_vc_relax_options_and_validation(tmp_path, dummy_pseudo):
     assert cfg_vc.relaxation_calculation == "vc-relax"
     assert cfg_vc.cell_dofree == "shape"
     assert cfg_vc.press_kbar == 10.0
+
+    # 2b. vc-relax guardrail on defect supercell
+    cfg_defect_vc = ToolkitConfig(
+        pristine_cell_path=str(cell_file),
+        foundation_potential_path=str(nep_file),
+        pseudo_dir=dummy_pseudo,
+        pseudopotentials={"Cs": "Cs.upf", "I": "I.upf"},
+        defect_type="vacancy",
+        spin_multiplicity=2,
+        relaxation_calculation="vc-relax",
+    )
+    with pytest.raises(ValueError, match="restricted to pristine bulk unit cells"):
+        cfg_defect_vc.validate()
+
+    cfg_defect_vc_allowed = ToolkitConfig(
+        pristine_cell_path=str(cell_file),
+        foundation_potential_path=str(nep_file),
+        pseudo_dir=dummy_pseudo,
+        pseudopotentials={"Cs": "Cs.upf", "I": "I.upf"},
+        defect_type="vacancy",
+        spin_multiplicity=2,
+        relaxation_calculation="vc-relax",
+        allow_defect_vc_relax=True,
+    )
+    assert cfg_defect_vc_allowed.validate() is True
 
     # 3. Validation failures
     with pytest.raises(ValueError, match="Invalid relaxation_calculation"):
@@ -101,6 +128,7 @@ def test_config_vc_relax_options_and_validation(tmp_path, dummy_pseudo):
         "foundation_potential_path": str(nep_file),
         "pseudo_dir": dummy_pseudo,
         "pseudopotentials": {"Cs": "Cs.upf", "I": "I.upf"},
+        "spin_multiplicity": 2,
         "relaxation_mode": "vc-relax",
         "press": 5.0,
     }

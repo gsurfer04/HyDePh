@@ -168,7 +168,8 @@ def test_write_qe_input_windows_path_normalization(tmp_path):
     cfg = ToolkitConfig(
         pristine_cell_path=str(tmp_path),
         pseudo_dir=str(pseudo_dir),  # May have backslashes on Windows
-        pseudopotentials={"Li": "Li.UPF", "Cl": "Cl.UPF"}
+        pseudopotentials={"Li": "Li.UPF", "Cl": "Cl.UPF"},
+        spin_multiplicity=2,
     )
     
     write_qe_input(atoms, str(pw_in), cfg)
@@ -256,7 +257,8 @@ def test_toolkit_config_validation(tmp_path):
         pw_exe="pw.exe",
         mpi_command="mpiexec",
         mpi_args=["-n", "4"],
-        nep_exe="nep.exe"
+        nep_exe="nep.exe",
+        spin_multiplicity=2,
     )
     assert cfg.validate() is True
     assert cfg.pw_exe == "pw.exe"

@@ -496,6 +496,7 @@ class ToolkitConfig:
     excited_state_spin_multiplicity: Optional[int] = None
     ground_state_relax_method: str = "auto"  # "auto", "foundation", or "dft"
     relaxation_calculation: str = "relax"  # "relax" or "vc-relax"
+    allow_defect_vc_relax: bool = False  # Explicitly allow vc-relax on defect supercell (violates dilute limit)
     cell_dynamics: str = "bfgs"
     cell_dofree: str = "all"
     press_kbar: float = 0.0
@@ -710,9 +711,9 @@ class ToolkitConfig:
             self.spin_multiplicity = int(self.tot_magnetization) + 1
         elif self.spin_multiplicity is not None:
             self.tot_magnetization = max(0, int(self.spin_multiplicity) - 1)
-        else:
-            self.spin_multiplicity = 2
-            self.tot_magnetization = 1
+        elif not self.spin_polarized:
+            self.spin_multiplicity = 1
+            self.tot_magnetization = 0
 
         if self.excited_state_tot_magnetization is not None:
             self.excited_state_spin_multiplicity = int(self.excited_state_tot_magnetization) + 1
@@ -806,14 +807,15 @@ class ToolkitConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ToolkitConfig:
         """Constructs a ToolkitConfig from a dictionary, rejecting unknown keys with helpful suggestions."""
-        # Normalize common user-friendly aliases for decoupled execution
-        alias_map = {
+        canonical_map = {
             "prepare_dft": "prepare_dft_inputs",
+            "prepare_relax": "prepare_relaxation_inputs",
+        }
+        deprecated_synonyms = {
             "prepare_scf": "prepare_dft_inputs",
             "prepare_scf_inputs": "prepare_dft_inputs",
             "prepare_sample_frames": "prepare_dft_inputs",
             "prepare_frames": "prepare_dft_inputs",
-            "prepare_relax": "prepare_relaxation_inputs",
             "prepare_relaxation": "prepare_relaxation_inputs",
             "modules": "slurm_modules",
             "cluster_modules": "slurm_modules",
@@ -831,7 +833,18 @@ class ToolkitConfig:
             "cell_pressure": "press_kbar",
             "press": "press_kbar",
         }
-        normalized_data = {alias_map.get(k, k): v for k, v in data.items()}
+        normalized_data = {}
+        for k, v in data.items():
+            if k in canonical_map:
+                normalized_data[canonical_map[k]] = v
+            elif k in deprecated_synonyms:
+                canon = deprecated_synonyms[k]
+                logger.warning(
+                    f"[!] Deprecation Warning: Config key '{k}' is deprecated; please use canonical name '{canon}'."
+                )
+                normalized_data[canon] = v
+            else:
+                normalized_data[k] = v
 
         valid_keys = {f.name for f in fields(cls) if not f.name.startswith("_")}
         unknown_keys = [k for k in normalized_data.keys() if k not in valid_keys]
@@ -846,6 +859,13 @@ class ToolkitConfig:
                     errors.append(f"Unknown configuration key: '{k}'.")
             raise ValueError("\n".join(errors))
 
+        if normalized_data.get("spin_polarized", True):
+            if normalized_data.get("spin_multiplicity") is None and normalized_data.get("tot_magnetization") is None:
+                raise ValueError(
+                    "spin_multiplicity (or tot_magnetization) is required when spin_polarized=True. "
+                    "Specify spin_multiplicity=2S+1 (e.g. 2 for doublet, 3 for triplet) explicitly in configuration."
+                )
+
         filtered = {}
         for k, v in normalized_data.items():
             if k in ("supercell_repeat", "kpoints", "nqx") and isinstance(v, list):
@@ -856,7 +876,7 @@ class ToolkitConfig:
 
     @classmethod
     def from_file(cls, path: str) -> ToolkitConfig:
-        """Loads configuration from a YAML, TOML, or JSON file."""
+        """Loads configuration from a YAML, TOML, or JSON file, resolving relative paths against the config directory."""
         if not os.path.isfile(path):
             raise FileNotFoundError(f"Config file not found: {path}")
 
@@ -890,6 +910,22 @@ class ToolkitConfig:
             except Exception:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+
+        # Resolve relative filesystem paths against config file directory
+        cfg_dir = os.path.dirname(os.path.abspath(path))
+        path_fields = [
+            "pristine_cell_path",
+            "defect_cell_path",
+            "excited_cell_path",
+            "pseudo_dir",
+            "foundation_potential_path",
+            "workspace_dir",
+        ]
+        for p_field in path_fields:
+            if p_field in data and isinstance(data[p_field], str) and data[p_field].strip():
+                val = data[p_field].strip()
+                if not os.path.isabs(val):
+                    data[p_field] = os.path.normpath(os.path.join(cfg_dir, val))
 
         return cls.from_dict(data)
 
@@ -1131,6 +1167,18 @@ class ToolkitConfig:
                 f"Invalid relaxation_calculation: '{self.relaxation_calculation}'. "
                 "Must be 'relax' or 'vc-relax'."
             )
+        if self.relaxation_calculation.lower() == "vc-relax":
+            is_defect = bool(
+                (self.defect_type and self.defect_type.lower() != "none")
+                or self.defect_cell_path
+            )
+            if is_defect and not getattr(self, "allow_defect_vc_relax", False):
+                raise ValueError(
+                    "relaxation_calculation = 'vc-relax' is restricted to pristine bulk unit cells by default. "
+                    "Running vc-relax on a defect supercell modifies the host lattice constant and violates "
+                    "the dilute defect limit. If defect cell relaxation is explicitly intended, set "
+                    "allow_defect_vc_relax=True in your config."
+                )
 
         if self.cell_dynamics.lower() not in ("bfgs", "damp", "pr", "none"):
             raise ValueError(
@@ -1203,6 +1251,12 @@ class ToolkitConfig:
 
         if self.conv_thr is not None and not str(self.conv_thr).strip():
             raise ValueError("conv_thr cannot be an empty string. Provide a valid threshold or None for auto-scaling.")
+
+        if self.spin_polarized and (self.spin_multiplicity is None or self.tot_magnetization is None):
+            raise ValueError(
+                "spin_multiplicity (or tot_magnetization) is required when spin_polarized=True. "
+                "Specify spin_multiplicity=2S+1 (e.g. 2 for doublet, 3 for triplet) explicitly."
+            )
 
         # Temperatures validation
         if not self.temperatures or any(float(t) <= 0.0 for t in self.temperatures):
