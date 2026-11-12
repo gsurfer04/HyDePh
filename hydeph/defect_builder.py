@@ -712,11 +712,15 @@ class DefectBuilder:
                 gs_calc_dir = os.path.join(self.config.workspace_dir, "qe_gs_relax")
                 gs_out = os.path.join(gs_calc_dir, "pw.out")
 
+                target_sc = getattr(self.config, "delta_scf_spin_channel", None)
+                builder_gap_info = parse_qe_band_gap(gs_out, target_spin_channel=target_sc) if os.path.isfile(gs_out) else None
+
                 spec = resolve_delta_scf_spec(
                     at_gs,
                     self.config,
                     gs_pw_out_path=gs_out if os.path.isfile(gs_out) else None,
                     workspace_dir=self.config.workspace_dir,
+                    gap_info=builder_gap_info,
                 )
                 gap_info = spec.get("gap_info")
                 homo_deg = spec["homo_degeneracy"]

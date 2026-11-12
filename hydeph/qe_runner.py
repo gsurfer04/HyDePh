@@ -1242,6 +1242,7 @@ def resolve_delta_scf_spec(
     config: ToolkitConfig,
     gs_pw_out_path: Optional[str] = None,
     workspace_dir: Optional[str] = None,
+    gap_info: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Resolves and writes canonical Delta-SCF electronic transition occupations and metadata.
 
@@ -1300,7 +1301,8 @@ def resolve_delta_scf_spec(
     nelec_total = int(round(sum(z_vals[s] for s in at_gs.get_chemical_symbols()) - float(config.tot_charge)))
 
     target_sc = getattr(config, "delta_scf_spin_channel", None)
-    gap_info = parse_qe_band_gap(gs_pw_out_path, target_spin_channel=target_sc) if gs_pw_out_path and os.path.isfile(gs_pw_out_path) else None
+    if gap_info is None and gs_pw_out_path and os.path.isfile(gs_pw_out_path):
+        gap_info = parse_qe_band_gap(gs_pw_out_path, target_spin_channel=target_sc)
 
     if gap_info is not None and gap_info.get("nelec") is not None:
         nelec_qe = int(round(gap_info["nelec"]))
