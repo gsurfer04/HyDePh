@@ -51,7 +51,7 @@ def test_lineshape_and_embedding_defaults(tmp_path):
 def test_frame_sampler_es_minimum_and_hessian_rattling(tmp_path):
     """Verify that candidate sampling centers half of rattle frames around R_ES and includes small Hessian frames."""
     cfg = _make_cfg(tmp_path, n_phonon_frames=6, n_hessian_frames=4, n_fc_frames=3, n_md_frames=0)
-    sampler = FrameSampler(cfg)
+    sampler = FrameSampler(cfg, calc_foundation=MagicMock())
 
     at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[3.0, 3.0, 3.0], pbc=True)
     at_es = at_gs.copy()
