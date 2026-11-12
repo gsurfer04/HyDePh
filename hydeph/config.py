@@ -562,6 +562,8 @@ class ToolkitConfig:
     n_fc_frames: int = 7
     n_phonon_frames: int = 12
     n_md_frames: int = 20
+    n_hessian_frames: int = 4
+    n_pristine_rattle_frames: int = 0
     md_temp_exploration: float = 500.0
     random_seed: int = 42
     force_resample: bool = False
@@ -621,19 +623,19 @@ class ToolkitConfig:
     lineshape_y_scale: str = "linear"        # "linear" or "log"
     individual_shared_x: bool = False
     phonon_smearing_meV: Optional[float] = None
-    dephasing_gamma_meV: Optional[float] = 1.5
-    dephasing_temperature_coefficient: float = 5.5e-5
+    dephasing_gamma_meV: Optional[float] = 1.0
+    dephasing_temperature_coefficient: float = 0.0
     time_window_tau_fs: Optional[float] = None
     max_imaginary_modes: int = 0
     acoustic_sum_rule: bool = True
     displacement_delta: float = 0.01
     phonon_supercell_repeat: Optional[Tuple[int, int, int]] = None
-    phonon_embedding_method: str = "displacement"  # "displacement" or "force"
+    phonon_embedding_method: str = "force"  # "force" or "displacement"
     export_normal_modes: bool = True
     anharmonic_n_trajectories: int = 1
     anharmonic_acf_damping_meV: float = 2.0
     calculate_pl_intensity: bool = True
-    finite_size_acoustic_cutoff: bool = True
+    finite_size_acoustic_cutoff: Optional[bool] = None
     lineshape_n_points: int = 1500
 
     plot_configuration_coordinate: bool = True
@@ -1238,6 +1240,10 @@ class ToolkitConfig:
             raise ValueError(f"Invalid n_phonon_frames: {self.n_phonon_frames}. Must be >= 0.")
         if int(self.n_md_frames) < 0:
             raise ValueError(f"Invalid n_md_frames: {self.n_md_frames}. Must be >= 0.")
+        if int(self.n_hessian_frames) < 0:
+            raise ValueError(f"Invalid n_hessian_frames: {self.n_hessian_frames}. Must be >= 0.")
+        if int(self.n_pristine_rattle_frames) < 0:
+            raise ValueError(f"Invalid n_pristine_rattle_frames: {self.n_pristine_rattle_frames}. Must be >= 0.")
 
         # NEP hyperparameters validation
         if int(self.nep_steps) < 1:
@@ -1272,6 +1278,8 @@ class ToolkitConfig:
             raise ValueError("nep_n_max_radial, nep_n_max_angular, and nep_basis_size must be >= 1.")
 
         # Phonon and lineshape parameters validation
+        if self.finite_size_acoustic_cutoff is None:
+            self.finite_size_acoustic_cutoff = bool(self.phonon_supercell_repeat is None)
         if self.phonon_supercell_repeat is not None:
             if len(self.phonon_supercell_repeat) != 3 or any(int(r) < 1 for r in self.phonon_supercell_repeat):
                 raise ValueError(

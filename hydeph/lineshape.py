@@ -64,7 +64,7 @@ def compute_quantum_lineshape(
     hw_grid_meV: np.ndarray,
     s_cont_per_eV: np.ndarray,
     temp_k: float,
-    dephasing_gamma_meV: float = 1.5,
+    dephasing_gamma_meV: float = 1.0,
     time_window_tau_fs: Optional[float] = None,
     e_min_meV: Optional[float] = None,
     e_max_meV: Optional[float] = None,
@@ -97,8 +97,12 @@ def compute_quantum_lineshape(
     else:
         n_bose = 1.0 / (np.exp(np.clip(hw / (KB_MEV_K * temp_k), 1e-9, 500.0)) - 1.0)
 
-    # Exploit Hermitian symmetry G(-t) = conj(G(t)) over t in [0, 6000] fs (FFT_TIME_POINTS points)
-    t_pos = np.linspace(0.0, 6000.0, FFT_TIME_POINTS)
+    # Scale FFT time window with 1/gamma to prevent truncation ringing for narrow lines
+    gamma_eff = max(1e-4, float(dephasing_gamma_meV))
+    tau_decay_fs = 1000.0 * HBAR_EV_FS / gamma_eff
+    max_t_fs = float(np.clip(max(6000.0, 6.0 * tau_decay_fs), 6000.0, 100000.0))
+
+    t_pos = np.linspace(0.0, max_t_fs, FFT_TIME_POINTS)
     dt = float(t_pos[1] - t_pos[0])
 
     w_fs = hw / (1000.0 * HBAR_EV_FS)
@@ -113,7 +117,7 @@ def compute_quantum_lineshape(
     if time_window_tau_fs is not None and time_window_tau_fs > 0:
         damping = np.exp(-gamma_fs_inv * t_pos - 0.5 * (t_pos / time_window_tau_fs) ** 2)
     else:
-        damping = np.exp(-gamma_fs_inv * t_pos)
+        damping = np.exp(-gamma_fs_inv * t_pos - 0.5 * (t_pos / max_t_fs) ** 2)
     G_pos = np.exp(g_re + 1j * g_im) * damping
 
     # Zero-padded 1D FFT evaluation of 2 * Re \int_0^T dt G(t) exp(i * w_out * t)
@@ -265,11 +269,26 @@ def embed_phonon_supercell(
     )
 
     f_es_large = None
-    if calc_es is not None and getattr(config, "phonon_embedding_method", "displacement").lower() == "force":
+    if calc_es is not None and getattr(config, "phonon_embedding_method", "force").lower() == "force":
         logger.info("    [-] Evaluating excited-state forces on relaxed ground-state large supercell (Alkauskas/Razinkovas)...")
         at_gs_large.calc = calc_es
         f_es_large = at_gs_large.get_forces().copy()
         at_gs_large.calc = calc_gs
+
+    # Propagate DFT energetics, ZPL metadata, and defect coordinates onto embedded cell
+    for k in (
+        "e_zpl_exact_eV",
+        "zpl_source",
+        "energy",
+        "defect_positions",
+        "spin_multiplicity",
+        "delta_scf_spec",
+    ):
+        if k in at_gs.info and k not in at_gs_large.info:
+            at_gs_large.info[k] = at_gs.info[k]
+    at_gs_large.info["defect_center"] = c_large
+    at_gs_large.info["is_embedded"] = True
+    at_gs_large.info["dft_supercell_natoms"] = len(at_gs)
 
     return at_gs_large, dr_large, f_es_large
 
@@ -624,6 +643,37 @@ class LineshapeEngine:
         total_S = float(np.sum(sk_modes))
         logger.info(f"[+] Total Huang-Rhys Factor S: {total_S:.3f} (Franck-Condon Delta Q = {dq_total:.4f} amu^(1/2)*A)")
 
+        is_embedded = at_gs.info.get("is_embedded", False) or (
+            phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep)
+        )
+        s_outside_fraction = 0.0
+        s_outside_total = 0.0
+        if is_embedded:
+            c_center = np.asarray(at_gs.info.get("defect_center", at_gs.get_cell().sum(axis=0) / 2.0), dtype=float)
+            from .defect_builder import mic_distances
+            dists_to_center = mic_distances(at_gs.positions, c_center, at_gs.cell)
+            dft_natoms = at_gs.info.get("dft_supercell_natoms", len(at_gs))
+            sorted_indices = np.argsort(dists_to_center)
+            dft_core_mask = np.zeros(len(at_gs), dtype=bool)
+            dft_core_mask[sorted_indices[:dft_natoms]] = True
+            outside_mask = ~dft_core_mask
+
+            if len(valid_indices) > 0 and np.any(outside_mask):
+                outside_S_modes = []
+                for k, idx in enumerate(valid_indices):
+                    mode_disp = _get_mode_func(idx)
+                    weights = m * np.sum(mode_disp ** 2, axis=1)
+                    tot_w = float(np.sum(weights))
+                    p_i = weights / tot_w if tot_w > 0 else np.ones(natoms) / natoms
+                    p_outside = float(np.sum(p_i[outside_mask]))
+                    outside_S_modes.append(sk_modes[k] * p_outside)
+                s_outside_total = float(np.sum(outside_S_modes))
+                s_outside_fraction = (s_outside_total / total_S) if total_S > 0 else 0.0
+                logger.info(
+                    f"    [+] Fraction of S originating from atoms outside DFT supercell radius: "
+                    f"{s_outside_fraction * 100.0:.2f}% (S_outside = {s_outside_total:.4f} of {total_S:.4f})"
+                )
+
         if getattr(self.config, "export_normal_modes", True):
             normal_modes_csv = os.path.join(self.config.workspace_dir, "normal_modes.csv")
             with open(normal_modes_csv, "w", newline="", encoding="utf-8") as f:
@@ -662,20 +712,27 @@ class LineshapeEngine:
         if user_smear is not None:
             sigma_smear = float(user_smear)
         else:
+            dft_natoms = at_gs.info.get("dft_supercell_natoms", len(at_gs))
+            linear_scale = (len(at_gs) / max(1, dft_natoms)) ** (1.0 / 3.0) if is_embedded else 1.0
             active_mask = (
                 sk_modes > 0.005 * np.max(sk_modes)
                 if (len(sk_modes) > 0 and np.max(sk_modes) > 0)
                 else np.ones(len(sk_modes), dtype=bool)
             )
             active_modes = np.sort(hw_modes[active_mask])
-            scale_smear = 0.035 * hw_max
+            scale_smear = (0.035 * hw_max) / max(1.0, linear_scale)
             if len(active_modes) > 2:
                 gaps = np.diff(active_modes)
                 valid_gaps = gaps[gaps > 0.1]
                 med_gap = float(np.median(valid_gaps)) if len(valid_gaps) > 0 else scale_smear
-                sigma_smear = float(np.clip(max(med_gap * 1.5, scale_smear), 1.5, 8.5))
+                target_smear = max(med_gap * 1.5, scale_smear)
             else:
-                sigma_smear = float(np.clip(scale_smear, 1.5, 8.5))
+                target_smear = scale_smear
+
+            if is_embedded:
+                sigma_smear = float(np.clip(target_smear, 0.8, 3.5))
+            else:
+                sigma_smear = float(np.clip(target_smear, 1.5, 8.5))
 
         logger.info(f"[+] Phonon Spectral Smearing (Finite-Size Correction): sigma = {sigma_smear:.2f} meV")
         if len(hw_modes) > 0:
@@ -684,12 +741,27 @@ class LineshapeEngine:
         else:
             s_cont = np.zeros_like(hw_grid)
 
+        trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+        moment_before = None
+        moment_after = None
         if self.config.finite_size_acoustic_cutoff:
+            int_s_raw = float(trapz_fn(s_cont, hw_grid))
+            moment_before = float(trapz_fn(hw_grid * s_cont, hw_grid) / int_s_raw) if int_s_raw > 0 else 0.0
+
             s_cont *= np.tanh((hw_grid / max(1.0, sigma_smear)) ** 2)
+
+            int_s_cut = float(trapz_fn(s_cont, hw_grid))
+            if int_s_cut > 0 and int_s_raw > 0:
+                s_cont *= (int_s_raw / int_s_cut)
+
+            moment_after = float(trapz_fn(hw_grid * s_cont, hw_grid) / int_s_raw) if int_s_raw > 0 else 0.0
+            logger.info(
+                f"    [i] Acoustic cutoff applied: <hbar*omega> first moment shifted from "
+                f"{moment_before:.2f} meV to {moment_after:.2f} meV (delta = {moment_after - moment_before:+.2f} meV)"
+            )
 
         s_cont *= 1000.0  # eV^-1
 
-        trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
         int_s_before = float(trapz_fn(s_cont / 1000.0, hw_grid))
         if int_s_before > 0 and total_S > 0:
             s_cont *= (total_S / int_s_before)
@@ -729,8 +801,12 @@ class LineshapeEngine:
 
         for T in tqdm(self.config.temperatures, desc="Harmonic lineshapes", unit="T", leave=False):
             user_gamma = self.config.dephasing_gamma_meV
-            base_gamma = 1.5 if user_gamma is None else float(user_gamma)
-            coeff = getattr(self.config, "dephasing_temperature_coefficient", 5.5e-5)
+            base_gamma = 1.0 if user_gamma is None else float(user_gamma)
+            coeff = getattr(self.config, "dephasing_temperature_coefficient", 0.0)
+            if coeff > 0.0 and T == self.config.temperatures[0]:
+                logger.info(
+                    f"    [i] User-specified thermal dephasing active: gamma(T) = {base_gamma:.2f} + {coeff:.2e} * T^2 meV (phenomenological model)"
+                )
             gamma = base_gamma + coeff * (T ** 2)
 
             eg, a_norm = compute_quantum_lineshape(
@@ -928,6 +1004,10 @@ class LineshapeEngine:
             "total_S_std": total_S_std,
             "total_S_discrete": total_S,
             "total_S_integrated": int_s_after,
+            "s_outside_dft_fraction": float(s_outside_fraction),
+            "s_outside_dft_total": float(s_outside_total),
+            "acoustic_cutoff_moment_before": moment_before,
+            "acoustic_cutoff_moment_after": moment_after,
             "dwf_temperatures": dwf_dict,
             "n_normal_modes": len(valid_indices),
             "n_imaginary_modes": len(imaginary_modes),
@@ -961,6 +1041,11 @@ class LineshapeEngine:
             "total_S_std": float(results["total_S_std"]) if results.get("total_S_std") is not None else None,
             "total_S_discrete": float(results.get("total_S_discrete", total_S)),
             "total_S_integrated": float(results.get("total_S_integrated", total_S)),
+            "s_outside_dft_fraction": float(results["s_outside_dft_fraction"]) if "s_outside_dft_fraction" in results else None,
+            "s_outside_dft_total": float(results["s_outside_dft_total"]) if "s_outside_dft_total" in results else None,
+            "acoustic_cutoff_applied": bool(self.config.finite_size_acoustic_cutoff),
+            "acoustic_cutoff_moment_before_meV": float(results["acoustic_cutoff_moment_before"]) if results.get("acoustic_cutoff_moment_before") is not None else None,
+            "acoustic_cutoff_moment_after_meV": float(results["acoustic_cutoff_moment_after"]) if results.get("acoustic_cutoff_moment_after") is not None else None,
             "dwf_zero_temp": float(np.exp(-total_S)),
             "dwf_temperatures": {str(T): float(dwf_dict.get(T, np.exp(-total_S))) for T in self.config.temperatures},
             "n_normal_modes": int(results.get("n_normal_modes", 0)),

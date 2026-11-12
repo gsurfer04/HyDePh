@@ -163,23 +163,31 @@ class FrameSampler:
         return fc_frames
 
     def sample_defect_core_rattling(
-        self, at_gs: Atoms, n_frames: int = 12, r_cutoff: Optional[float] = None
+        self, at_gs: Atoms, at_es: Optional[Atoms] = None, n_frames: int = 12, r_cutoff: Optional[float] = None
     ) -> List[Atoms]:
         """Phase 2: Defect-core and/or supercell Gaussian rattle configurations."""
         if n_frames <= 0:
             return []
         cutoff = r_cutoff if r_cutoff is not None else getattr(self.config, "rattle_cutoff", 6.0)
         mode = getattr(self.config, "rattle_mode", "hybrid").lower()
-        center = get_defect_center(at_gs)
-        dists = mic_distances(at_gs.positions, center, at_gs.cell)
-        core_mask = dists < cutoff
 
         seed = self.config.random_seed
         rng = np.random.RandomState(seed)
 
+        n_es = (n_frames // 2) if (at_es is not None and n_frames >= 2) else 0
+        n_gs = n_frames - n_es
+
         rattle_frames = []
         for i in range(n_frames):
-            at = clean_candidate_atoms(at_gs)
+            use_es = (i >= n_gs and at_es is not None)
+            ref_atoms = at_es if use_es else at_gs
+            ref_state = "excited" if use_es else "ground"
+
+            at = clean_candidate_atoms(ref_atoms)
+            center = get_defect_center(ref_atoms)
+            dists = mic_distances(ref_atoms.positions, center, ref_atoms.cell)
+            core_mask = dists < cutoff
+
             sigma = get_rattle_sigma(i)
             displacements = rng.normal(0.0, sigma, at.positions.shape)
 
@@ -199,16 +207,95 @@ class FrameSampler:
             at.info["frame_id"] = label
             at.info["label"] = label
             at.info["rattle_sigma"] = float(sigma)
+            at.info["reference_state"] = ref_state
             rattle_frames.append(at)
 
         logger.info(
             f"[+] Phase 2: Generated {len(rattle_frames)} rattle frames "
-            f"(mode='{mode}', cutoff={cutoff} A)"
+            f"(mode='{mode}', cutoff={cutoff} A, GS={n_gs}, ES={n_es})"
         )
         return rattle_frames
 
+    def sample_hessian_rattling(
+        self, at_gs: Atoms, at_es: Optional[Atoms] = None, n_frames: int = 4, r_cutoff: Optional[float] = None
+    ) -> List[Atoms]:
+        """Phase 2b: Small-amplitude Hessian-regime rattle configurations (sigma in [0.01, 0.03] A)."""
+        if n_frames <= 0:
+            return []
+        cutoff = r_cutoff if r_cutoff is not None else getattr(self.config, "rattle_cutoff", 6.0)
+        seed = self.config.random_seed + 500
+        rng = np.random.RandomState(seed)
+        sigmas = [0.015, 0.025, 0.015, 0.025, 0.02, 0.03]
+
+        n_es = (n_frames // 2) if (at_es is not None and n_frames >= 2) else 0
+        n_gs = n_frames - n_es
+
+        frames = []
+        for i in range(n_frames):
+            use_es = (i >= n_gs and at_es is not None)
+            ref_atoms = at_es if use_es else at_gs
+            ref_state = "excited" if use_es else "ground"
+
+            at = clean_candidate_atoms(ref_atoms)
+            center = get_defect_center(ref_atoms)
+            dists = mic_distances(ref_atoms.positions, center, ref_atoms.cell)
+            core_mask = dists < cutoff
+            sigma = sigmas[i % len(sigmas)]
+
+            displacements = rng.normal(0.0, sigma, at.positions.shape)
+            if i % 3 != 0:
+                displacements[~core_mask] *= 0.15
+
+            at.positions += displacements
+            label = f"hessian_rattle_{i:02d}"
+            at.info["sample_type"] = "core_rattle"
+            at.info["is_hessian"] = True
+            at.info["frame_id"] = label
+            at.info["label"] = label
+            at.info["rattle_sigma"] = float(sigma)
+            at.info["reference_state"] = ref_state
+            frames.append(at)
+
+        logger.info(
+            f"[+] Phase 2b: Generated {len(frames)} small-amplitude Hessian rattle frames "
+            f"(sigma in [0.01, 0.03] A, GS={n_gs}, ES={n_es})"
+        )
+        return frames
+
+    def sample_pristine_rattling(self, n_frames: int = 0, sigma: float = 0.02) -> List[Atoms]:
+        """Optional Phase 2c: Small-amplitude rattle frames of the pristine host supercell."""
+        if n_frames <= 0 or not self.config.pristine_cell_path or not os.path.isfile(self.config.pristine_cell_path):
+            return []
+        try:
+            pristine_uc = ase.io.read(self.config.pristine_cell_path)
+            supercell_rep = getattr(self.config, "supercell_repeat", (2, 2, 2))
+            pristine_sc = pristine_uc.repeat(supercell_rep)
+
+            seed = self.config.random_seed + 900
+            rng = np.random.RandomState(seed)
+            pristine_frames = []
+            for i in range(n_frames):
+                at = clean_candidate_atoms(pristine_sc)
+                displacements = rng.normal(0.0, sigma, at.positions.shape)
+                at.positions += displacements
+                label = f"pristine_rattle_{i:02d}"
+                at.info["sample_type"] = "pristine_rattle"
+                at.info["frame_id"] = label
+                at.info["label"] = label
+                at.info["rattle_sigma"] = float(sigma)
+                at.info["is_pristine"] = True
+                pristine_frames.append(at)
+
+            logger.info(
+                f"[+] Phase 2c: Generated {len(pristine_frames)} rattled pristine supercell frames (sigma = {sigma:.3f} A)"
+            )
+            return pristine_frames
+        except Exception as e:
+            logger.warning(f"Could not generate pristine rattle frames: {e}")
+            return []
+
     def sample_foundation_md_with_fps(
-        self, at_gs: Atoms, n_select: int = 20, n_steps: int = 2000, dt_fs: float = 1.0
+        self, at_gs: Atoms, at_es: Optional[Atoms] = None, n_select: int = 20, n_steps: int = 2000, dt_fs: float = 1.0
     ) -> List[Atoms]:
         """Phase 3: NVT MD with the foundation potential followed by Farthest Point Sampling."""
         if n_select <= 0:
@@ -220,45 +307,70 @@ class FrameSampler:
         from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
         from ase import units
 
-        seed = self.config.random_seed + 101
-        at = clean_candidate_atoms(at_gs)
-        at.calc = self.calc_foundation
-        temp_k = self.config.md_temp_exploration
-        MaxwellBoltzmannDistribution(at, temperature_K=temp_k, rng=np.random.RandomState(seed))
-        dyn = Langevin(at, dt_fs * units.fs, temperature_K=temp_k, friction=0.01 / units.fs, logfile=None)
+        n_es_select = (n_select // 2) if (at_es is not None and n_select >= 2) else 0
+        n_gs_select = n_select - n_es_select
 
-        traj_file = os.path.join(scratch_dir, "sampling_trajectory.traj")
-        traj_writer = ase.io.Trajectory(traj_file, "w", at)
+        targets = [("ground", at_gs, n_gs_select, 101, "sampling_trajectory_gs.traj")]
+        if n_es_select > 0 and at_es is not None:
+            targets.append(("excited", at_es, n_es_select, 201, "sampling_trajectory_es.traj"))
 
-        # Record every 10 steps to file without unbounded in-memory accumulation
-        dyn.attach(traj_writer.write, interval=10)
-
-        # Step MD with progress bar
-        pbar = tqdm(total=n_steps, desc="MD candidate sampling", unit="step", leave=False)
-        step_chunk = 50
-        steps_done = 0
-        while steps_done < n_steps:
-            this_chunk = min(step_chunk, n_steps - steps_done)
-            dyn.run(this_chunk)
-            steps_done += this_chunk
-            pbar.update(this_chunk)
-        pbar.close()
-        traj_writer.close()
-
-        # Read back saved trajectory frames for FPS
-        trajectory = ase.io.read(traj_file, ":")
-        logger.info(f"[+] Phase 3: Propagated {len(trajectory)} MD trajectory frames at {temp_k} K using foundation potential")
-
-        feature_matrix = self._compute_core_descriptors(trajectory, at_gs)
-        selected_indices = farthest_point_sampling(feature_matrix, n_select)
         selected_frames = []
-        for i, idx in enumerate(selected_indices):
-            fr = clean_candidate_atoms(trajectory[idx])
-            label = f"md_fps_{i:02d}"
-            fr.info["sample_type"] = "foundation_md_fps"
-            fr.info["frame_id"] = label
-            fr.info["label"] = label
-            selected_frames.append(fr)
+        global_md_idx = 0
+
+        for state_name, init_atoms, n_pick, seed_offset, traj_fname in targets:
+            if n_pick <= 0:
+                continue
+            seed = self.config.random_seed + seed_offset
+            at = clean_candidate_atoms(init_atoms)
+            at.calc = self.calc_foundation
+            temp_k = self.config.md_temp_exploration
+            MaxwellBoltzmannDistribution(at, temperature_K=temp_k, rng=np.random.RandomState(seed))
+            dyn = Langevin(
+                at,
+                dt_fs * units.fs,
+                temperature_K=temp_k,
+                friction=0.01 / units.fs,
+                logfile=None,
+                rng=np.random.RandomState(seed + 1),
+            )
+
+            traj_file = os.path.join(scratch_dir, traj_fname)
+            traj_writer = ase.io.Trajectory(traj_file, "w", at)
+            dyn.attach(traj_writer.write, interval=10)
+
+            steps_target = max(50, n_steps // (2 if len(targets) > 1 else 1))
+            pbar = tqdm(
+                total=steps_target,
+                desc=f"MD candidate sampling ({state_name})",
+                unit="step",
+                leave=False,
+            )
+            step_chunk = 50
+            steps_done = 0
+            while steps_done < steps_target:
+                this_chunk = min(step_chunk, steps_target - steps_done)
+                dyn.run(this_chunk)
+                steps_done += this_chunk
+                pbar.update(this_chunk)
+            pbar.close()
+            traj_writer.close()
+
+            trajectory = ase.io.read(traj_file, ":")
+            logger.info(
+                f"[+] Phase 3 ({state_name}): Propagated {len(trajectory)} MD trajectory frames at {temp_k} K"
+            )
+
+            feature_matrix = self._compute_core_descriptors(trajectory, init_atoms)
+            selected_indices = farthest_point_sampling(feature_matrix, n_pick)
+            for idx in selected_indices:
+                fr = clean_candidate_atoms(trajectory[idx])
+                label = f"md_fps_{global_md_idx:02d}"
+                fr.info["sample_type"] = "foundation_md_fps"
+                fr.info["reference_state"] = state_name
+                fr.info["frame_id"] = label
+                fr.info["label"] = label
+                selected_frames.append(fr)
+                global_md_idx += 1
 
         logger.info(f"[+] Phase 3: Farthest Point Sampling selected {len(selected_frames)} maximally diverse frames")
         return selected_frames
@@ -273,6 +385,8 @@ class FrameSampler:
             "n_fc_frames": self.config.n_fc_frames,
             "n_phonon_frames": self.config.n_phonon_frames,
             "n_md_frames": self.config.n_md_frames,
+            "n_hessian_frames": getattr(self.config, "n_hessian_frames", 0),
+            "n_pristine_rattle_frames": getattr(self.config, "n_pristine_rattle_frames", 0),
             "rattle_mode": getattr(self.config, "rattle_mode", "hybrid"),
             "rattle_cutoff": getattr(self.config, "rattle_cutoff", 6.0),
             "random_seed": self.config.random_seed,
@@ -338,12 +452,16 @@ class FrameSampler:
             logger.info("    [i] Candidate frames cache invalidated: input GS/ES geometries or sampling parameters changed.")
 
         fc_frames = self.sample_franck_condon_path(at_gs, at_es, self.config.n_fc_frames)
-        rattle_frames = self.sample_defect_core_rattling(at_gs, self.config.n_phonon_frames)
-        md_frames = self.sample_foundation_md_with_fps(at_gs, self.config.n_md_frames)
+        rattle_frames = self.sample_defect_core_rattling(at_gs, at_es, self.config.n_phonon_frames)
+        n_hess = getattr(self.config, "n_hessian_frames", 0)
+        hessian_frames = self.sample_hessian_rattling(at_gs, at_es, n_hess) if n_hess > 0 else []
+        md_frames = self.sample_foundation_md_with_fps(at_gs, at_es, self.config.n_md_frames)
+        n_prist = getattr(self.config, "n_pristine_rattle_frames", 0)
+        pristine_frames = self.sample_pristine_rattling(n_prist) if n_prist > 0 else []
 
         # Interleave using zip_longest
         raw_candidates = [
-            fr for group in zip_longest(fc_frames, rattle_frames, md_frames)
+            fr for group in zip_longest(fc_frames, rattle_frames, hessian_frames, md_frames, pristine_frames)
             for fr in group if fr is not None
         ]
 
@@ -401,7 +519,14 @@ class FrameSampler:
                 at.calc = self.calc_foundation
                 temp_k = self.config.md_temp_exploration
                 MaxwellBoltzmannDistribution(at, temperature_K=temp_k, rng=rng)
-                dyn = Langevin(at, 1.0 * units.fs, temperature_K=temp_k, friction=0.01 / units.fs, logfile=None)
+                dyn = Langevin(
+                    at,
+                    1.0 * units.fs,
+                    temperature_K=temp_k,
+                    friction=0.01 / units.fs,
+                    logfile=None,
+                    rng=rng,
+                )
                 dyn.run(100)
                 at = clean_candidate_atoms(at)
             else:

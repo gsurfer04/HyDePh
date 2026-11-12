@@ -620,6 +620,7 @@ def test_assemble_candidate_dataset_handles_stale_calculator_and_energy(tmp_path
         n_fc_frames=3,
         n_phonon_frames=3,
         n_md_frames=4,
+        n_hessian_frames=0,
     )
     sampler = FrameSampler(cfg)
 
