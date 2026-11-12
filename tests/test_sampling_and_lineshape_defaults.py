@@ -1,13 +1,11 @@
 """Verification tests for Phase 6: Training Set Sampling (§3.3) and Lineshape Defaults (§3.4)."""
 
-import os
 import numpy as np
-import pytest
 from ase import Atoms
 from unittest.mock import MagicMock
 from hydeph.config import ToolkitConfig
 from hydeph.frame_sampler import FrameSampler
-from hydeph.lineshape import LineshapeEngine, compute_quantum_lineshape, embed_phonon_supercell
+from hydeph.lineshape import compute_quantum_lineshape, embed_phonon_supercell
 
 
 def _make_cfg(tmp_path, **kwargs):
@@ -153,10 +151,8 @@ def test_fft_window_scaling_prevents_ringing():
     assert np.max(a2) > 2.0 * np.max(a1)
 
 
-def test_acoustic_cutoff_first_moment_shift(tmp_path):
+def test_acoustic_cutoff_first_moment_shift():
     """Verify finite_size_acoustic_cutoff shifts spectral weight and reports both first moments."""
-    cfg = _make_cfg(tmp_path, finite_size_acoustic_cutoff=True)
-    engine = LineshapeEngine(cfg, hybrid_calc=None)
 
     # Synthetic mock mode energies and coupling
     hw_modes = np.array([5.0, 15.0, 45.0, 75.0])
