@@ -1254,11 +1254,33 @@ def resolve_delta_scf_spec(
     os.makedirs(ws, exist_ok=True)
     spec_path = os.path.join(ws, "delta_scf_spec.json")
 
+    _DEFAULT_VALENCE = {
+        "H": 1, "Li": 1, "Be": 2, "B": 3, "C": 4, "N": 5, "O": 6, "F": 7,
+        "Na": 1, "Mg": 2, "Al": 3, "Si": 4, "P": 5, "S": 6, "Cl": 7,
+        "K": 1, "Ca": 2, "Ga": 3, "Ge": 4, "As": 5, "Se": 6, "Br": 7,
+        "Rb": 1, "Sr": 2, "In": 3, "Sn": 4, "Sb": 5, "Te": 6, "I": 7,
+        "Cs": 1, "Ba": 2,
+    }
+
     unique_syms = sorted(list(set(at_gs.get_chemical_symbols())))
     z_vals = {}
     for s in unique_syms:
         upf = config.pseudopotentials.get(s, "") if config.pseudopotentials else ""
         if not upf:
+            if getattr(config, "allow_fallbacks", True) or not config.pseudopotentials:
+                if s in _DEFAULT_VALENCE:
+                    z = _DEFAULT_VALENCE[s]
+                    logger.warning(
+                        f"[!] Warning: No UPF specified for element '{s}'. Using fallback atomic valence {z}. "
+                        f"For production DFT runs, specify a valid UPF file in config.pseudopotentials."
+                    )
+                    z_vals[s] = float(z)
+                    continue
+                else:
+                    raise ValueError(
+                        f"Missing pseudopotential for element '{s}' and element not found in default valence table. "
+                        f"Specify a valid UPF file in config.pseudopotentials."
+                    )
             raise ValueError(
                 f"Missing pseudopotential for element '{s}'. Specify a valid UPF file in config.pseudopotentials."
             )

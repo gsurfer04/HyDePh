@@ -282,17 +282,25 @@ class FrameSampler:
             "at_es": compute_atoms_hash(at_es),
         }
 
-        is_cache_valid = (
-            not force
-            and os.path.isfile(out_path)
-            and os.path.getsize(out_path) > 0
-            and verify_stage_manifest(
+        manifest_path = os.path.join(self.config.workspace_dir, "stage_2_manifest.json")
+        has_manifest = os.path.isfile(manifest_path)
+        manifest_ok = (
+            verify_stage_manifest(
                 self.config.workspace_dir,
                 stage_idx=2,
                 config_dict=stage_cfg,
                 input_hashes=input_hashes,
                 required_outputs=["candidate_frames.xyz"],
             )
+            if has_manifest
+            else True
+        )
+
+        is_cache_valid = (
+            not force
+            and os.path.isfile(out_path)
+            and os.path.getsize(out_path) > 0
+            and manifest_ok
         )
 
         if is_cache_valid:
@@ -310,6 +318,17 @@ class FrameSampler:
                         clean_fr.info["candidate_index"] = idx
                         clean_fr.info["frame_name"] = f"frame_{idx:03d}_{clean_fr.info['frame_id']}"
                         cleaned_cached.append(clean_fr)
+                    if not has_manifest:
+                        try:
+                            write_stage_manifest(
+                                self.config.workspace_dir,
+                                stage_idx=2,
+                                config_dict=stage_cfg,
+                                input_hashes=input_hashes,
+                                output_files=["candidate_frames.xyz"],
+                            )
+                        except Exception:
+                            pass
                     logger.info(f"[i] Found valid cached candidate dataset ({len(cleaned_cached)} frames) in {out_path}.")
                     logger.info("    Reusing candidate pool to preserve geometry and labels across runs.")
                     return cleaned_cached

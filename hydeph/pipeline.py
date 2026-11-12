@@ -483,7 +483,8 @@ def run_pipeline(
             logger.info(f"[+] Labeled {len(labeled_frames_es)} optical excited state frames -> {labeled_es_xyz}")
 
             from .qe_runner import extract_and_attach_adiabatic_energetics
-            extract_and_attach_adiabatic_energetics(labeled_frames, labeled_frames_es, at_gs=at_gs, at_es=at_es)
+            allow_fb = getattr(config, "allow_fallbacks", True)
+            extract_and_attach_adiabatic_energetics(labeled_frames, labeled_frames_es, at_gs=at_gs, at_es=at_es, allow_fallbacks=allow_fb)
     else:
         logger.info(f"\n[STEP 3/6] Skipping DFT Labeling (resuming from stage {from_stage})...")
         if not os.path.isfile(labeled_xyz):
