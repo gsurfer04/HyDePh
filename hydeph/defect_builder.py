@@ -11,6 +11,7 @@ from ase import Atoms
 from ase.geometry import find_mic
 from ase.optimize import BFGS
 from ase.constraints import FixAtoms
+from calorine.calculators import CPUNEP  # noqa: F401
 
 from .config import ToolkitConfig
 from .calculator import load_foundation_calculator

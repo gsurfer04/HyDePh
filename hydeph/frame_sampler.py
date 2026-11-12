@@ -9,6 +9,7 @@ from typing import List, Optional
 import numpy as np
 import ase.io
 from ase import Atoms
+from calorine.calculators import CPUNEP  # noqa: F401
 
 from .config import ToolkitConfig
 from .calculator import load_foundation_calculator
