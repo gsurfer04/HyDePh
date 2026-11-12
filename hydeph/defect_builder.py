@@ -839,9 +839,14 @@ class DefectBuilder:
                             logger.info(f"    [i] Seeding excited-state Delta-SCF relaxation from {es_seed}")
                     except Exception as e:
                         logger.warning(f"    [!] Could not load excited_state_seed_path '{es_seed}': {e}")
-                elif (lumo_deg == 1 or homo_deg == 1) and gap_info is not None and (gap_info.get("lumo_degeneracy", 1) > 1 or gap_info.get("homo_degeneracy", 1) > 1):
+                elif gap_info is not None and (
+                    (lumo_deg == 1 and gap_info.get("lumo_degeneracy", 1) > 1)
+                    or (homo_deg == 1 and gap_info.get("homo_degeneracy", 1) > 1)
+                ):
                     auto_jt = getattr(self.config, "auto_jahn_teller_distortion", True)
                     jt_amp = getattr(self.config, "jahn_teller_amplitude", 0.04)
+                    manifold_str = "LUMO" if (lumo_deg == 1 and gap_info.get("lumo_degeneracy", 1) > 1) else "HOMO"
+                    manifold_deg = gap_info.get("lumo_degeneracy", 1) if manifold_str == "LUMO" else gap_info.get("homo_degeneracy", 1)
                     if auto_jt:
                         init_es, perturbed_atoms = apply_jahn_teller_distortion(
                             at_gs,
@@ -849,17 +854,17 @@ class DefectBuilder:
                             amplitude=jt_amp,
                         )
                         logger.info(
-                            f"    [+] Detected degenerate LUMO (degeneracy={gap_info['lumo_degeneracy']}) with integer occupation "
-                            f"(delta_scf_lumo_degeneracy=1). Automatically applied Jahn-Teller symmetry-breaking perturbation "
-                            f"(amplitude {jt_amp:.3f} Å on coordinating atoms {perturbed_atoms}) to lift orbital degeneracy and prevent SCF charge sloshing."
+                            f"    [+] Detected degenerate {manifold_str} (degeneracy={manifold_deg}) with integer occupation "
+                            f"(delta_scf_{manifold_str.lower()}_degeneracy=1). Automatically applied Jahn-Teller symmetry-breaking perturbation "
+                            f"(amplitude {jt_amp:.3f} Å on coordinating atoms {perturbed_atoms}) to lift orbital degeneracy and find symmetry-broken minimum."
                         )
                     else:
                         logger.warning(
-                            f"    [!] Warning: delta_scf_lumo_degeneracy=1 requested for an orbital that appears degenerate "
-                            f"in ground state (detected degeneracy={gap_info['lumo_degeneracy']}) without an excited_state_seed_path. "
+                            f"    [!] Warning: delta_scf_{manifold_str.lower()}_degeneracy=1 requested for an orbital that appears degenerate "
+                            f"in ground state (detected degeneracy={manifold_deg}) without an excited_state_seed_path. "
                             f"SCF on symmetric geometries with integer occupation in a degenerate subspace often exhibits charge "
-                            f"sloshing and convergence failure. If SCF fails to converge, consider delta_scf_lumo_degeneracy=2 "
-                            f"or set auto_jahn_teller_distortion=True."
+                            f"sloshing and convergence failure. If SCF fails to converge, consider fractional occupations "
+                            f"(delta_scf_{manifold_str.lower()}_degeneracy={manifold_deg}) or set auto_jahn_teller_distortion=True."
                         )
 
                 at_es = qe_runner.run_relaxation(

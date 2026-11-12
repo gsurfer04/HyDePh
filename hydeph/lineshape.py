@@ -884,9 +884,6 @@ class LineshapeEngine:
         logger.info(f"[+] Numerical lineshape results exported: {summary_json}, {spectral_csv}, {lineshape_csv}")
         return {"summary": summary_json, "spectral_density": spectral_csv, "lineshapes": lineshape_csv}
 
-        logger.info(f"[+] Numerical lineshape results exported: {summary_json}, {spectral_csv}, {lineshape_csv}")
-        return {"summary": summary_json, "spectral_density": spectral_csv, "lineshapes": lineshape_csv}
-
     def run_anharmonic_sampling(
         self, at_gs, at_es, hw_grid, s_cont, total_S=None, e_min=None, e_max=None, n_pts=1500
     ):
@@ -909,7 +906,14 @@ class LineshapeEngine:
 
         regime_opt = self.config.anharmonic_coupling_regime.lower()
         is_cumulant = regime_opt in ("cumulant", "auto")
-        is_quantum = (regime_opt == "quantum")
+        is_quantum = regime_opt in ("quantum", "legacy_quantum")
+        is_semiclassical = regime_opt in ("semiclassical", "legacy_semiclassical", "marcus")
+
+        if is_quantum or is_semiclassical:
+            logger.warning(
+                f"[!] Anharmonic coupling regime '{regime_opt}' is a legacy method. "
+                f"The energy-gap cumulant ('cumulant' or 'auto') is the standard physical method."
+            )
 
         norm_dr = np.sqrt(np.sum(m[:, None] * (dr_fc ** 2)))
         if norm_dr > 1e-8:
@@ -934,12 +938,17 @@ class LineshapeEngine:
         w_rad_fs = (hw_grid / 1000.0) / HBAR_EV_FS
 
         calc_es_opt = getattr(self, "calc_es", None)
-        at_disp = at_gs.copy()
-        at_disp.calc = self.calc
-        if calc_es_opt is not None:
-            logger.info("    [+] Anharmonic Delta U(t) driven by physical paired model with Franck-Condon projection V(R+Delta R) - V(R)")
+        paired_calc = getattr(self, "paired_calc", None)
+        has_paired = calc_es_opt is not None
+        if has_paired:
+            if paired_calc is None:
+                from .calculator import PairedDefectCalculator
+                paired_calc = PairedDefectCalculator(self.calc, calc_es_opt)
+            logger.info("    [+] Anharmonic emission Delta U(t) driven by physical paired model: trajectories run on V_ES(R), Delta U = V_ES(R) - V_GS(R)")
         else:
-            logger.info("    [i] Anharmonic Delta U(t) driven by displaced ground-state potential V_GS(R+Delta R) - V_GS(R)")
+            at_disp = at_gs.copy()
+            at_disp.calc = self.calc
+            logger.info("    [i] Single-potential fallback: Anharmonic Delta U(t) driven by displaced ground-state potential V_GS(R+Delta R) - V_GS(R)")
 
         anharmonic_dict = {}
         n_trajectories = max(1, int(getattr(self.config, "anharmonic_n_trajectories", 1)))
@@ -951,8 +960,12 @@ class LineshapeEngine:
             t_equil_list = []
 
             for traj_idx in range(n_trajectories):
-                at = at_gs.copy()
-                at.calc = self.calc
+                if has_paired:
+                    at = at_es.copy()
+                    at.calc = calc_es_opt
+                else:
+                    at = at_gs.copy()
+                    at.calc = self.calc
 
                 # 1. Thermalization with Langevin dynamics (NVT)
                 n_therm = getattr(self.config, "anharmonic_thermalization_steps", 400)
@@ -997,11 +1010,22 @@ class LineshapeEngine:
                     v_opt = float(np.sum(v * u_opt))
                     v_opt_list.append(v_opt)
 
-                    ug = at.get_potential_energy()
-                    at_disp.positions = at.positions + dr_fc
-                    at_disp.cell = at.cell
-                    ue = at_disp.get_potential_energy()
-                    du_list.append((ue - ug) * 1000.0)
+                    if has_paired:
+                        if paired_calc is not None:
+                            du = float(paired_calc.get_energy_gap(at) * 1000.0)
+                        else:
+                            ue = at.get_potential_energy()
+                            at_gs_eval = at.copy()
+                            at_gs_eval.calc = self.calc
+                            ug = at_gs_eval.get_potential_energy()
+                            du = float((ue - ug) * 1000.0)
+                    else:
+                        ug = at.get_potential_energy()
+                        at_disp.positions = at.positions + dr_fc
+                        at_disp.cell = at.cell
+                        ue = at_disp.get_potential_energy()
+                        du = float((ue - ug) * 1000.0)
+                    du_list.append(du)
 
                 dyn.attach(step_observer, interval=2)
                 desc_str = f"Anharmonic MD ({T:g} K)" if n_trajectories == 1 else f"Anharmonic MD ({T:g} K traj {traj_idx+1}/{n_trajectories})"
@@ -1092,36 +1116,29 @@ class LineshapeEngine:
 
                 j_cl = np.maximum(0.0, weights_du @ np.cos(np.outer(t_du, w_rad_fs)))
 
-                # Symmetric harmonic quantum correction factor:
-                # Q(hw, T) = (hw / kB T) / (2 * tanh(hw / 2 kB T))
-                if T < 0.1:
-                    q_factor = np.ones_like(hw_grid)
-                else:
-                    x = np.clip(hw_grid / (KB_MEV_K * T), 1e-4, 50.0)
-                    q_factor = x / (2.0 * np.tanh(0.5 * x))
+                HBAR_MEV_FS = HBAR_EV_FS * 1000.0
+                kbt_eff = max(1e-4, KB_MEV_K * t_equil)
 
-                j_quant = j_cl * q_factor
-
-                # Acoustic suppression filter to prevent 1/omega^2 low-frequency noise divergence:
-                # Below the lowest non-zero acoustic phonon frequency of the crystal, S(hw) must vanish physically.
-                hw_cutoff = max(3.0, 0.3 * omega_0)
+                # Acoustic suppression filter to prevent low-frequency drift divergence below host acoustic threshold:
+                hw_cutoff = max(3.0, 0.25 * omega_0)
                 filter_acoustic = 1.0 - np.exp(- (hw_grid / hw_cutoff) ** 4)
-                s_md = (j_quant * filter_acoustic) / (hw_grid ** 2 + 1e-6)
 
-                int_s_md = float(trapz_fn(s_md, hw_grid))
-                if int_s_md > 0 and total_S > 0:
-                    s_md *= (total_S / int_s_md)
-                s_md *= 1000.0  # eV^-1
+                # Exact classical fluctuation-dissipation relation:
+                # S_MD(hw) = \tilde{C}_cl(hw) / (2 * kB * T_equil * hw)
+                # where \tilde{C}_cl(hw) = 2 * j_cl(hw). The factor of 2 cancels.
+                # In meV^-1: (2 / (pi * hbar_meV_fs)) * (j_cl / (2 * kbt_eff * hw))
+                s_md_meV = (2.0 / (np.pi * HBAR_MEV_FS)) * (j_cl / (2.0 * kbt_eff * hw_grid)) * filter_acoustic
+                s_md = s_md_meV * 1000.0  # convert to eV^-1 for compute_quantum_lineshape
 
-                # Low-temperature quantum anchor:
-                # Below ~50 K, classical MD lacks quantum zero-point fluctuations (kBT << hbar*omega).
-                # Anchor to harmonic normal-mode spectral function s_cont as T -> 0:
-                w_md = float(np.clip(T / 77.0, 0.0, 1.0))
-                s_anh = (1.0 - w_md) * s_cont + w_md * s_md
-
+                # Physical observable: do not artificially renormalize or blend away with harmonic S
+                s_anh = s_md
                 int_s_anh = float(trapz_fn(s_anh / 1000.0, hw_grid))
-                if int_s_anh > 0 and total_S > 0:
-                    s_anh *= (total_S / int_s_anh)
+
+                # Below ~5 K, classical MD lacks thermal fluctuations; fallback to harmonic S(hw)
+                if T < 5.0 or int_s_anh < 1e-4:
+                    logger.info(f"    [i] T = {T:g} K: classical thermal fluctuations frozen; using harmonic spectral density.")
+                    s_anh = s_cont
+                    int_s_anh = float(trapz_fn(s_anh / 1000.0, hw_grid))
 
                 user_gamma = self.config.dephasing_gamma_meV
                 base_gamma = 1.5 if user_gamma is None else float(user_gamma)
@@ -1133,7 +1150,7 @@ class LineshapeEngine:
                     time_window_tau_fs=self.config.time_window_tau_fs,
                     e_min_meV=e_min, e_max_meV=e_max, n_e=n_pts
                 )
-                regime_tag = f"Energy-Gap Cumulant (NVT->NVE, T_equil={t_equil:.1f} K, sigma_DeltaU={sigma_du:.1f} meV)"
+                regime_tag = f"Energy-Gap Cumulant (NVT->NVE, T_equil={t_equil:.1f} K, sigma_DeltaU={sigma_du:.1f} meV, S_anh={int_s_anh:.3f})"
                 alpha_soft = 1.0
                 omega_T = omega_0
             elif is_quantum:
@@ -1190,6 +1207,8 @@ class LineshapeEngine:
                 "fwhm_meV": fwhm_meV,
                 "vdos": vdos,
                 "s_anh": s_anh if is_cumulant else None,
+                "total_S_anh": float(int_s_anh) if is_cumulant else None,
+                "total_S_harm": float(total_S) if total_S is not None else None,
                 "omega_T": omega_T,
                 "alpha_soft": alpha_soft,
                 "regime": "cumulant" if is_cumulant else ("quantum" if is_quantum else "semiclassical"),
