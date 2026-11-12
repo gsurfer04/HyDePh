@@ -724,6 +724,7 @@ class DefectBuilder:
                 homo_b = spec["homo_band"]
                 lumo_b = spec["lumo_band"]
                 spin_chan = spec["spin_channel"]
+                tot_mag = spec["tot_magnetization"]
                 nbnd = spec["nbnd"]
                 occ_up = spec["occupations_up"]
                 occ_dw = spec["occupations_down"]

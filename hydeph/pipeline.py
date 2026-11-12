@@ -483,8 +483,14 @@ def run_pipeline(
             logger.info(f"[+] Labeled {len(labeled_frames_es)} optical excited state frames -> {labeled_es_xyz}")
 
             from .qe_runner import extract_and_attach_adiabatic_energetics
-            allow_fb = getattr(config, "allow_fallbacks", True)
-            extract_and_attach_adiabatic_energetics(labeled_frames, labeled_frames_es, at_gs=at_gs, at_es=at_es, allow_fallbacks=allow_fb)
+            has_gs0 = any(f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4 for f in labeled_frames)
+            has_es1 = any(f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 0.0) - 1.0) < 1e-4 for f in labeled_frames_es)
+            if has_gs0 and has_es1:
+                extract_and_attach_adiabatic_energetics(
+                    labeled_frames, labeled_frames_es, at_gs=at_gs, at_es=at_es, allow_fallbacks=getattr(config, "allow_fallbacks", False)
+                )
+            else:
+                logger.warning("[-] Skipping exact adiabatic energetics: lambda=0 and lambda=1 anchor frames not both present in dataset.")
     else:
         logger.info(f"\n[STEP 3/6] Skipping DFT Labeling (resuming from stage {from_stage})...")
         if not os.path.isfile(labeled_xyz):
