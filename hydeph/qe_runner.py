@@ -8,6 +8,7 @@ import re
 import glob
 import time
 import shutil
+import json
 import threading
 import subprocess
 import logging
@@ -1527,6 +1528,7 @@ def check_pw_in_matches_atoms(
         species = []
         in_cell = False
         cell_vecs = []
+        pos_unit = "angstrom"
 
         for line in lines:
             line_str = line.strip()
@@ -1551,6 +1553,11 @@ def check_pw_in_matches_atoms(
             if "ATOMIC_POSITIONS" in line_str.upper():
                 in_pos = True
                 in_cell = False
+                p_parts = line_str.split()
+                if len(p_parts) > 1:
+                    pos_unit = p_parts[1].lower().strip("()")
+                else:
+                    pos_unit = "alat"
                 continue
             if in_pos:
                 if line_str.startswith("/") or line_str.startswith("&") or "K_POINTS" in line_str.upper():
@@ -1567,10 +1574,26 @@ def check_pw_in_matches_atoms(
         if species != list(atoms.get_chemical_symbols()):
             return False
 
+        # Convert coords to Cartesian Angstroms based on pos_unit
+        coords_arr = np.array(coords, dtype=float)
+        cell_mat = atoms.cell.array if (atoms.cell is not None and atoms.pbc.any()) else (np.array(cell_vecs) if len(cell_vecs) == 3 else np.eye(3))
+        if pos_unit == "crystal":
+            coords_cart = np.dot(coords_arr, cell_mat)
+        elif pos_unit == "bohr":
+            coords_cart = coords_arr * Bohr
+        else:
+            coords_cart = coords_arr
+
         # Match positions
-        diff = np.abs(np.array(coords) - atoms.positions)
-        if np.max(diff) >= tol:
-            return False
+        if atoms.cell is not None and atoms.pbc.any():
+            from ase.geometry import find_mic
+            _, d_mic = find_mic(coords_cart - atoms.positions, cell_mat, pbc=atoms.pbc)
+            if np.max(d_mic) >= tol:
+                return False
+        else:
+            diff = np.abs(coords_cart - atoms.positions)
+            if np.max(diff) >= tol:
+                return False
 
         # Match cell vectors if parsed and atoms has a cell
         if len(cell_vecs) == 3 and atoms.cell is not None and atoms.pbc.any():
