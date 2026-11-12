@@ -294,82 +294,40 @@ def run_pipeline(
     else:
         logger.info(f"\n[STEP 1/6] Skipping Defect Construction (resuming from stage {from_stage})...")
         if not os.path.isfile(gs_xyz):
-            cand_gs = [
-                "relaxed_gs.xyz",
-                os.path.join(".", "relaxed_gs.xyz"),
-            ]
-            if config.pristine_cell_path:
-                cand_gs.append(os.path.join(os.path.dirname(config.pristine_cell_path), "relaxed_gs.xyz"))
-            found_gs = next((p for p in cand_gs if os.path.isfile(p)), None)
-            if not found_gs:
-                for cand_out in [
-                    os.path.join(config.workspace_dir, "qe_gs_relax", "pw.out"),
-                    os.path.join(".", "qe_gs_relax", "pw.out"),
-                ]:
-                    if os.path.isfile(cand_out):
-                        try:
-                            from .qe_runner import parse_qe_relaxation_output
-                            at_parsed, e_ev = parse_qe_relaxation_output(cand_out, require_converged=True)
-                            if at_parsed is not None:
-                                os.makedirs(config.workspace_dir, exist_ok=True)
-                                ase.io.write(gs_xyz, at_parsed, format="extxyz")
-                                logger.info(f"[+] Discovered converged cluster relaxation output at '{cand_out}', extracted to '{gs_xyz}'")
-                                found_gs = gs_xyz
-                                break
-                        except Exception as e:
-                            logger.warning(f"[-] Could not parse '{cand_out}': {e}")
-            if found_gs:
-                if os.path.abspath(found_gs) != os.path.abspath(gs_xyz):
-                    logger.info(f"[+] Discovered pre-relaxed ground state at '{found_gs}', copying to '{gs_xyz}'")
-                    os.makedirs(config.workspace_dir, exist_ok=True)
-                    shutil.copy2(found_gs, gs_xyz)
-            else:
+            # Check if converged qe_gs_relax/pw.out exists in workspace
+            cand_out = os.path.join(config.workspace_dir, "qe_gs_relax", "pw.out")
+            if os.path.isfile(cand_out):
+                try:
+                    from .qe_runner import parse_qe_relaxation_output
+                    at_parsed, e_ev = parse_qe_relaxation_output(cand_out, require_converged=True)
+                    if at_parsed is not None:
+                        os.makedirs(config.workspace_dir, exist_ok=True)
+                        ase.io.write(gs_xyz, at_parsed, format="extxyz")
+                        logger.info(f"[+] Discovered converged relaxation output at '{cand_out}', extracted to '{gs_xyz}'")
+                except Exception as e:
+                    logger.warning(f"[-] Could not parse '{cand_out}': {e}")
+            if not os.path.isfile(gs_xyz):
                 raise FileNotFoundError(
-                    f"Cannot resume from stage {from_stage}: Relaxed ground state '{gs_xyz}' not found. "
+                    f"Cannot resume from stage {from_stage}: Relaxed ground state '{gs_xyz}' not found in workspace '{config.workspace_dir}'. "
                     "Run stage 1 first or set --from-stage 1."
                 )
         at_gs = ase.io.read(gs_xyz)
         if not os.path.isfile(es_xyz):
-            cand_es = [
-                "relaxed_es.xyz",
-                os.path.join(".", "relaxed_es.xyz"),
-            ]
-            if getattr(config, "excited_cell_path", None):
-                cand_es.insert(0, config.excited_cell_path)
-            if config.pristine_cell_path:
-                cand_es.append(os.path.join(os.path.dirname(config.pristine_cell_path), "relaxed_es.xyz"))
-            import glob
-            extra_candidates = sorted(
-                glob.glob("relaxed_es_*.xyz")
-                + glob.glob(os.path.join(config.workspace_dir, "relaxed_es_*.xyz"))
-            )
-            for p_cand in extra_candidates:
-                if p_cand not in cand_es and os.path.isfile(p_cand):
-                    cand_es.append(p_cand)
-
-            found_es = next((p for p in cand_es if os.path.isfile(p)), None)
-            if not found_es:
-                for cand_out in [
-                    os.path.join(config.workspace_dir, "qe_es_relax", "pw.out"),
-                    os.path.join(".", "qe_es_relax", "pw.out"),
-                ]:
-                    if os.path.isfile(cand_out):
-                        try:
-                            from .qe_runner import parse_qe_relaxation_output
-                            at_parsed, e_ev = parse_qe_relaxation_output(cand_out, require_converged=True)
-                            if at_parsed is not None:
-                                os.makedirs(config.workspace_dir, exist_ok=True)
-                                ase.io.write(es_xyz, at_parsed, format="extxyz")
-                                logger.info(f"[+] Discovered converged cluster relaxation output at '{cand_out}', extracted to '{es_xyz}'")
-                                found_es = es_xyz
-                                break
-                        except Exception as e:
-                            logger.warning(f"[-] Could not parse '{cand_out}': {e}")
-            if found_es:
-                if os.path.abspath(found_es) != os.path.abspath(es_xyz):
-                    logger.info(f"[+] Discovered pre-relaxed excited state at '{found_es}', copying to '{es_xyz}'")
-                    os.makedirs(config.workspace_dir, exist_ok=True)
-                    shutil.copy2(found_es, es_xyz)
+            if getattr(config, "excited_cell_path", None) and os.path.isfile(config.excited_cell_path):
+                shutil.copy2(config.excited_cell_path, es_xyz)
+                logger.info(f"[+] Imported excited state from '{config.excited_cell_path}' -> '{es_xyz}'")
+            else:
+                cand_es_out = os.path.join(config.workspace_dir, "qe_es_relax", "pw.out")
+                if os.path.isfile(cand_es_out):
+                    try:
+                        from .qe_runner import parse_qe_relaxation_output
+                        at_parsed, e_ev = parse_qe_relaxation_output(cand_es_out, require_converged=True)
+                        if at_parsed is not None:
+                            os.makedirs(config.workspace_dir, exist_ok=True)
+                            ase.io.write(es_xyz, at_parsed, format="extxyz")
+                            logger.info(f"[+] Discovered converged excited relaxation output at '{cand_es_out}', extracted to '{es_xyz}'")
+                    except Exception as e:
+                        logger.warning(f"[-] Could not parse '{cand_es_out}': {e}")
         if os.path.isfile(es_xyz):
             at_es = ase.io.read(es_xyz)
         else:
@@ -488,9 +446,11 @@ def run_pipeline(
             (f for f in labeled_frames if f.info.get("sample_type") == "franck_condon" and abs(f.info.get("lambda", 1.0)) < 1e-4),
             None,
         )
-        if gs_cand is None and labeled_frames:
-            gs_cand = labeled_frames[0]
-        if gs_cand is not None:
+        if gs_cand is None:
+            if not getattr(config, "allow_fallbacks", False):
+                raise RuntimeError("Ground-state Franck-Condon anchor frame (lambda=0) missing from converged DFT labeled frames.")
+            logger.warning("[!] Warning: Ground-state Franck-Condon anchor frame (lambda=0) missing from labeled frames.")
+        else:
             if "energy" in gs_cand.info:
                 at_gs.info["energy"] = float(gs_cand.info["energy"])
             for k in ("dft_gap_eV", "dft_homo_eV", "dft_lumo_eV", "dft_fermi_eV"):

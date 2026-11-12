@@ -268,7 +268,34 @@ class FrameSampler:
         out_path = os.path.join(self.config.workspace_dir, "candidate_frames.xyz")
         force = force_resample or self.config.force_resample
 
-        if not force and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+        from .provenance import compute_atoms_hash, write_stage_manifest, verify_stage_manifest
+        stage_cfg = {
+            "n_fc_frames": self.config.n_fc_frames,
+            "n_phonon_frames": self.config.n_phonon_frames,
+            "n_md_frames": self.config.n_md_frames,
+            "rattle_mode": getattr(self.config, "rattle_mode", "hybrid"),
+            "rattle_cutoff": getattr(self.config, "rattle_cutoff", 6.0),
+            "random_seed": self.config.random_seed,
+        }
+        input_hashes = {
+            "at_gs": compute_atoms_hash(at_gs),
+            "at_es": compute_atoms_hash(at_es),
+        }
+
+        is_cache_valid = (
+            not force
+            and os.path.isfile(out_path)
+            and os.path.getsize(out_path) > 0
+            and verify_stage_manifest(
+                self.config.workspace_dir,
+                stage_idx=2,
+                config_dict=stage_cfg,
+                input_hashes=input_hashes,
+                required_outputs=["candidate_frames.xyz"],
+            )
+        )
+
+        if is_cache_valid:
             try:
                 cached_candidates = ase.io.read(out_path, ":")
                 if len(cached_candidates) > 0:
@@ -283,11 +310,13 @@ class FrameSampler:
                         clean_fr.info["candidate_index"] = idx
                         clean_fr.info["frame_name"] = f"frame_{idx:03d}_{clean_fr.info['frame_id']}"
                         cleaned_cached.append(clean_fr)
-                    logger.info(f"[i] Found existing candidate dataset ({len(cleaned_cached)} frames) in {out_path}.")
+                    logger.info(f"[i] Found valid cached candidate dataset ({len(cleaned_cached)} frames) in {out_path}.")
                     logger.info("    Reusing candidate pool to preserve geometry and labels across runs.")
                     return cleaned_cached
             except Exception as e:
                 logger.warning(f"    [!] Could not read existing candidate_frames.xyz ({e}). Generating fresh pool.")
+        elif os.path.isfile(out_path):
+            logger.info("    [i] Candidate frames cache invalidated: input GS/ES geometries or sampling parameters changed.")
 
         fc_frames = self.sample_franck_condon_path(at_gs, at_es, self.config.n_fc_frames)
         rattle_frames = self.sample_defect_core_rattling(at_gs, self.config.n_phonon_frames)
@@ -309,6 +338,13 @@ class FrameSampler:
         tmp_out = out_path + ".tmp"
         ase.io.write(tmp_out, all_candidates, format="extxyz")
         os.replace(tmp_out, out_path)
+        write_stage_manifest(
+            self.config.workspace_dir,
+            stage_idx=2,
+            config_dict=stage_cfg,
+            input_hashes=input_hashes,
+            output_files=[out_path],
+        )
         logger.info(f"[+] Total candidate pool assembled: {len(all_candidates)} frames (written to {out_path})")
         return all_candidates
 

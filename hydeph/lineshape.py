@@ -479,7 +479,9 @@ class LineshapeEngine:
 
                 _get_mode_func = _get_mode_clean
             except Exception as e_asr:
-                logger.debug(f"Acoustic sum rule application encountered error ({e_asr}); falling back to standard Vibrations.")
+                if not getattr(self.config, "allow_fallbacks", False):
+                    raise RuntimeError(f"Acoustic sum rule projection failed ({e_asr}). Set allow_fallbacks=True to proceed with raw Vibrations.")
+                logger.warning(f"[!] Warning: Acoustic sum rule application encountered error ({e_asr}); falling back to standard Vibrations.")
                 energies_ev = vib.get_energies()
                 _get_mode_func = vib.get_mode
         else:

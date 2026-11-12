@@ -211,6 +211,26 @@ def validate_workflow(
     relax_jobs = 1 + (1 if config.excited_state_method in ("delta_scf", "spin_proxy") else 0)
     total_dft_jobs = relax_jobs + eff_gs_frames + eff_es_frames
 
+    # 8. Check for existing Delta-SCF electronic structure / in-gap diagram
+    gs_pw_out = os.path.join(config.workspace_dir, "qe_gs_relax", "pw.out")
+    spec_json = os.path.join(config.workspace_dir, "delta_scf_spec.json")
+    level_diagram = None
+    if os.path.isfile(spec_json):
+        try:
+            with open(spec_json, "r", encoding="utf-8") as f:
+                spec_data = json.load(f)
+            level_diagram = spec_data.get("level_diagram")
+        except Exception:
+            pass
+    elif os.path.isfile(gs_pw_out):
+        try:
+            from .qe_runner import parse_qe_band_gap
+            gap_info = parse_qe_band_gap(gs_pw_out, target_spin_channel=getattr(config, "delta_scf_spin_channel", None))
+            if gap_info:
+                level_diagram = gap_info.get("level_diagram")
+        except Exception:
+            pass
+
     report = {
         "valid": True,
         "config_file": getattr(config, "config_file_path", "config.yaml"),
@@ -237,6 +257,7 @@ def validate_workflow(
         "planned_dft_single_points_es": eff_es_frames,
         "planned_dft_relaxations": relax_jobs,
         "total_planned_dft_jobs": total_dft_jobs,
+        "level_diagram": level_diagram,
         "warnings": warnings_list,
     }
 
@@ -272,6 +293,10 @@ def _print_validation_report(report: Dict[str, Any]) -> None:
     parity_str = "MATCH [OK]" if report['spin_parity_ok'] else "MISMATCH [FAIL]"
     print(f"  • Spin parity: {parity_str}")
     print(f"  • Excited state method: {report['excited_state_method']}")
+    if report.get("level_diagram"):
+        print("\n  [+] In-Gap Defect Level Diagram (from Ground-State DFT):")
+        for line in report["level_diagram"].splitlines():
+            print(f"      {line}")
 
     print("\n[3/5] Pseudopotentials & DFT Parameters:")
     print(f"  • Cutoffs: ecutwfc = {report['ecutwfc_Ry']} Ry, ecutrho = {report['ecutrho_Ry']} Ry (ratio = {report['ecutrho_Ry']/report['ecutwfc_Ry']:.1f})")

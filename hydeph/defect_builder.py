@@ -16,7 +16,12 @@ from calorine.calculators import CPUNEP
 
 from .config import ToolkitConfig, resolve_pseudo_path
 from .calculator import load_foundation_calculator
-from .qe_runner import build_delta_scf_occupations, inspect_upf_metadata, parse_qe_band_gap
+from .qe_runner import (
+    build_delta_scf_occupations,
+    inspect_upf_metadata,
+    parse_qe_band_gap,
+    resolve_delta_scf_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -528,35 +533,21 @@ class DefectBuilder:
         force = force_relax or self.config.force_resample
         center = self.vac_pos if self.vac_pos is not None else get_defect_center(defect_sc)
 
-        # Check candidate paths for pre-relaxed ground state (workspace, current dir, pristine dir)
-        candidates = [gs_path]
-        if self.config.workspace_dir != ".":
-            candidates.extend(["relaxed_gs.xyz", os.path.join(".", "relaxed_gs.xyz")])
-        if self.config.pristine_cell_path:
-            p_dir = os.path.dirname(self.config.pristine_cell_path)
-            if p_dir:
-                candidates.append(os.path.join(p_dir, "relaxed_gs.xyz"))
-
-        for cand in candidates:
-            if not force and os.path.isfile(cand) and os.path.getsize(cand) > 0:
-                try:
-                    cached_gs = ase.io.read(cand)
-                    if (
-                        len(cached_gs) == len(defect_sc)
-                        and cached_gs.get_chemical_symbols() == defect_sc.get_chemical_symbols()
-                    ):
-                        cached_gs.info["defect_center"] = np.asarray(center, dtype=float)
-                        if "gs_source" not in cached_gs.info:
-                            cached_gs.info["gs_source"] = "cached"
-                        if os.path.abspath(cand) != os.path.abspath(gs_path):
-                            logger.info(f"[+] Discovered pre-relaxed ground state at '{cand}', caching to {gs_path}")
-                            os.makedirs(self.config.workspace_dir, exist_ok=True)
-                            shutil.copy2(cand, gs_path)
-                        else:
-                            logger.info(f"[i] Reusing existing relaxed ground state from {gs_path}")
-                        return cached_gs
-                except Exception:
-                    pass
+        # Check if pre-relaxed ground state exists in workspace_dir
+        if not force and os.path.isfile(gs_path) and os.path.getsize(gs_path) > 0:
+            try:
+                cached_gs = ase.io.read(gs_path)
+                if (
+                    len(cached_gs) == len(defect_sc)
+                    and cached_gs.get_chemical_symbols() == defect_sc.get_chemical_symbols()
+                ):
+                    cached_gs.info["defect_center"] = np.asarray(center, dtype=float)
+                    if "gs_source" not in cached_gs.info:
+                        cached_gs.info["gs_source"] = "cached"
+                    logger.info(f"[i] Reusing existing relaxed ground state from {gs_path}")
+                    return cached_gs
+            except Exception:
+                pass
 
         # Check if converged qe_gs_relax/pw.out exists from previous cluster run
         gs_out = os.path.join(self.config.workspace_dir, "qe_gs_relax", "pw.out")
@@ -669,41 +660,26 @@ class DefectBuilder:
             logger.info(f"[+] Loaded Optical Excited State from file (Franck-Condon Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
             return at_es, dq_fc
 
-        es_candidates = [es_path]
-        if self.config.workspace_dir != ".":
-            es_candidates.extend(["relaxed_es.xyz", os.path.join(".", "relaxed_es.xyz")])
-        if self.config.pristine_cell_path:
-            p_dir = os.path.dirname(self.config.pristine_cell_path)
-            if p_dir:
-                es_candidates.append(os.path.join(p_dir, "relaxed_es.xyz"))
-
-        for cand_es in es_candidates:
-            if not force and os.path.isfile(cand_es) and os.path.getsize(cand_es) > 0:
-                try:
-                    cached_es = ase.io.read(cand_es)
-                    if (
-                        len(cached_es) == len(at_gs)
-                        and cached_es.get_chemical_symbols() == at_gs.get_chemical_symbols()
-                    ):
-                        dr_fc = mic_displacement(cached_es.positions, at_gs.positions, at_gs.cell)
-                        cached_es.positions = at_gs.positions + dr_fc
-                        cached_es.info["defect_center"] = np.asarray(center, dtype=float)
-                        if "es_source" not in cached_es.info:
-                            cached_es.info["es_source"] = "cached"
-                        m = at_gs.get_masses()
-                        dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
-                        if dq_fc > 1e-5:
-                            if os.path.abspath(cand_es) != os.path.abspath(es_path):
-                                os.makedirs(self.config.workspace_dir, exist_ok=True)
-                                tmp_es = es_path + ".tmp.xyz"
-                                ase.io.write(tmp_es, cached_es, format="extxyz")
-                                os.replace(tmp_es, es_path)
-                                logger.info(f"[+] Discovered pre-relaxed excited state at '{cand_es}', caching to {es_path} (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
-                            else:
-                                logger.info(f"[i] Reusing existing relaxed excited state from {es_path} (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
-                            return cached_es, dq_fc
-                except Exception:
-                    pass
+        # Check if pre-relaxed excited state exists in workspace_dir
+        if not force and os.path.isfile(es_path) and os.path.getsize(es_path) > 0:
+            try:
+                cached_es = ase.io.read(es_path)
+                if (
+                    len(cached_es) == len(at_gs)
+                    and cached_es.get_chemical_symbols() == at_gs.get_chemical_symbols()
+                ):
+                    dr_fc = mic_displacement(cached_es.positions, at_gs.positions, at_gs.cell)
+                    cached_es.positions = at_gs.positions + dr_fc
+                    cached_es.info["defect_center"] = np.asarray(center, dtype=float)
+                    if "es_source" not in cached_es.info:
+                        cached_es.info["es_source"] = "cached"
+                    m = at_gs.get_masses()
+                    dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
+                    if dq_fc > 1e-5:
+                        logger.info(f"[i] Reusing existing relaxed excited state from {es_path} (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
+                        return cached_es, dq_fc
+            except Exception:
+                pass
 
         # Check if converged qe_es_relax/pw.out exists from previous cluster run
         es_out = os.path.join(self.config.workspace_dir, "qe_es_relax", "pw.out")
@@ -736,74 +712,21 @@ class DefectBuilder:
                 gs_calc_dir = os.path.join(self.config.workspace_dir, "qe_gs_relax")
                 gs_out = os.path.join(gs_calc_dir, "pw.out")
 
-                target_sc = getattr(self.config, "delta_scf_spin_channel", None)
-                gap_info = parse_qe_band_gap(gs_out, target_spin_channel=target_sc) if os.path.isfile(gs_out) else None
-
-                unique_syms = sorted(list(set(at_gs.get_chemical_symbols())))
-                z_vals = {}
-                for s in unique_syms:
-                    upf = self.config.pseudopotentials.get(s, "") if self.config.pseudopotentials else ""
-                    if upf:
-                        p = resolve_pseudo_path(upf, self.config.pseudo_dir)
-                        if os.path.isfile(p):
-                            z_vals[s] = inspect_upf_metadata(p).get("z_valence")
-
-                _DEFAULT_VALENCE = {
-                    "H": 1, "Li": 1, "Be": 2, "B": 3, "C": 4, "N": 5, "O": 6, "F": 7,
-                    "Na": 1, "Mg": 2, "Al": 3, "Si": 4, "P": 5, "S": 6, "Cl": 7,
-                    "K": 1, "Ca": 2, "Ga": 3, "Ge": 4, "As": 5, "Se": 6, "Br": 7,
-                    "Rb": 1, "Sr": 2, "In": 3, "Sn": 4, "Sb": 5, "Te": 6, "I": 7,
-                    "Cs": 1, "Ba": 2,
-                }
-                nelec_total = int(round(
-                    sum(z_vals.get(s) or _DEFAULT_VALENCE.get(s, 4) for s in at_gs.get_chemical_symbols())
-                    - float(self.config.tot_charge)
-                ))
-                if gap_info is not None and gap_info.get("nelec") is not None:
-                    nelec_total = int(round(gap_info["nelec"]))
-
-                tot_mag = int(self.config.spin_multiplicity - 1) if self.config.spin_polarized else 0
-                if (nelec_total % 2) != (tot_mag % 2):
-                    if nelec_total % 2 != 0:
-                        valid_mag = 1 if tot_mag <= 0 else (tot_mag if tot_mag % 2 != 0 else tot_mag + 1)
-                    else:
-                        valid_mag = 0 if tot_mag <= 0 else (tot_mag if tot_mag % 2 == 0 else tot_mag + 1)
-                    if not getattr(self.config, "auto_spin_parity", False):
-                        raise ValueError(
-                            f"Spin parity mismatch in Delta-SCF: Total valence electrons ({nelec_total}) and "
-                            f"tot_magnetization ({tot_mag}) have opposite parity ({0.5*(nelec_total+tot_mag):.1f} up, {0.5*(nelec_total-tot_mag):.1f} down). "
-                            f"Set tot_magnetization={valid_mag} (spin_multiplicity={valid_mag+1}) or set auto_spin_parity=True."
-                        )
-                    else:
-                        tot_mag = valid_mag
-
-                n_occ_max = (nelec_total + abs(tot_mag)) // 2
-                spin_chan = getattr(self.config, "delta_scf_spin_channel", None)
-                homo_b = getattr(self.config, "delta_scf_homo_band", None)
-                lumo_b = getattr(self.config, "delta_scf_lumo_band", None)
-
-                if gap_info is not None:
-                    spin_chan = spin_chan or gap_info.get("spin_channel") or 2
-                    homo_b = homo_b or gap_info.get("homo_band") or n_occ_max
-                    lumo_b = lumo_b or gap_info.get("lumo_band") or (n_occ_max + 1)
-                    nbnd = gap_info.get("nbnd") or max(homo_b + 1, lumo_b, n_occ_max) + 8
-                else:
-                    spin_chan = spin_chan or 2
-                    homo_b = homo_b or n_occ_max
-                    lumo_b = lumo_b or (n_occ_max + 1)
-                    nbnd = max(lumo_b, n_occ_max) + 8
-
-                nbnd = max(nbnd, homo_b + 1, lumo_b, n_occ_max)
-
-                homo_deg = getattr(self.config, "delta_scf_homo_degeneracy", None)
-                if homo_deg is None and gap_info is not None:
-                    homo_deg = gap_info.get("homo_degeneracy", 1)
-                homo_deg = max(1, int(homo_deg or 1))
-
-                lumo_deg = getattr(self.config, "delta_scf_lumo_degeneracy", None)
-                if lumo_deg is None and gap_info is not None:
-                    lumo_deg = gap_info.get("lumo_degeneracy", 1)
-                lumo_deg = max(1, int(lumo_deg or 1))
+                spec = resolve_delta_scf_spec(
+                    at_gs,
+                    self.config,
+                    gs_pw_out_path=gs_out if os.path.isfile(gs_out) else None,
+                    workspace_dir=self.config.workspace_dir,
+                )
+                gap_info = spec.get("gap_info")
+                homo_deg = spec["homo_degeneracy"]
+                lumo_deg = spec["lumo_degeneracy"]
+                homo_b = spec["homo_band"]
+                lumo_b = spec["lumo_band"]
+                spin_chan = spec["spin_channel"]
+                nbnd = spec["nbnd"]
+                occ_up = spec["occupations_up"]
+                occ_dw = spec["occupations_down"]
 
                 if lumo_deg > 1 or homo_deg > 1:
                     logger.info(
@@ -816,17 +739,6 @@ class DefectBuilder:
                         f"    [Delta-SCF] Promoting electron: band {homo_b} -> {lumo_b} "
                         f"in spin channel {spin_chan} ({'down' if spin_chan == 2 else 'up'}, nbnd={nbnd})"
                     )
-
-                occ_up, occ_dw = build_delta_scf_occupations(
-                    nelec=nelec_total,
-                    tot_magnetization=tot_mag,
-                    nbnd=nbnd,
-                    homo_band=homo_b,
-                    lumo_band=lumo_b,
-                    spin_channel=spin_chan,
-                    lumo_degeneracy=lumo_deg,
-                    homo_degeneracy=homo_deg,
-                )
 
                 init_es = at_gs
                 es_seed = getattr(self.config, "excited_state_seed_path", None)

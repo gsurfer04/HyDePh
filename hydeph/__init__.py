@@ -11,7 +11,7 @@ import logging
 from .config import ToolkitConfig, discover_pseudopotential, resolve_pseudo_path
 from .defect_builder import DefectBuilder, detect_defect_sites, apply_jahn_teller_distortion
 from .frame_sampler import FrameSampler, get_rattle_sigma
-from .qe_runner import QERunner, extract_and_attach_adiabatic_energetics
+from .qe_runner import QERunner, extract_and_attach_adiabatic_energetics, resolve_delta_scf_spec
 from .delta_trainer import DeltaTrainer, evaluate_delta_nep_quality_control
 from .calculator import HybridDefectCalculator, PairedDefectCalculator, load_foundation_calculator
 from .lineshape import LineshapeEngine
@@ -35,6 +35,7 @@ __all__ = [
     "get_rattle_sigma",
     "QERunner",
     "extract_and_attach_adiabatic_energetics",
+    "resolve_delta_scf_spec",
     "DeltaTrainer",
     "evaluate_delta_nep_quality_control",
     "HybridDefectCalculator",
