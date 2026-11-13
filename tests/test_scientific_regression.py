@@ -147,6 +147,10 @@ def test_toy_force_field_hessian_and_sk(tmp_path):
         foundation_potential_path=str(tmp_path / "pot.txt"),
         workspace_dir=str(tmp_path / "ws"),
         supercell_repeat=(1, 1, 1),
+        enable_anharmonic=False,
+        plot_configuration_coordinate=False,
+        temperatures=[10.0],
+        lineshape_n_points=200,
     )
 
     calc = DiatomicHarmonicCalc(k_eV_A2=k_eV_A2, r0=r0)

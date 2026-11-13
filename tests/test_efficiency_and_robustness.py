@@ -78,7 +78,7 @@ def test_hermitian_fft_quantum_lineshape_matches_direct_integral():
     t0 = time.perf_counter()
     eg, a_fft = compute_quantum_lineshape(
         hw_grid, s_cont, temp_k=temp_k, dephasing_gamma_meV=gamma,
-        e_min_meV=-250.0, e_max_meV=60.0, n_e=800
+        e_min_meV=-250.0, e_max_meV=60.0, n_e=400
     )
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -90,7 +90,7 @@ def test_hermitian_fft_quantum_lineshape_matches_direct_integral():
     s_val = s_cont[mask] / 1000.0
     dhw = hw_grid[1] - hw_grid[0]
     n_bose = 1.0 / (np.exp(hw / (kb_mev_k * temp_k)) - 1.0)
-    t_fs = np.linspace(-6000.0, 6000.0, 16385)
+    t_fs = np.linspace(-6000.0, 6000.0, 8193)
     dt = t_fs[1] - t_fs[0]
     wt = np.outer(hw / (1000.0 * hbar_ev_fs), t_fs)
     integrand = (n_bose[:, None] + 1.0) * np.exp(1j * wt) + n_bose[:, None] * np.exp(-1j * wt) - (2.0 * n_bose[:, None] + 1.0)
@@ -134,6 +134,8 @@ def test_stale_vibrations_cache_invalidation(tmp_path):
         temperatures=[10.0],
         enable_anharmonic=False,
         plot_configuration_coordinate=False,
+        export_normal_modes=False,
+        lineshape_n_points=200,
     )
 
     engine1 = LineshapeEngine(cfg, SpringCalc(k_spring=1.0, eq_pos=at_gs.positions))

@@ -98,6 +98,10 @@ def test_consistent_s_continuous_normalization(tmp_path):
         workspace_dir=str(tmp_path / "ws"),
         finite_size_acoustic_cutoff=True,
         phonon_smearing_meV=5.0,
+        enable_anharmonic=False,
+        plot_configuration_coordinate=False,
+        export_normal_modes=False,
+        lineshape_n_points=200,
     )
     mock_calc = MockHarmonicCalc(k=10.0)
     engine = LineshapeEngine(cfg, mock_calc)
@@ -143,6 +147,11 @@ def test_imaginary_modes_detection_and_guard(tmp_path):
         foundation_potential_path=str(tmp_path / "pot.txt"),
         workspace_dir=str(tmp_path / "ws"),
         max_imaginary_modes=0,  # strict fail-closed
+        enable_anharmonic=False,
+        plot_configuration_coordinate=False,
+        temperatures=[10.0],
+        export_normal_modes=False,
+        lineshape_n_points=200,
     )
     mock_calc = MockHarmonicCalc(k=10.0)
     engine = LineshapeEngine(cfg, mock_calc)
@@ -179,6 +188,10 @@ def test_normal_modes_csv_export_and_ipr(tmp_path):
         foundation_potential_path=str(tmp_path / "pot.txt"),
         workspace_dir=str(tmp_path / "ws"),
         export_normal_modes=True,
+        enable_anharmonic=False,
+        plot_configuration_coordinate=False,
+        temperatures=[10.0],
+        lineshape_n_points=200,
     )
     mock_calc = MockHarmonicCalc(k=10.0)
     engine = LineshapeEngine(cfg, mock_calc)

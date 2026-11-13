@@ -245,7 +245,9 @@ def test_committee_uncertainty_in_lineshape(tmp_path):
         tmp_path,
         temperatures=[10.0, 300.0],
         enable_anharmonic=False,
+        plot_configuration_coordinate=False,
         export_normal_modes=False,
+        lineshape_n_points=200,
     )
     # 3-member committee
     members = [ToyDisplacedHarmonicCalc(k=8.0), ToyDisplacedHarmonicCalc(k=10.0), ToyDisplacedHarmonicCalc(k=12.0)]

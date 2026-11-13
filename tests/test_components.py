@@ -410,6 +410,7 @@ def test_configuration_coordinate_engine(tmp_path):
         pristine_cell_path=str(tmp_path / "pristine.xyz"),
         workspace_dir=str(tmp_path),
         zpl_energy_eV=None,
+        cc_n_points=11,
     )
     at_gs_auto = at_gs.copy()
     at_gs_auto.info["dft_gap_eV"] = 2.50
@@ -426,6 +427,7 @@ def test_configuration_coordinate_engine(tmp_path):
         pristine_cell_path=str(tmp_path / "pristine.xyz"),
         workspace_dir=str(tmp_path),
         zpl_energy_eV=0,
+        cc_n_points=11,
     )
     assert cfg_zero.zpl_energy_eV is None
     engine_zero = ConfigurationCoordinateEngine(cfg_zero, mock_calc)

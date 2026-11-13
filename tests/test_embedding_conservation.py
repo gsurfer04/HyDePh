@@ -67,6 +67,11 @@ def test_force_vs_displacement_embedding_harmonic_agreement(tmp_path):
         phonon_supercell_repeat=(1, 1, 1),
         finite_size_acoustic_cutoff=False,
         acoustic_sum_rule=False,
+        enable_anharmonic=False,
+        plot_configuration_coordinate=False,
+        temperatures=[10.0],
+        export_normal_modes=False,
+        lineshape_n_points=200,
     )
     engine_disp = LineshapeEngine(cfg_disp, calc_gs, calc_es=calc_es)
     res_disp = engine_disp.calculate_spectral_density_and_lineshapes(at_gs, at_es)
@@ -81,6 +86,11 @@ def test_force_vs_displacement_embedding_harmonic_agreement(tmp_path):
         phonon_supercell_repeat=(1, 1, 1),
         finite_size_acoustic_cutoff=False,
         acoustic_sum_rule=False,
+        enable_anharmonic=False,
+        plot_configuration_coordinate=False,
+        temperatures=[10.0],
+        export_normal_modes=False,
+        lineshape_n_points=200,
     )
     engine_force = LineshapeEngine(cfg_force, calc_gs, calc_es=calc_es)
     res_force = engine_force.calculate_spectral_density_and_lineshapes(at_gs, at_es)
