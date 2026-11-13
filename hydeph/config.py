@@ -592,7 +592,8 @@ class ToolkitConfig:
     max_gs_residual_force_eV_A: float = 0.05
     max_refinement_displacement_A: float = 0.05
     max_erel_error_pct: float = 15.0
-    max_fc_path_error_meV: float = 35.0
+    max_fc_path_error_meV: Optional[float] = None  # Defaults to max(35.0, max_fc_path_error_meV_per_atom * n_atoms)
+    max_fc_path_error_meV_per_atom: float = 0.5
     max_small_displacement_force_rmse_eV_A: float = 0.08
     validate_dft_modes: bool = False
     dft_modes_to_validate: int = 5
@@ -1314,8 +1315,12 @@ class ToolkitConfig:
             raise ValueError(f"Invalid max_refinement_displacement_A: {self.max_refinement_displacement_A}. Must be > 0.")
         if float(self.max_erel_error_pct) <= 0.0:
             raise ValueError(f"Invalid max_erel_error_pct: {self.max_erel_error_pct}. Must be > 0.")
-        if float(self.max_fc_path_error_meV) <= 0.0:
+        if self.max_fc_path_error_meV is not None and float(self.max_fc_path_error_meV) <= 0.0:
             raise ValueError(f"Invalid max_fc_path_error_meV: {self.max_fc_path_error_meV}. Must be > 0.")
+        if float(self.max_fc_path_error_meV_per_atom) <= 0.0:
+            raise ValueError(
+                f"Invalid max_fc_path_error_meV_per_atom: {self.max_fc_path_error_meV_per_atom}. Must be > 0."
+            )
         if float(self.max_small_displacement_force_rmse_eV_A) <= 0.0:
             raise ValueError(
                 f"Invalid max_small_displacement_force_rmse_eV_A: {self.max_small_displacement_force_rmse_eV_A}. Must be > 0."

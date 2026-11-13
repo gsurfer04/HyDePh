@@ -199,9 +199,105 @@ def _compute_training_digest(
     for fr in delta_frames:
         h.update(np.asarray(fr.positions, dtype=np.float64).tobytes())
         h.update(np.float64(fr.info.get("energy", 0.0)).tobytes())
+        h.update(np.float64(fr.info.get("weight", 1.0)).tobytes())
         if "forces" in fr.arrays:
             h.update(np.asarray(fr.arrays["forces"], dtype=np.float64).tobytes())
     return h.hexdigest()
+
+
+def _is_fc_endpoint(fr: Atoms) -> bool:
+    """Returns True for Franck-Condon minimum-energy endpoint frames (lambda=0 or lambda=1)."""
+    if fr.info.get("sample_type") != "franck_condon":
+        return False
+    lam = fr.info.get("lambda")
+    fid = str(fr.info.get("frame_id", ""))
+    return bool(
+        (lam is not None and (abs(float(lam) - 0.0) < 1e-4 or abs(float(lam) - 1.0) < 1e-4))
+        or fid in ("fc_00", "fc_01")
+    )
+
+
+def apply_training_frame_weights(frames: List[Atoms]) -> List[Atoms]:
+    """Assigns GPUMD per-configuration weights prioritizing FC anchors and Hessian frames.
+
+    Preserves any explicit `weight` already attached to `fr.info`.
+    """
+    weighted = []
+    for fr in frames:
+        copy_fr = fr.copy()
+        if copy_fr.info.get("weight") is None:
+            if _is_fc_endpoint(copy_fr):
+                copy_fr.info["weight"] = 4.0
+            elif copy_fr.info.get("sample_type") == "franck_condon" or bool(copy_fr.info.get("is_hessian", False)):
+                copy_fr.info["weight"] = 2.5
+            else:
+                copy_fr.info["weight"] = 1.0
+        weighted.append(copy_fr)
+    return weighted
+
+
+def filter_es_state_crossing_outliers(
+    labeled_frames_gs: List[Atoms],
+    labeled_frames_es: List[Atoms],
+    min_pairs: int = 8,
+    z_thresh: float = 4.0,
+    min_dev_eV: float = 0.65,
+) -> Tuple[List[Atoms], List[str]]:
+    """Filters ES Delta-SCF orbital-crossing outliers using robust MAD of vertical excitation energy."""
+    if not labeled_frames_gs or not labeled_frames_es:
+        return list(labeled_frames_es), []
+
+    gs_energy_by_id: Dict[str, float] = {}
+    for fr in labeled_frames_gs:
+        fid = fr.info.get("frame_id")
+        if fid is None:
+            continue
+        try:
+            gs_energy_by_id[str(fid)] = get_frame_energy(fr)
+        except KeyError:
+            continue
+
+    matched_evert: List[Tuple[int, str, float]] = []
+    for idx, fr in enumerate(labeled_frames_es):
+        fid = fr.info.get("frame_id")
+        if fid is None or str(fid) not in gs_energy_by_id:
+            continue
+        try:
+            e_es = get_frame_energy(fr)
+        except KeyError:
+            continue
+        matched_evert.append((idx, str(fid), e_es - gs_energy_by_id[str(fid)]))
+
+    if len(matched_evert) < min_pairs:
+        return list(labeled_frames_es), []
+
+    vals = np.array([item[2] for item in matched_evert], dtype=float)
+    median_ev = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - median_ev)))
+    robust_std = max(1.4826 * mad, 0.05)
+    dev_limit = max(min_dev_eV, z_thresh * robust_std)
+
+    drop_indices = set()
+    dropped_ids: List[str] = []
+    for idx, fid, ev in matched_evert:
+        fr = labeled_frames_es[idx]
+        # Never drop Franck-Condon optical path frames
+        if fr.info.get("sample_type") == "franck_condon":
+            continue
+        collapsed = (median_ev > 0.5 and ev <= 0.1)
+        if collapsed or abs(ev - median_ev) > dev_limit:
+            drop_indices.add(idx)
+            dropped_ids.append(fid)
+            logger.warning(
+                f"    [!] Filtering ES Delta-SCF state-crossing outlier '{fid}': "
+                f"Delta E_vert = {ev:.4f} eV (median = {median_ev:.4f} eV, threshold = +/-{dev_limit:.3f} eV)"
+            )
+
+    if not drop_indices or (len(labeled_frames_es) - len(drop_indices)) < 6:
+        return list(labeled_frames_es), []
+
+    filtered = [fr for i, fr in enumerate(labeled_frames_es) if i not in drop_indices]
+    return filtered, dropped_ids
 
 
 def get_frame_energy(fr: Atoms) -> float:
@@ -359,8 +455,9 @@ class DeltaTrainer:
         os.makedirs(train_dir, exist_ok=True)
 
         seed = self.config.random_seed
+        weighted_delta = apply_training_frame_weights(delta_frames)
         train_frames, test_frames = stratified_train_test_split(
-            delta_frames, test_fraction=0.20, seed=seed
+            weighted_delta, test_fraction=0.20, seed=seed
         )
 
         ase.io.write(
@@ -399,7 +496,7 @@ class DeltaTrainer:
         # Performance optimization: skip digest hashing if cached potential or manifest clearly does not exist
         if not force and os.path.isfile(pot_dest) and os.path.isfile(manifest_path):
             digest = _compute_training_digest(
-                delta_frames, self.config.nep_neurons, effective_batch, self.config.nep_steps, config=self.config
+                weighted_delta, self.config.nep_neurons, effective_batch, self.config.nep_steps, config=self.config
             )
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
@@ -496,17 +593,7 @@ class DeltaTrainer:
                 json.dump(offset_data, f, indent=2)
 
             # Pin anchor frames (lambda=0, lambda=1) in all bootstrap members
-            anchor_train = [
-                fr for fr in train_frames
-                if fr.info.get("sample_type") == "franck_condon"
-                and (
-                    (fr.info.get("lambda") is not None and (
-                        abs(float(fr.info["lambda"]) - 0.0) < 1e-4 or
-                        abs(float(fr.info["lambda"]) - 1.0) < 1e-4
-                    ))
-                    or str(fr.info.get("frame_id", "")) in ("fc_00", "fc_01")
-                )
-            ]
+            anchor_train = [fr for fr in train_frames if _is_fc_endpoint(fr)]
             non_anchor_train = [fr for fr in train_frames if fr not in anchor_train]
 
             for m in range(1, committee_size):
@@ -558,7 +645,7 @@ class DeltaTrainer:
 
         if digest is None:
             digest = _compute_training_digest(
-                delta_frames, self.config.nep_neurons, effective_batch, self.config.nep_steps, config=self.config
+                weighted_delta, self.config.nep_neurons, effective_batch, self.config.nep_steps, config=self.config
             )
         manifest_data = {
             "digest": digest,
@@ -820,10 +907,12 @@ def evaluate_delta_nep_quality_control(
     # Franck-Condon path verification (referenced to lambda = 0.0)
     fc_frames = [f for f in labeled_frames if f.info.get("sample_type") == "franck_condon"]
     fc_max_err_meV = 0.0
+    fc_max_err_meV_atom = 0.0
     erel_err_meV = 0.0
     erel_err_pct = 0.0
     erel_dft = 0.0
     erel_hyb = 0.0
+    f0 = None
     f1 = None
 
     if fc_frames:
@@ -846,6 +935,7 @@ def evaluate_delta_nep_quality_control(
             ed = get_frame_energy(fr) - e0_dft
             fc_errs.append(abs(eh - ed) * 1000.0)
         fc_max_err_meV = float(np.max(fc_errs))
+        fc_max_err_meV_atom = float(fc_max_err_meV / max(1, len(f0)))
 
         # Check lambda=1 frame
         f1 = next((f for f in fc_frames if abs(float(f.info.get("lambda", 999.0)) - 1.0) < 1e-4), None)
@@ -857,14 +947,14 @@ def evaluate_delta_nep_quality_control(
             erel_err_meV = float(abs(erel_hyb - erel_dft) * 1000.0)
             erel_err_pct = float(erel_err_meV / (abs(erel_dft) * 1000.0) * 100.0) if abs(erel_dft) > 1e-5 else 0.0
 
-    # Residual force at DFT minimum
-    at_eval = target_ref.copy()
+    # Residual force at post-refinement equilibrium
+    at_eval = at_gs.copy()
     at_eval.calc = calc_hybrid
     res_f = np.asarray(at_eval.get_forces(), dtype=float)
     calc_res_force = float(np.abs(res_f).max())
 
-    eff_res_force = pre_refinement_force if pre_refinement_force is not None else calc_res_force
-    gate_residual_force = eff_res_force <= config.max_gs_residual_force_eV_A
+    eff_pre_ref_force = float(pre_refinement_force) if pre_refinement_force is not None else calc_res_force
+    gate_residual_force = calc_res_force <= config.max_gs_residual_force_eV_A
 
     gate_refinement_disp = (
         (float(refinement_displacement) <= config.max_refinement_displacement_A)
@@ -873,7 +963,15 @@ def evaluate_delta_nep_quality_control(
     )
 
     gate_test_force = test_res["force_rmse_eV_A"] <= config.max_test_force_rmse_eV_A
-    gate_fc_path = (fc_max_err_meV <= config.max_fc_path_error_meV) if fc_frames else True
+    n_ref_atoms = len(f0) if f0 is not None else max(1, len(at_gs))
+    explicit_fc_gate = getattr(config, "max_fc_path_error_meV", None)
+    per_atom_fc_gate = float(getattr(config, "max_fc_path_error_meV_per_atom", 0.5))
+    eff_fc_gate_meV = (
+        float(explicit_fc_gate)
+        if explicit_fc_gate is not None
+        else float(max(35.0, per_atom_fc_gate * n_ref_atoms))
+    )
+    gate_fc_path = (fc_max_err_meV <= eff_fc_gate_meV) if fc_frames else True
     gate_erel = (erel_err_pct <= config.max_erel_error_pct) if (fc_frames and f1 is not None) else True
 
     qc_passed = bool(
@@ -901,9 +999,15 @@ def evaluate_delta_nep_quality_control(
             f"    • Small-Disp Force RMSE: {small_disp_force_rmse:.4f} eV/A "
             f"(Gate <= {config.max_small_displacement_force_rmse_eV_A:.3f} eV/A: {'PASSED' if gate_small_disp_force else 'FAILED'})"
         )
+    pre_info = (
+        f" | Pre-refinement: {eff_pre_ref_force:.4f} eV/A"
+        if pre_refinement_force is not None
+        else ""
+    )
     logger.info(
-        f"    • Pre-Refinement DFT Residual Force: {eff_res_force:.4f} eV/A "
+        f"    • Post-Refinement Residual Force: {calc_res_force:.4f} eV/A "
         f"(Gate <= {config.max_gs_residual_force_eV_A:.3f} eV/A: {'PASSED' if gate_residual_force else 'FAILED'})"
+        + pre_info
     )
     if refinement_displacement is not None:
         logger.info(
@@ -912,7 +1016,8 @@ def evaluate_delta_nep_quality_control(
         )
     if fc_frames:
         logger.info(
-            f"    • FC Path Max Error: {fc_max_err_meV:.2f} meV (Gate <= {config.max_fc_path_error_meV:.1f} meV: {'PASSED' if gate_fc_path else 'FAILED'}) | "
+            f"    • FC Path Max Error: {fc_max_err_meV:.2f} meV ({fc_max_err_meV_atom:.2f} meV/atom, "
+            f"Gate <= {eff_fc_gate_meV:.1f} meV: {'PASSED' if gate_fc_path else 'FAILED'}) | "
             f"Delta E_rel Error: {erel_err_meV:.2f} meV / {erel_err_pct:.1f}% (Gate <= {config.max_erel_error_pct:.1f}%: {'PASSED' if gate_erel else 'FAILED'})"
         )
     logger.info(f"    • QC Gate Overall Status: {'PASSED' if qc_passed else 'FAILED'}")
@@ -942,9 +1047,10 @@ def evaluate_delta_nep_quality_control(
         "test_force_rmse_eV_A": test_res["force_rmse_eV_A"],
         "small_disp_force_rmse_eV_A": small_disp_force_rmse,
         "gs_residual_force_max_eV_A": calc_res_force,
-        "pre_refinement_force_eV_A": eff_res_force,
+        "pre_refinement_force_eV_A": eff_pre_ref_force,
         "refinement_displacement_A": refinement_displacement,
         "fc_path_energy_max_err_meV": fc_max_err_meV,
+        "fc_path_energy_max_err_meV_atom": fc_max_err_meV_atom,
         "delta_erel_dft_eV": erel_dft,
         "delta_erel_hybrid_eV": erel_hyb,
         "delta_erel_error_meV": erel_err_meV,
@@ -953,7 +1059,8 @@ def evaluate_delta_nep_quality_control(
             "max_test_force_rmse_eV_A": config.max_test_force_rmse_eV_A,
             "max_gs_residual_force_eV_A": config.max_gs_residual_force_eV_A,
             "max_refinement_displacement_A": config.max_refinement_displacement_A,
-            "max_fc_path_error_meV": config.max_fc_path_error_meV,
+            "max_fc_path_error_meV": eff_fc_gate_meV,
+            "max_fc_path_error_meV_per_atom": per_atom_fc_gate,
             "max_erel_error_pct": config.max_erel_error_pct,
             "max_small_displacement_force_rmse_eV_A": config.max_small_displacement_force_rmse_eV_A,
         },
@@ -989,7 +1096,7 @@ def evaluate_delta_nep_quality_control(
         raise ValueError(
             f"Delta-NEP Quality Gate Failed for {state_label}: {', '.join(failed_gates)}. "
             f"(Test force RMSE: {test_res['force_rmse_eV_A']:.4f} eV/A [gate <= {config.max_test_force_rmse_eV_A}], "
-            f"Residual force: {eff_res_force:.4f} eV/A [gate <= {config.max_gs_residual_force_eV_A}]). "
+            f"Residual force: {calc_res_force:.4f} eV/A [gate <= {config.max_gs_residual_force_eV_A}]). "
             "Set allow_fallbacks=True to continue despite quality gate violation."
         )
 

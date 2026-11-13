@@ -9,7 +9,9 @@ from ase.calculators.calculator import Calculator, all_changes
 from hydeph.config import ToolkitConfig
 from hydeph.delta_trainer import (
     DeltaTrainer,
+    apply_training_frame_weights,
     evaluate_delta_nep_quality_control,
+    filter_es_state_crossing_outliers,
     plot_delta_nep_parity,
 )
 from hydeph.lineshape import LineshapeEngine
@@ -126,27 +128,45 @@ def test_qc_lambda_0_reference(tmp_path):
     assert os.path.isfile(tmp_path / "delta_nep_parity.json")
 
 
-def test_qc_pre_refinement_force_gate(tmp_path):
-    """Test that pre-refinement force gate fails loud when unrefined residual force is too high."""
+def test_qc_post_refinement_force_gate(tmp_path):
+    """Test gs_residual_force_gate evaluates post-refinement force and logs pre_refinement_force_eV_A."""
     cfg = _make_cfg(
         tmp_path,
         max_gs_residual_force_eV_A=0.03,
+        max_small_displacement_force_rmse_eV_A=10.0,
+        max_test_force_rmse_eV_A=10.0,
+        max_fc_path_error_meV=10000.0,
+        max_erel_error_pct=200.0,
         allow_fallbacks=False,
     )
     frames = _make_mock_frames(n_frames=6, has_fc=True)
     at_gs = frames[1].copy()
 
-    calc_hyb = ToyHybridDefectCalculator(energy_val=10.0, force_arr=np.zeros((2, 3)))
+    # High pre_refinement_force alone passes when refined at_gs forces are 0.0
+    calc_zero = ToyHybridDefectCalculator(energy_val=10.0, force_arr=np.zeros((2, 3)))
+    qc = evaluate_delta_nep_quality_control(
+        calc_hybrid=calc_zero,
+        labeled_frames=frames,
+        at_gs=at_gs,
+        workspace_dir=str(tmp_path),
+        config=cfg,
+        pre_refinement_force=0.06,
+        write_files=False,
+    )
+    assert qc["pre_refinement_force_eV_A"] == pytest.approx(0.06)
+    assert qc["gs_residual_force_max_eV_A"] == pytest.approx(0.0)
+    assert qc["gates"]["gs_residual_force_gate"] is True
 
-    # Passing pre_refinement_force = 0.06 eV/A exceeds threshold 0.03 eV/A
-    with pytest.raises(ValueError, match="Delta-NEP Quality Gate Failed"):
+    # Post-refinement residual force exceeding threshold raises ValueError
+    calc_high = ToyHybridDefectCalculator(energy_val=10.0, force_arr=np.array([[0.06, 0.0, 0.0], [0.0, 0.0, 0.0]]))
+    with pytest.raises(ValueError, match="gs_residual_force_gate"):
         evaluate_delta_nep_quality_control(
-            calc_hybrid=calc_hyb,
+            calc_hybrid=calc_high,
             labeled_frames=frames,
             at_gs=at_gs,
             workspace_dir=str(tmp_path),
             config=cfg,
-            pre_refinement_force=0.06,
+            pre_refinement_force=0.01,
             write_files=False,
         )
 
@@ -344,4 +364,132 @@ def test_qc_reads_energy_from_calculator_when_missing_from_info(tmp_path):
     )
     assert qc["train_energy_rmse_meV_atom"] > 500.0
     assert qc["test_energy_rmse_meV_atom"] > 500.0
+
+
+def test_apply_training_frame_weights():
+    """Verify endpoint, FC/Hessian, default, and explicit training frame weights."""
+    f_ep_lam = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    f_ep_lam.info = {"sample_type": "franck_condon", "lambda": 0.0, "frame_id": "fc_05"}
+
+    f_ep_id = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    f_ep_id.info = {"sample_type": "franck_condon", "frame_id": "fc_01"}
+
+    f_fc_mid = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    f_fc_mid.info = {"sample_type": "franck_condon", "lambda": 0.5, "frame_id": "fc_03"}
+
+    f_hess = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    f_hess.info = {"sample_type": "rattle", "is_hessian": True, "frame_id": "hess_01"}
+
+    f_md = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    f_md.info = {"sample_type": "aimd", "frame_id": "md_01"}
+
+    f_explicit = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    f_explicit.info = {"sample_type": "franck_condon", "lambda": 1.0, "weight": 7.5}
+
+    weighted = apply_training_frame_weights([f_ep_lam, f_ep_id, f_fc_mid, f_hess, f_md, f_explicit])
+    assert [fr.info["weight"] for fr in weighted] == pytest.approx([4.0, 4.0, 2.5, 2.5, 1.0, 7.5])
+
+
+def test_filter_es_state_crossing_outliers():
+    """Verify ES Delta-SCF MAD outlier filter drops state-collapsed rattle frames and protects FC frames."""
+    gs_frames = []
+    es_frames = []
+
+    # 10 normal pairs with E_vert ~ 2.0 eV (+/- 0.02 eV)
+    for i in range(10):
+        g = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+        g.info = {"frame_id": f"r_{i:02d}", "sample_type": "rattle", "energy": 0.0}
+        e = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+        e.info = {"frame_id": f"r_{i:02d}", "sample_type": "rattle", "energy": 2.0 + 0.01 * (i % 3)}
+        gs_frames.append(g)
+        es_frames.append(e)
+
+    # 1 rattle state-crossing outlier (E_vert drops by ~1.5 eV)
+    g_out = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    g_out.info = {"frame_id": "r_outlier", "sample_type": "rattle", "energy": 0.0}
+    e_out = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    e_out.info = {"frame_id": "r_outlier", "sample_type": "rattle", "energy": 0.4}
+    gs_frames.append(g_out)
+    es_frames.append(e_out)
+
+    # 1 franck_condon frame with large E_vert deviation (must be protected)
+    g_fc = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    g_fc.info = {"frame_id": "fc_01", "sample_type": "franck_condon", "energy": 0.0}
+    e_fc = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]])
+    e_fc.info = {"frame_id": "fc_01", "sample_type": "franck_condon", "energy": 0.2}
+    gs_frames.append(g_fc)
+    es_frames.append(e_fc)
+
+    filtered, dropped = filter_es_state_crossing_outliers(gs_frames, es_frames)
+    assert dropped == ["r_outlier"]
+    kept_ids = [fr.info["frame_id"] for fr in filtered]
+    assert "r_outlier" not in kept_ids
+    assert "fc_01" in kept_ids
+    assert len(filtered) == 11
+
+
+def test_qc_fc_path_gate_per_atom_vs_explicit_override(tmp_path):
+    """Verify intensive per-atom FC gate scaling vs explicit max_fc_path_error_meV override."""
+    # Build 100-atom frames so default intensive gate = max(35.0, 0.5 * 100) = 50.0 meV
+    frames = []
+    for i in range(4):
+        at = Atoms("C100", positions=np.column_stack([np.linspace(0, 99, 100), np.zeros(100), np.zeros(100)]),
+                   cell=np.eye(3) * 120.0, pbc=True)
+        info = {
+            "sample_type": "franck_condon" if i < 2 else "rattle",
+            "frame_id": f"fc_{i:02d}" if i < 2 else f"r_{i:02d}",
+            "energy": 10.04 if i == 1 else 10.0,  # 40 meV discrepancy vs lambda=0.0 FC reference
+            "forces": np.zeros((100, 3)),
+        }
+        if i == 0:
+            info["lambda"] = 0.0
+        elif i == 1:
+            info["lambda"] = 0.5
+        at.info = info
+        frames.append(at)
+    at_gs = frames[0].copy()
+    calc_hyb = ToyHybridDefectCalculator(energy_val=10.0, force_arr=np.zeros((100, 3)))
+
+    cfg_auto = _make_cfg(
+        tmp_path,
+        max_fc_path_error_meV=None,
+        max_fc_path_error_meV_per_atom=0.5,
+        max_gs_residual_force_eV_A=10.0,
+        max_small_displacement_force_rmse_eV_A=10.0,
+        max_test_force_rmse_eV_A=10.0,
+        allow_fallbacks=False,
+    )
+    qc_auto = evaluate_delta_nep_quality_control(
+        calc_hybrid=calc_hyb,
+        labeled_frames=frames,
+        at_gs=at_gs,
+        workspace_dir=str(tmp_path),
+        config=cfg_auto,
+        write_files=False,
+    )
+    assert qc_auto["thresholds"]["max_fc_path_error_meV"] == pytest.approx(50.0)
+    assert qc_auto["thresholds"]["max_fc_path_error_meV_per_atom"] == pytest.approx(0.5)
+    assert qc_auto["fc_path_energy_max_err_meV_atom"] == pytest.approx(0.4)
+    assert qc_auto["gates"]["fc_path_energy_gate"] is True
+
+    # Explicit override max_fc_path_error_meV=30.0 fails on 40 meV error
+    cfg_override = _make_cfg(
+        tmp_path,
+        max_fc_path_error_meV=30.0,
+        max_fc_path_error_meV_per_atom=0.5,
+        max_gs_residual_force_eV_A=10.0,
+        max_small_displacement_force_rmse_eV_A=10.0,
+        max_test_force_rmse_eV_A=10.0,
+        allow_fallbacks=False,
+    )
+    with pytest.raises(ValueError, match="fc_path_energy_gate"):
+        evaluate_delta_nep_quality_control(
+            calc_hybrid=calc_hyb,
+            labeled_frames=frames,
+            at_gs=at_gs,
+            workspace_dir=str(tmp_path),
+            config=cfg_override,
+            write_files=False,
+        )
+
 

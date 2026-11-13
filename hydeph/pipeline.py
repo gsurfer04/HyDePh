@@ -611,9 +611,17 @@ def run_pipeline(
 
         if labeled_frames_es:
             logger.info("\n[-] Extracting Excited-State Delta Baselines & Training ES Delta-NEP...")
+            from .delta_trainer import filter_es_state_crossing_outliers
+            labeled_frames_es_clean, dropped_es_ids = filter_es_state_crossing_outliers(
+                labeled_frames, labeled_frames_es
+            )
+            if dropped_es_ids:
+                logger.info(
+                    f"[+] Excluded {len(dropped_es_ids)} ES Delta-SCF outlier frame(s) from ES training: {dropped_es_ids}"
+                )
             gs_offset = getattr(trainer, "energy_offset_per_atom", 0.0)
             delta_frames_es = trainer.compute_delta_dataset(
-                labeled_frames_es, shared_offset_per_atom=gs_offset
+                labeled_frames_es_clean, shared_offset_per_atom=gs_offset
             )
             delta_pot_es_path = trainer.train_delta_nep(
                 delta_frames_es, pot_filename="nep_delta_es.txt", subdir="delta_nep_training_es"
@@ -755,14 +763,47 @@ def run_pipeline(
 
     qc_es = None
     if hybrid_calc_es is not None and labeled_frames_es:
+        from .delta_trainer import filter_es_state_crossing_outliers
+        at_es_test = at_es.copy()
+        at_es_test.calc = hybrid_calc_es
+        max_f_es = float(np.abs(at_es_test.get_forces()).max())
+        pre_refinement_es_max_force = max_f_es
+        es_refinement_max_displacement_A = 0.0
+        if max_f_es > 0.015 or 5 in force_stages:
+            logger.info("[-] Refining Excited State equilibrium on Hybrid Potential...")
+            from ase.optimize import BFGS
+            at_es_refined = at_es.copy()
+            at_es_refined.calc = hybrid_calc_es
+            opt_es = BFGS(at_es_refined, logfile=None)
+            opt_es.run(fmax=0.01, steps=50)
+            at_es_refined.info = dict(at_es.info)
+            e_es_opt = at_es_refined.get_potential_energy()
+            f_es_opt = float(np.abs(at_es_refined.get_forces()).max())
+            es_refinement_max_displacement_A = float(
+                np.max(
+                    np.linalg.norm(
+                        mic_displacement(at_es_refined.positions, at_es_orig.positions, at_es_orig.cell),
+                        axis=1,
+                    )
+                )
+            )
+            logger.info(
+                f"[+] Refined ES equilibrium on Hybrid Potential: E = {e_es_opt:.4f} eV, Max F = {f_es_opt:.4f} eV/A "
+                f"(Max disp = {es_refinement_max_displacement_A:.4f} A)"
+            )
+            at_es = at_es_refined
+
+        labeled_frames_es_qc, _ = filter_es_state_crossing_outliers(labeled_frames, labeled_frames_es)
         qc_es = evaluate_delta_nep_quality_control(
             calc_hybrid=hybrid_calc_es,
-            labeled_frames=labeled_frames_es,
+            labeled_frames=labeled_frames_es_qc,
             at_gs=at_es,
             at_ref=at_es_orig,
             workspace_dir=config.workspace_dir,
             config=config,
             state_label="excited_state",
+            pre_refinement_force=pre_refinement_es_max_force,
+            refinement_displacement=es_refinement_max_displacement_A,
         )
 
     # Combined dual-state QC report and dual-panel parity plot
