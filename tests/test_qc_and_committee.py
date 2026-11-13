@@ -315,3 +315,31 @@ def test_validate_dominant_modes_dft(tmp_path):
     assert rep["dft_evaluator_used"] is True
     assert len(rep["modes"]) == 2
     assert os.path.isfile(tmp_path / "mode_curvature_validation.json")
+
+
+def test_qc_reads_energy_from_calculator_when_missing_from_info(tmp_path):
+    """Verify evaluate_delta_nep_quality_control reads SinglePointCalculator energies when info lacks 'energy'."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    cfg = _make_cfg(tmp_path, allow_fallbacks=True)
+    frames = []
+    for i in range(6):
+        at = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]], cell=np.eye(3) * 10.0, pbc=True)
+        at.info["sample_type"] = "rattle"
+        at.info["frame_id"] = f"r_{i:02d}"
+        at.calc = SinglePointCalculator(at, energy=12.0 + 0.2 * i, forces=np.zeros((2, 3)))
+        frames.append(at)
+
+    at_gs = frames[0].copy()
+    calc_hyb = ToyHybridDefectCalculator(energy_val=10.0, force_arr=np.zeros((2, 3)))
+    qc = evaluate_delta_nep_quality_control(
+        calc_hybrid=calc_hyb,
+        labeled_frames=frames,
+        at_gs=at_gs,
+        workspace_dir=str(tmp_path),
+        config=cfg,
+        write_files=False,
+    )
+    assert qc["train_energy_rmse_meV_atom"] > 500.0
+    assert qc["test_energy_rmse_meV_atom"] > 500.0
+

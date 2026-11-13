@@ -177,3 +177,88 @@ def test_acoustic_cutoff_first_moment_shift():
     # Cutting low-frequency modes must increase the average first moment
     assert m_after > m_before
     assert (m_after - m_before) > 0.5  # Noticeable meV shift
+
+
+def test_rattle_displacement_guard_prevents_short_bond_collisions(tmp_path):
+    """Verify displacement guard caps sigma on stiff short-bond crystals and enforces min pair floor."""
+    from ase.build import bulk
+    from hydeph.defect_builder import mic_displacement
+    from hydeph.frame_sampler import (
+        DEFAULT_MAX_DISP_RATIO,
+        DEFAULT_MAX_SIGMA_BOND_RATIO,
+        DEFAULT_MIN_BOND_RATIO,
+        apply_displacement_guard,
+        min_interatomic_distance,
+    )
+
+    # Diamond cubic SiC-like stiff cell (~1.82 A bond length after scaling)
+    at_gs = bulk("SiC", crystalstructure="zincblende", a=4.20).repeat((2, 2, 2))
+    d_min_ref = min_interatomic_distance(at_gs)
+    assert 1.75 < d_min_ref < 1.90
+
+    cfg = _make_cfg(tmp_path / "ws_stiff", n_phonon_frames=10, random_seed=42)
+    sampler = FrameSampler(cfg, calc_foundation=MagicMock())
+    rattles = sampler.sample_defect_core_rattling(at_gs, n_frames=10)
+
+    assert len(rattles) == 10
+    for fr in rattles:
+        assert min_interatomic_distance(fr) >= DEFAULT_MIN_BOND_RATIO * d_min_ref - 1e-4
+        assert fr.info["rattle_sigma"] <= DEFAULT_MAX_SIGMA_BOND_RATIO * d_min_ref + 1e-6
+        dr = mic_displacement(fr.positions, at_gs.positions, at_gs.cell, pbc=at_gs.pbc)
+        max_atom_disp = float(np.max(np.linalg.norm(dr, axis=1)))
+        assert max_atom_disp <= DEFAULT_MAX_DISP_RATIO * d_min_ref + 1e-4
+
+    # Adversarial head-on collision displacement must be scaled back smoothly
+    head_on = np.zeros_like(at_gs.positions)
+    pair_vec = mic_displacement(at_gs.positions[1], at_gs.positions[0], at_gs.cell, pbc=at_gs.pbc)
+    head_on[0] = 0.35 * pair_vec
+    head_on[1] = -0.35 * pair_vec
+    guarded, scale = apply_displacement_guard(at_gs, head_on)
+    assert 0.0 < scale < 1.0
+    trial = at_gs.copy()
+    trial.positions += guarded
+    assert min_interatomic_distance(trial) >= DEFAULT_MIN_BOND_RATIO * d_min_ref - 1e-4
+
+    # Soft wide-bond crystal (~3.9 A): normal 0.08/0.14 A sigmas stay uncapped
+    at_wide = bulk("CsCl", crystalstructure="cesiumchloride", a=4.50).repeat((2, 2, 2))
+    d_wide_ref = min_interatomic_distance(at_wide)
+    cfg_wide = _make_cfg(tmp_path / "ws_wide", n_phonon_frames=4, random_seed=7)
+    sampler_wide = FrameSampler(cfg_wide, calc_foundation=MagicMock())
+    rattles_wide = sampler_wide.sample_defect_core_rattling(at_wide, n_frames=4)
+    assert np.isclose(rattles_wide[0].info["rattle_sigma"], 0.08)
+    assert np.isclose(rattles_wide[1].info["rattle_sigma"], 0.14)
+    assert min_interatomic_distance(rattles_wide[1]) >= DEFAULT_MIN_BOND_RATIO * d_wide_ref - 1e-4
+
+
+def test_md_fps_skips_step0_and_deduplicates_frames(tmp_path):
+    """Verify sample_foundation_md_with_fps skips step 0 and rejects duplicates against GS/ES and itself."""
+    from ase.calculators.calculator import Calculator, all_changes
+    from hydeph.frame_sampler import is_duplicate_geometry
+
+    at_gs = Atoms("SiC", positions=[[0, 0, 0], [1.82, 0, 0]], cell=[6.0, 6.0, 6.0], pbc=True)
+    at_es = at_gs.copy()
+    at_es.positions[1, 0] += 0.10
+    eq_pos_gs = at_gs.positions.copy()
+
+    class HarmonicSpringCalc(Calculator):
+        implemented_properties = ["energy", "forces"]
+
+        def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            disp = atoms.positions - eq_pos_gs
+            self.results["energy"] = 2.0 * float(np.sum(disp ** 2))
+            self.results["forces"] = -4.0 * disp
+
+    cfg = _make_cfg(tmp_path / "ws_md_dedup", n_md_frames=6, md_temp_exploration=300.0)
+    sampler = FrameSampler(cfg, calc_foundation=HarmonicSpringCalc())
+
+    selected = sampler.sample_foundation_md_with_fps(
+        at_gs, at_es=at_es, n_select=6, n_steps=160, dt_fs=1.0
+    )
+    assert len(selected) == 6
+    for i, fr in enumerate(selected):
+        assert not is_duplicate_geometry(fr, at_gs)
+        assert not is_duplicate_geometry(fr, at_es)
+        for j in range(i):
+            assert not is_duplicate_geometry(fr, selected[j])
+

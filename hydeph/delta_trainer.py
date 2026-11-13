@@ -761,15 +761,13 @@ def evaluate_delta_nep_quality_control(
             at.calc = calc_hybrid
             ep = float(at.get_potential_energy())
             fp = np.asarray(at.get_forces(), dtype=float)
-            et = float(fr.info.get("energy", ep))
-            if "forces" in fr.arrays:
-                ft = np.asarray(fr.arrays["forces"], dtype=float)
-            elif fr.calc is not None:
-                try:
-                    ft = np.asarray(fr.get_forces(), dtype=float)
-                except Exception:
-                    ft = fp.copy()
-            else:
+            try:
+                et = get_frame_energy(fr)
+            except KeyError:
+                et = ep
+            try:
+                ft = get_frame_forces(fr)
+            except KeyError:
                 ft = fp.copy()
             e_true.append(et)
             e_pred.append(ep)

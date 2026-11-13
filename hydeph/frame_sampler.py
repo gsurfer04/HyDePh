@@ -9,6 +9,7 @@ from typing import List, Optional
 import numpy as np
 import ase.io
 from ase import Atoms
+from ase.geometry import get_distances
 from calorine.calculators import CPUNEP  # noqa: F401
 
 from .config import ToolkitConfig
@@ -18,6 +19,11 @@ from .defect_builder import mic_displacement, mic_distances, get_defect_center
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MIN_BOND_RATIO = 0.85
+DEFAULT_MAX_DISP_RATIO = 0.20
+DEFAULT_MAX_SIGMA_BOND_RATIO = 0.055
+DEFAULT_DUPLICATE_TOL_A = 1e-3
 
 
 def farthest_point_sampling(descriptor_matrix: np.ndarray, n_select: int) -> List[int]:
@@ -64,6 +70,86 @@ def clean_candidate_atoms(atoms: Atoms) -> Atoms:
 def get_rattle_sigma(index: int) -> float:
     """Returns standardized defect-core rattle sigma (0.08 A for even indices, 0.14 A for odd indices)."""
     return 0.08 if int(index) % 2 == 0 else 0.14
+
+
+def min_interatomic_distance(atoms: Atoms) -> float:
+    """Returns the minimum pairwise minimum-image distance (in A), or inf if fewer than 2 atoms."""
+    if len(atoms) < 2:
+        return float("inf")
+    _, dists = get_distances(atoms.positions, cell=atoms.cell, pbc=atoms.pbc)
+    np.fill_diagonal(dists, np.inf)
+    return float(np.min(dists))
+
+
+def is_duplicate_geometry(
+    atoms_a: Atoms,
+    atoms_b: Atoms,
+    tol: float = DEFAULT_DUPLICATE_TOL_A,
+) -> bool:
+    """Returns True when two periodic structures match within `tol` (in A) modulo rigid translation."""
+    if len(atoms_a) != len(atoms_b) or atoms_a.get_chemical_symbols() != atoms_b.get_chemical_symbols():
+        return False
+    if len(atoms_a) == 0:
+        return True
+    if np.max(np.abs(atoms_a.cell.array - atoms_b.cell.array)) > tol:
+        return False
+    dr = mic_displacement(atoms_a.positions, atoms_b.positions, atoms_a.cell, pbc=atoms_a.pbc)
+    if len(atoms_a) > 1:
+        dr = dr - np.mean(dr, axis=0, keepdims=True)
+    return bool(np.max(np.linalg.norm(dr, axis=1)) < tol)
+
+
+def _cap_rattle_sigma(
+    raw_sigma: float,
+    d_min_ref: float,
+    max_sigma_ratio: float = DEFAULT_MAX_SIGMA_BOND_RATIO,
+) -> float:
+    """Caps Gaussian rattle sigma proportionally to shortest equilibrium bond length."""
+    if np.isfinite(d_min_ref) and d_min_ref > 0.0:
+        return float(min(raw_sigma, max_sigma_ratio * d_min_ref))
+    return float(raw_sigma)
+
+
+def apply_displacement_guard(
+    ref_atoms: Atoms,
+    displacements: np.ndarray,
+    min_bond_ratio: float = DEFAULT_MIN_BOND_RATIO,
+    max_disp_ratio: float = DEFAULT_MAX_DISP_RATIO,
+    d_min_ref: Optional[float] = None,
+) -> tuple[np.ndarray, float]:
+    """Scales displacements so per-atom shifts and min pair distance stay within physical bounds.
+
+    Returns ``(guarded_displacements, scale_factor)``.
+    """
+    disp = np.asarray(displacements, dtype=float)
+    d_ref = min_interatomic_distance(ref_atoms) if d_min_ref is None else float(d_min_ref)
+    if len(ref_atoms) < 2 or not np.isfinite(d_ref) or d_ref <= 0.0:
+        return disp, 1.0
+
+    max_norm = float(np.max(np.linalg.norm(disp, axis=1)))
+    if max_norm <= 0.0:
+        return disp, 1.0
+
+    scale = 1.0
+    max_allowed_disp = max_disp_ratio * d_ref
+    if max_norm > max_allowed_disp:
+        scale = min(scale, max_allowed_disp / max_norm)
+
+    d_floor = min_bond_ratio * d_ref
+    trial = ref_atoms.copy()
+    trial.positions = ref_atoms.positions + scale * disp
+    if min_interatomic_distance(trial) < d_floor:
+        lo, hi = 0.0, scale
+        for _ in range(18):
+            mid = 0.5 * (lo + hi)
+            trial.positions = ref_atoms.positions + mid * disp
+            if min_interatomic_distance(trial) >= d_floor:
+                lo = mid
+            else:
+                hi = mid
+        scale = lo
+
+    return disp * scale, float(scale)
 
 
 class FrameSampler:
@@ -152,19 +238,24 @@ class FrameSampler:
 
         n_es = (n_frames // 2) if (at_es is not None and n_frames >= 2) else 0
         n_gs = n_frames - n_es
+        d_min_gs = min_interatomic_distance(at_gs)
+        d_min_es = min_interatomic_distance(at_es) if at_es is not None else d_min_gs
 
         rattle_frames = []
+        n_guarded = 0
         for i in range(n_frames):
             use_es = (i >= n_gs and at_es is not None)
             ref_atoms = at_es if use_es else at_gs
             ref_state = "excited" if use_es else "ground"
+            d_ref = d_min_es if use_es else d_min_gs
 
             at = clean_candidate_atoms(ref_atoms)
             center = get_defect_center(ref_atoms)
             dists = mic_distances(ref_atoms.positions, center, ref_atoms.cell)
             core_mask = dists < cutoff
 
-            sigma = get_rattle_sigma(i)
+            raw_sigma = get_rattle_sigma(i)
+            sigma = _cap_rattle_sigma(raw_sigma, d_ref)
             displacements = rng.normal(0.0, sigma, at.positions.shape)
 
             if mode == "whole":
@@ -177,18 +268,26 @@ class FrameSampler:
                 else:
                     displacements[~core_mask] *= 0.15
 
+            displacements, guard_scale = apply_displacement_guard(ref_atoms, displacements, d_min_ref=d_ref)
+            if sigma < raw_sigma - 1e-6 or guard_scale < 1.0 - 1e-6:
+                n_guarded += 1
+
             at.positions += displacements
             label = f"rattle_{i:02d}"
             at.info["sample_type"] = "core_rattle"
             at.info["frame_id"] = label
             at.info["label"] = label
             at.info["rattle_sigma"] = float(sigma)
+            if guard_scale < 1.0 - 1e-6:
+                at.info["displacement_guard_scale"] = float(guard_scale)
             at.info["reference_state"] = ref_state
             rattle_frames.append(at)
 
         logger.info(
             f"[+] Phase 2: Generated {len(rattle_frames)} rattle frames "
-            f"(mode='{mode}', cutoff={cutoff} A, GS={n_gs}, ES={n_es})"
+            f"(mode='{mode}', cutoff={cutoff} A, GS={n_gs}, ES={n_es}"
+            + (f", displacement-guarded={n_guarded}" if n_guarded else "")
+            + ")"
         )
         return rattle_frames
 
@@ -205,12 +304,15 @@ class FrameSampler:
 
         n_es = (n_frames // 2) if (at_es is not None and n_frames >= 2) else 0
         n_gs = n_frames - n_es
+        d_min_gs = min_interatomic_distance(at_gs)
+        d_min_es = min_interatomic_distance(at_es) if at_es is not None else d_min_gs
 
         frames = []
         for i in range(n_frames):
             use_es = (i >= n_gs and at_es is not None)
             ref_atoms = at_es if use_es else at_gs
             ref_state = "excited" if use_es else "ground"
+            d_ref = d_min_es if use_es else d_min_gs
 
             at = clean_candidate_atoms(ref_atoms)
             center = get_defect_center(ref_atoms)
@@ -222,6 +324,7 @@ class FrameSampler:
             if i % 3 != 0:
                 displacements[~core_mask] *= 0.15
 
+            displacements, guard_scale = apply_displacement_guard(ref_atoms, displacements, d_min_ref=d_ref)
             at.positions += displacements
             label = f"hessian_rattle_{i:02d}"
             at.info["sample_type"] = "core_rattle"
@@ -229,6 +332,8 @@ class FrameSampler:
             at.info["frame_id"] = label
             at.info["label"] = label
             at.info["rattle_sigma"] = float(sigma)
+            if guard_scale < 1.0 - 1e-6:
+                at.info["displacement_guard_scale"] = float(guard_scale)
             at.info["reference_state"] = ref_state
             frames.append(at)
 
@@ -246,24 +351,29 @@ class FrameSampler:
             pristine_uc = ase.io.read(self.config.pristine_cell_path)
             supercell_rep = getattr(self.config, "supercell_repeat", (2, 2, 2))
             pristine_sc = pristine_uc.repeat(supercell_rep)
+            d_min_prist = min_interatomic_distance(pristine_sc)
+            eff_sigma = _cap_rattle_sigma(sigma, d_min_prist)
 
             seed = self.config.random_seed + 900
             rng = np.random.RandomState(seed)
             pristine_frames = []
             for i in range(n_frames):
                 at = clean_candidate_atoms(pristine_sc)
-                displacements = rng.normal(0.0, sigma, at.positions.shape)
+                displacements = rng.normal(0.0, eff_sigma, at.positions.shape)
+                displacements, guard_scale = apply_displacement_guard(pristine_sc, displacements, d_min_ref=d_min_prist)
                 at.positions += displacements
                 label = f"pristine_rattle_{i:02d}"
                 at.info["sample_type"] = "pristine_rattle"
                 at.info["frame_id"] = label
                 at.info["label"] = label
-                at.info["rattle_sigma"] = float(sigma)
+                at.info["rattle_sigma"] = float(eff_sigma)
+                if guard_scale < 1.0 - 1e-6:
+                    at.info["displacement_guard_scale"] = float(guard_scale)
                 at.info["is_pristine"] = True
                 pristine_frames.append(at)
 
             logger.info(
-                f"[+] Phase 2c: Generated {len(pristine_frames)} rattled pristine supercell frames (sigma = {sigma:.3f} A)"
+                f"[+] Phase 2c: Generated {len(pristine_frames)} rattled pristine supercell frames (sigma = {eff_sigma:.3f} A)"
             )
             return pristine_frames
         except Exception as e:
@@ -289,6 +399,10 @@ class FrameSampler:
         targets = [("ground", at_gs, n_gs_select, 101, "sampling_trajectory_gs.traj")]
         if n_es_select > 0 and at_es is not None:
             targets.append(("excited", at_es, n_es_select, 201, "sampling_trajectory_es.traj"))
+
+        reference_frames: List[Atoms] = [at_gs]
+        if at_es is not None:
+            reference_frames.append(at_es)
 
         selected_frames = []
         global_md_idx = 0
@@ -332,14 +446,58 @@ class FrameSampler:
             traj_writer.close()
 
             trajectory = ase.io.read(traj_file, ":")
+            # Step 0 written by dyn.attach is identical to init_atoms (already in FC phase).
+            raw_pool = list(trajectory[1:]) if len(trajectory) > 1 else list(trajectory)
+            seen_external = reference_frames + selected_frames
+            traj_pool = [
+                fr for fr in raw_pool
+                if not any(is_duplicate_geometry(fr, ref) for ref in seen_external)
+            ]
+            n_filtered = len(raw_pool) - len(traj_pool)
             logger.info(
-                f"[+] Phase 3 ({state_name}): Propagated {len(trajectory)} MD trajectory frames at {temp_k} K"
+                f"[+] Phase 3 ({state_name}): Propagated {len(trajectory)} MD trajectory frames at {temp_k} K "
+                f"({len(traj_pool)} unique post-step-0 candidates"
+                + (f", {n_filtered} duplicate(s) skipped" if n_filtered else "")
+                + ")"
             )
 
-            feature_matrix = self._compute_core_descriptors(trajectory, init_atoms)
-            selected_indices = farthest_point_sampling(feature_matrix, n_pick)
-            for idx in selected_indices:
-                fr = clean_candidate_atoms(trajectory[idx])
+            if len(traj_pool) < n_pick:
+                logger.warning(
+                    f"[!] Phase 3 ({state_name}): Only {len(traj_pool)} unique MD frames available for {n_pick} requested picks."
+                )
+                for fr in raw_pool:
+                    if len(traj_pool) >= n_pick:
+                        break
+                    if all(fr is not kept for kept in traj_pool):
+                        traj_pool.append(fr)
+
+            feature_matrix = self._compute_core_descriptors(traj_pool, init_atoms)
+            ranked_count = len(traj_pool) if n_pick >= len(traj_pool) else min(len(traj_pool), max(n_pick * 3, n_pick + 10))
+            ranked_indices = farthest_point_sampling(feature_matrix, ranked_count)
+
+            chosen_for_state: List[Atoms] = []
+            used_indices = set()
+            for idx in ranked_indices:
+                cand = traj_pool[idx]
+                if not any(is_duplicate_geometry(cand, prev) for prev in chosen_for_state):
+                    chosen_for_state.append(cand)
+                    used_indices.add(idx)
+                    if len(chosen_for_state) >= n_pick:
+                        break
+
+            # Scan remaining non-selected pool frames if internal trajectory duplicates reduced picks
+            if len(chosen_for_state) < n_pick:
+                for idx, cand in enumerate(traj_pool):
+                    if idx in used_indices:
+                        continue
+                    if not any(is_duplicate_geometry(cand, prev) for prev in chosen_for_state):
+                        chosen_for_state.append(cand)
+                        used_indices.add(idx)
+                        if len(chosen_for_state) >= n_pick:
+                            break
+
+            for cand in chosen_for_state:
+                fr = clean_candidate_atoms(cand)
                 label = f"md_fps_{global_md_idx:02d}"
                 fr.info["sample_type"] = "foundation_md_fps"
                 fr.info["reference_state"] = state_name
@@ -473,18 +631,23 @@ class FrameSampler:
         base_seed = self.config.random_seed
         at = clean_candidate_atoms(at_gs)
 
+        d_ref = min_interatomic_distance(at)
+
         if sample_type == "core_rattle":
             rng = np.random.RandomState(base_seed + 1000 + int(type_index))
             center = get_defect_center(at)
             dists = mic_distances(at.positions, center, at.cell)
             core_mask = dists < r_cutoff
-            sigma = get_rattle_sigma(type_index)
+            sigma = _cap_rattle_sigma(get_rattle_sigma(type_index), d_ref)
             displacements = rng.normal(0.0, sigma, at.positions.shape)
             displacements[~core_mask] *= 0.15
+            displacements, guard_scale = apply_displacement_guard(at, displacements, d_min_ref=d_ref)
             at.positions += displacements
             label = f"rattle_{type_index:02d}"
             at.info["sample_type"] = "core_rattle"
             at.info["rattle_sigma"] = float(sigma)
+            if guard_scale < 1.0 - 1e-6:
+                at.info["displacement_guard_scale"] = float(guard_scale)
         elif sample_type == "foundation_md_fps":
             rng = np.random.RandomState(base_seed + 2000 + int(type_index))
             if self.calc_foundation is not None:
@@ -506,7 +669,9 @@ class FrameSampler:
                 dyn.run(100)
                 at = clean_candidate_atoms(at)
             else:
-                displacements = rng.normal(0.0, 0.10, at.positions.shape)
+                sigma_fb = _cap_rattle_sigma(0.10, d_ref)
+                displacements = rng.normal(0.0, sigma_fb, at.positions.shape)
+                displacements, _ = apply_displacement_guard(at, displacements, d_min_ref=d_ref)
                 at.positions += displacements
             label = f"md_fps_{type_index:02d}"
             at.info["sample_type"] = "foundation_md_fps"
