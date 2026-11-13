@@ -474,3 +474,82 @@ def test_qe_second_failure_replaced_when_enabled(tmp_path):
     assert ids == ["fc_00", "rattle_01", "md_fps_01"]
     assert types == ["franck_condon", "core_rattle", "foundation_md_fps"]
 
+
+def test_pipeline_stage4_recovers_from_corrupted_labeled_xyz(tmp_path):
+    """If labeled_dft_frames.xyz is corrupted (e.g. legacy multiline extxyz), resuming Stage 4 ingests from disk."""
+    import ase.io
+    from hydeph.pipeline import run_pipeline
+    from hydeph.qe.io import write_qe_input
+
+    ws = tmp_path / "ws_recover"
+    ws.mkdir()
+
+    pristine_path = tmp_path / "pristine.xyz"
+    defect_path = tmp_path / "defect.xyz"
+    atoms_p = Atoms("Si2C2", positions=[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]], cell=[6, 6, 6], pbc=True)
+    atoms_d = atoms_p.copy()
+    ase.io.write(pristine_path, atoms_p, format="extxyz")
+    ase.io.write(defect_path, atoms_d, format="extxyz")
+
+    gs_xyz = ws / "relaxed_gs.xyz"
+    es_xyz = ws / "relaxed_es.xyz"
+    cand_xyz = ws / "candidate_frames.xyz"
+    at_cand = atoms_d.copy()
+    at_cand.info["frame_id"] = "fc_00"
+    at_cand.info["sample_type"] = "franck_condon"
+    at_cand.info["lambda"] = 0.0
+    at_cand.info["candidate_index"] = 0
+    ase.io.write(gs_xyz, at_cand, format="extxyz")
+    ase.io.write(es_xyz, at_cand, format="extxyz")
+    ase.io.write(cand_xyz, [at_cand], format="extxyz")
+
+    # Write malformed labeled_dft_frames.xyz (simulating legacy multiline dft_level_diagram)
+    (ws / "labeled_dft_frames.xyz").write_text(
+        '4\nLattice="6 0 0 0 6 0 0 0 6" Properties=species:S:1:pos:R:3 dft_level_diagram="+\n| band |\n+"\nSi 0 0 0\nSi 1 1 1\nC 2 2 2\nC 3 3 3\n',
+        encoding="utf-8",
+    )
+
+    pseudo_dir = tmp_path / "pseudo"
+    pseudo_dir.mkdir()
+    (pseudo_dir / "Si.UPF").write_text('<PP_HEADER z_valence="4.0"/>', encoding="utf-8")
+    (pseudo_dir / "C.UPF").write_text('<PP_HEADER z_valence="4.0"/>', encoding="utf-8")
+    pot_path = tmp_path / "nep_dummy.txt"
+    pot_path.write_text("dummy", encoding="utf-8")
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_path),
+        defect_cell_path=str(defect_path),
+        foundation_potential_path=str(pot_path),
+        workspace_dir=str(ws),
+        pseudo_dir=str(pseudo_dir),
+        pseudopotentials={"Si": "Si.UPF", "C": "C.UPF"},
+        spin_polarized=False,
+    )
+
+    calc_dir = ws / "dft_calculations" / "frame_000_fc_00"
+    calc_dir.mkdir(parents=True)
+    write_qe_input(at_cand, str(calc_dir / "pw.in"), cfg)
+    (calc_dir / "pw.out").write_text(
+        "!    total energy              =     -40.00000000 Ry\n"
+        "     Forces acting on atoms (cartesian axes, Ry/au):\n"
+        "     atom    1 type  1   force =     0.00000000     0.00000000     0.00000000\n"
+        "     atom    2 type  1   force =     0.00000000     0.00000000     0.00000000\n"
+        "     atom    3 type  2   force =     0.00000000     0.00000000     0.00000000\n"
+        "     atom    4 type  2   force =     0.00000000     0.00000000     0.00000000\n"
+        "     JOB DONE.\n",
+        encoding="utf-8",
+    )
+
+    with patch("hydeph.defect_builder.load_foundation_calculator", return_value=MagicMock()), \
+         patch("hydeph.delta_trainer.load_foundation_calculator", return_value=MagicMock()), \
+         patch("hydeph.delta_trainer.DeltaTrainer.compute_delta_dataset", side_effect=lambda frames, **kw: frames) as mock_comp, \
+         patch("hydeph.delta_trainer.DeltaTrainer.train_delta_nep", return_value=str(ws / "nep_delta_gs.txt")):
+        res = run_pipeline(cfg, from_stage=4, to_stage=4)
+
+    assert mock_comp.called
+    assert len(mock_comp.call_args[0][0]) == 1
+    assert res["stage"] == 4
+    reloaded = ase.io.read(str(ws / "labeled_dft_frames.xyz"), index=":")
+    assert len(reloaded) == 1
+
+

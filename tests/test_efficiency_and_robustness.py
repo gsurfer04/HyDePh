@@ -253,3 +253,76 @@ def test_qe_runner_parallel_workers_and_timeout(tmp_path):
     assert len(labeled) == 3
     by_id = {f.info["frame_id"]: f for f in labeled}
     assert by_id["rattle_00"].info["qe_status"] == "converged_on_retry"
+
+
+def test_delta_trainer_sanitizes_nep_train_test_xyz(tmp_path):
+    """DeltaTrainer strips multiline metadata and extra arrays from GPUMD train.xyz and test.xyz."""
+    import ase.io
+
+    frames = []
+    for i in range(5):
+        at = Atoms(
+            "SiC",
+            positions=[[0.0, 0.0, 0.0], [1.5 + 0.02 * i, 1.5, 1.5]],
+            cell=[5.0, 5.0, 5.0],
+            pbc=True,
+        )
+        at.info["sample_type"] = "franck_condon" if i < 2 else "core_rattle"
+        at.info["frame_id"] = f"fr_{i:02d}"
+        if i == 0:
+            at.info["lambda"] = 0.0
+        elif i == 1:
+            at.info["lambda"] = 1.0
+        at.info["energy"] = -0.5 - 0.1 * i
+        at.info["e_base"] = -10.0
+        at.info["e_dft"] = -10.5 - 0.1 * i
+        at.info["dft_level_diagram"] = "+---+\n| Band 1 |\n+---+"
+        at.arrays["forces"] = np.full((2, 3), 0.01 * (i + 1))
+        at.arrays["f_base"] = np.zeros((2, 3))
+        at.arrays["f_dft"] = np.full((2, 3), 0.01 * (i + 1))
+        frames.append(at)
+
+    mock_nep = tmp_path / "mock_nep_strict_xyz.py"
+    mock_nep.write_text(
+        f"#!{sys.executable}\n"
+        "for fname in ('train.xyz', 'test.xyz'):\n"
+        "    with open(fname, 'r', encoding='utf-8') as f:\n"
+        "        lines = [ln.rstrip('\\n') for ln in f if ln.strip()]\n"
+        "    idx = 0\n"
+        "    while idx < len(lines):\n"
+        "        nat = int(lines[idx])\n"
+        "        header = lines[idx + 1]\n"
+        "        assert 'Properties=species:S:1:pos:R:3:forces:R:3' in header, header\n"
+        "        assert 'f_base' not in header and 'f_dft' not in header, header\n"
+        "        assert 'dft_level_diagram' not in header, header\n"
+        "        for a in range(nat):\n"
+        "            cols = lines[idx + 2 + a].split()\n"
+        "            assert len(cols) == 7, f'Expected 7 columns, got {len(cols)}: {cols}'\n"
+        "        idx += 2 + nat\n"
+        "with open('nep.txt', 'w', encoding='utf-8') as f:\n"
+        "    f.write('nep4_mock\\n')\n",
+        encoding="utf-8",
+    )
+    os.chmod(mock_nep, 0o755)
+
+    ws = tmp_path / "ws_sanitize"
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(tmp_path),
+        workspace_dir=str(ws),
+        nep_exe=str(mock_nep),
+        nep_committee_size=2,
+    )
+    trainer = DeltaTrainer(cfg)
+    pot_path = trainer.train_delta_nep(frames, subdir="delta_nep_training_gs")
+    assert os.path.isfile(pot_path)
+
+    for xyz_rel in (
+        "delta_nep_training_gs/train.xyz",
+        "delta_nep_training_gs/test.xyz",
+        "delta_nep_training_gs/model_1/train.xyz",
+        "delta_nep_training_gs/model_1/test.xyz",
+    ):
+        loaded = ase.io.read(str(ws / xyz_rel), index=":")
+        assert len(loaded) >= 1
+        assert "f_base" not in loaded[0].arrays
+        assert "dft_level_diagram" not in loaded[0].info

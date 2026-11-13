@@ -531,11 +531,42 @@ def run_pipeline(
                 logger.warning("[-] Skipping exact adiabatic energetics: lambda=0 and lambda=1 anchor frames not both present in dataset.")
     else:
         logger.info(f"\n[STEP 3/6] Skipping DFT Labeling (resuming from stage {from_stage})...")
-        if not os.path.isfile(labeled_xyz):
-            dft_calc_dir = os.path.join(config.workspace_dir, "dft_calculations")
+        dft_calc_dir = os.path.join(config.workspace_dir, "dft_calculations")
+        loaded_ok = False
+        if os.path.isfile(labeled_xyz):
+            try:
+                labeled_frames = ase.io.read(labeled_xyz, index=":")
+                logger.info(f"[+] Loaded {len(labeled_frames)} DFT-labeled GS frames from {labeled_xyz}")
+                if os.path.isfile(labeled_es_xyz):
+                    labeled_frames_es = ase.io.read(labeled_es_xyz, index=":")
+                    logger.info(f"[+] Loaded {len(labeled_frames_es)} DFT-labeled ES frames from {labeled_es_xyz}")
+                else:
+                    labeled_frames_es = []
+
+                if labeled_frames and labeled_frames_es:
+                    from .qe_runner import extract_and_attach_adiabatic_energetics
+                    extract_and_attach_adiabatic_energetics(
+                        labeled_frames,
+                        labeled_frames_es,
+                        at_gs=at_gs,
+                        at_es=at_es,
+                        allow_fallbacks=getattr(config, "allow_fallbacks", False),
+                    )
+                loaded_ok = True
+            except Exception as read_err:
+                if os.path.isdir(dft_calc_dir):
+                    logger.warning(
+                        f"    [!] Failed to parse cached '{labeled_xyz}' ({read_err}). "
+                        "Recovering cleanly from completed DFT calculation directories..."
+                    )
+                else:
+                    raise
+
+        if not loaded_ok:
             if os.path.isdir(dft_calc_dir):
-                logger.info(f"    [i] '{labeled_xyz}' not found, but '{dft_calc_dir}' exists.")
-                logger.info("    [i] Ingesting completed DFT calculation outputs from disk...")
+                if not os.path.isfile(labeled_xyz):
+                    logger.info(f"    [i] '{labeled_xyz}' not found, but '{dft_calc_dir}' exists.")
+                    logger.info("    [i] Ingesting completed DFT calculation outputs from disk...")
                 cand_frames_to_ingest = candidate_frames if 'candidate_frames' in locals() else (
                     ase.io.read(cand_xyz, index=":") if os.path.isfile(cand_xyz) else []
                 )
@@ -547,18 +578,6 @@ def run_pipeline(
                     f"Cannot resume from stage {from_stage}: Neither '{labeled_xyz}' nor '{dft_calc_dir}' was found. "
                     "Run stages 1-3 first or set --from-stage 3."
                 )
-        else:
-            labeled_frames = ase.io.read(labeled_xyz, index=":")
-            logger.info(f"[+] Loaded {len(labeled_frames)} DFT-labeled GS frames from {labeled_xyz}")
-            if os.path.isfile(labeled_es_xyz):
-                labeled_frames_es = ase.io.read(labeled_es_xyz, index=":")
-                logger.info(f"[+] Loaded {len(labeled_frames_es)} DFT-labeled ES frames from {labeled_es_xyz}")
-            else:
-                labeled_frames_es = []
-
-            if labeled_frames and labeled_frames_es:
-                from .qe_runner import extract_and_attach_adiabatic_energetics
-                extract_and_attach_adiabatic_energetics(labeled_frames, labeled_frames_es, at_gs=at_gs, at_es=at_es)
 
     stage_3_inputs = {}
     if os.path.isfile(cand_xyz):

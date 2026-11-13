@@ -42,6 +42,20 @@ from .slurm import (
 
 logger = logging.getLogger(__name__)
 
+_EXCLUDED_ATOMS_INFO_GAP_KEYS = frozenset({"level_diagram", "u_bands", "d_bands", "bands"})
+
+
+def _attach_gap_info(atoms: Atoms, gap_info: Optional[Dict[str, Any]]) -> None:
+    """Attaches scalar band-gap metadata to ``atoms.info``, omitting multiline diagrams and band lists."""
+    if not gap_info:
+        return
+    for k, v in gap_info.items():
+        if k in _EXCLUDED_ATOMS_INFO_GAP_KEYS:
+            continue
+        if isinstance(v, str) and ("\n" in v or "\r" in v):
+            continue
+        atoms.info[f"dft_{k}"] = v
+
 
 class QERunner:
     """Manages Quantum ESPRESSO calculations with parallel execution and smart resumption."""
@@ -119,10 +133,7 @@ class QERunner:
                         at_labeled.calc = None
                         at_labeled.info["energy"] = e_ev
                         at_labeled.arrays["forces"] = f_ev_a
-                        gap_info = parse_qe_band_gap(pw_out)
-                        if gap_info:
-                            for k, v in gap_info.items():
-                                at_labeled.info[f"dft_{k}"] = v
+                        _attach_gap_info(at_labeled, parse_qe_band_gap(pw_out))
                         return at_labeled
                 else:
                     logger.info(f"      [Cache mismatch] Atomic positions in {pw_in} differ from frame. Recomputing...")
@@ -222,10 +233,7 @@ class QERunner:
         at_labeled.calc = None
         at_labeled.info["energy"] = e_ev
         at_labeled.arrays["forces"] = f_ev_a
-        gap_info = parse_qe_band_gap(pw_out)
-        if gap_info:
-            for k, v in gap_info.items():
-                at_labeled.info[f"dft_{k}"] = v
+        _attach_gap_info(at_labeled, parse_qe_band_gap(pw_out))
 
         # Clean scratch tmp/ directory to prevent disk bloat
         tmp_dir = os.path.join(calc_dir, "tmp")
@@ -1837,10 +1845,7 @@ echo "[+] Array Task $SLURM_ARRAY_TASK_ID finished successfully at $(date)"
                     at.info["sample_type"] = stype
                     if "lambda" in fr.info:
                         at.info["lambda"] = fr.info["lambda"]
-                    gap_info = parse_qe_band_gap(pw_out)
-                    if gap_info:
-                        for k, v in gap_info.items():
-                            at.info[f"dft_{k}"] = v
+                    _attach_gap_info(at, parse_qe_band_gap(pw_out))
                     labeled_gs.append(at)
                     continue
 

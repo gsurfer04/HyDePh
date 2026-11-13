@@ -157,3 +157,64 @@ def test_es_continuity_outlier_detection(tmp_path, monkeypatch):
     assert labeled[2].info["delta_e_vert_eV"] == pytest.approx(-2.0)
     assert labeled[2].info.get("delta_scf_state_crossing_outlier") is True
     assert labeled[0].info.get("delta_scf_state_crossing_outlier") is None
+
+
+def test_attach_gap_info_skips_multiline_diagram_for_extxyz_roundtrip(tmp_path):
+    """Verify QERunner omits multiline level_diagram and band arrays from atoms.info so extxyz round-trips."""
+    import ase.io
+    from hydeph.qe.io import write_qe_input
+
+    atoms = Atoms("C2", positions=[[0.0, 0.0, 0.0], [1.5, 1.5, 1.5]], cell=[5.0, 5.0, 5.0], pbc=True)
+    upf = tmp_path / "C.upf"
+    upf.write_text('<PP_HEADER\nz_valence="4.000000000000000E+00"\n/>\n', encoding="utf-8")
+
+    cfg = ToolkitConfig(
+        pristine_cell_path="dummy.xyz",
+        foundation_potential_path="dummy.txt",
+        workspace_dir=str(tmp_path),
+        pseudopotentials={"C": str(upf)},
+        tot_charge=0.0,
+        spin_polarized=True,
+        spin_multiplicity=3,
+    )
+    runner = QERunner(cfg)
+    calc_dir = tmp_path / "calc"
+    calc_dir.mkdir()
+    write_qe_input(atoms, str(calc_dir / "pw.in"), cfg, tot_magnetization=2)
+
+    (calc_dir / "pw.out").write_text(
+        """
+     number of electrons       =        8.00 (up:   5.00, down:   3.00)
+     total magnetization       =        2.00 Bohr mag/cell
+
+ ------ SPIN UP ------------
+          k =   0.0000 0.0000 0.0000 (   100 PWs)   bands (ev):
+   -15.2000 -10.5000  -5.2000  -2.0000  -1.2000   3.5000   4.2000   5.1000
+
+ ------ SPIN DOWN ----------
+          k =   0.0000 0.0000 0.0000 (   100 PWs)   bands (ev):
+   -15.2000 -10.5000  -5.2000   1.8000   2.5000   3.9000   4.5000   5.2000
+
+     the spin up/dw Fermi energies are    -0.5000   -0.6000 ev
+!    total energy              =     -20.00000000 Ry
+
+     Forces acting on atoms (cartesian axes, Ry/au):
+     atom    1 type  1   force =     0.00000000     0.00000000     0.00000000
+     atom    2 type  1   force =     0.00000000     0.00000000     0.00000000
+
+     JOB DONE.
+""",
+        encoding="utf-8",
+    )
+
+    at_lab = runner.label_single_frame(atoms, str(calc_dir))
+    assert "dft_gap_eV" in at_lab.info
+    assert "dft_level_diagram" not in at_lab.info
+    assert "dft_u_bands" not in at_lab.info
+    assert "dft_d_bands" not in at_lab.info
+
+    xyz_path = tmp_path / "labeled.xyz"
+    ase.io.write(str(xyz_path), [at_lab], format="extxyz")
+    reloaded = ase.io.read(str(xyz_path), index=":")
+    assert len(reloaded) == 1
+    assert reloaded[0].info["dft_gap_eV"] == pytest.approx(at_lab.info["dft_gap_eV"])

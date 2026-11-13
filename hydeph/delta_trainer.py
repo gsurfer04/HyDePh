@@ -233,6 +233,30 @@ def get_frame_forces(fr: Atoms) -> np.ndarray:
     raise KeyError(f"Frame {fr.info.get('frame_id', 'unknown')} has no forces in arrays or calculator.")
 
 
+def _prepare_nep_xyz_frames(frames: List[Atoms]) -> List[Atoms]:
+    """Builds minimal GPUMD-compatible Atoms objects with only energy, forces, and cell/pbc.
+
+    Strips arbitrary extxyz ``info`` keys (e.g. multiline strings, JSON lists) and extra
+    per-atom ``arrays`` (e.g. ``f_base``, ``f_dft``) that mismatch GPUMD's ``Properties``
+    header or exceed its single-line comment reader.
+    """
+    clean_frames: List[Atoms] = []
+    for fr in frames:
+        clean = Atoms(
+            symbols=fr.get_chemical_symbols(),
+            positions=np.asarray(fr.positions, dtype=float).copy(),
+            cell=np.asarray(fr.cell, dtype=float).copy(),
+            pbc=np.asarray(fr.pbc, dtype=bool).copy(),
+        )
+        clean.info["energy"] = get_frame_energy(fr)
+        for opt_key in ("weight", "energy_weight", "virial"):
+            if opt_key in fr.info and fr.info[opt_key] is not None:
+                clean.info[opt_key] = fr.info[opt_key]
+        clean.arrays["forces"] = get_frame_forces(fr)
+        clean_frames.append(clean)
+    return clean_frames
+
+
 class DeltaTrainer:
     """Computes delta energies and forces, writes GPUMD training cards, and trains Delta-NEP."""
 
@@ -339,8 +363,16 @@ class DeltaTrainer:
             delta_frames, test_fraction=0.20, seed=seed
         )
 
-        ase.io.write(os.path.join(train_dir, "train.xyz"), train_frames, format="extxyz")
-        ase.io.write(os.path.join(train_dir, "test.xyz"), test_frames, format="extxyz")
+        ase.io.write(
+            os.path.join(train_dir, "train.xyz"),
+            _prepare_nep_xyz_frames(train_frames),
+            format="extxyz",
+        )
+        ase.io.write(
+            os.path.join(train_dir, "test.xyz"),
+            _prepare_nep_xyz_frames(test_frames),
+            format="extxyz",
+        )
 
         # Union of chemical symbols across ALL frames to handle vacancies/substitutions safely
         unique_elems = sorted(set().union(*(set(f.get_chemical_symbols()) for f in delta_frames)))
@@ -486,8 +518,16 @@ class DeltaTrainer:
                     m_train_frames = anchor_train + [non_anchor_train[i] for i in boot_idx]
                 else:
                     m_train_frames = list(train_frames)
-                ase.io.write(os.path.join(m_dir, "train.xyz"), m_train_frames, format="extxyz")
-                ase.io.write(os.path.join(m_dir, "test.xyz"), test_frames, format="extxyz")
+                ase.io.write(
+                    os.path.join(m_dir, "train.xyz"),
+                    _prepare_nep_xyz_frames(m_train_frames),
+                    format="extxyz",
+                )
+                ase.io.write(
+                    os.path.join(m_dir, "test.xyz"),
+                    _prepare_nep_xyz_frames(test_frames),
+                    format="extxyz",
+                )
                 m_nep_in = os.path.join(m_dir, "nep.in")
                 write_delta_nep_in(
                     m_nep_in,
