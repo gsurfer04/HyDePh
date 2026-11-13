@@ -168,3 +168,83 @@ def test_multi_trajectory_and_linderalv_acf_windowing(tmp_path):
     eg = res[300.0]["energies"]
     zpl_idx = np.argmin(np.abs(eg))
     assert a_300[zpl_idx] > 0.0
+
+
+def test_anharmonic_uses_dft_cell_relaxes_es_and_computes_contiguous_fwhm(tmp_path):
+    """Verify embedded runs pass the DFT cell to anharmonic MD, pre-relax ES, and avoid ZPL-to-PSB FWHM span."""
+    import ase.io
+    from unittest.mock import patch
+    from ase import Atoms
+    from ase.calculators.calculator import Calculator, all_changes
+    from hydeph.config import ToolkitConfig
+    from hydeph.lineshape import LineshapeEngine
+
+    class SimpleHarmonic(Calculator):
+        implemented_properties = ["energy", "forces"]
+
+        def __init__(self, k=8.0, shift=0.0):
+            super().__init__()
+            self.k = k
+            self.shift = shift
+
+        def calculate(self, atoms=None, properties=("energy", "forces"), system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            disp = atoms.positions - self.shift
+            self.results["energy"] = float(0.5 * self.k * np.sum(disp ** 2))
+            self.results["forces"] = -self.k * disp
+
+    # 1. Verify contiguous FWHM ignores an isolated ZPL spike separated from a dominant PSB peak
+    p_file = tmp_path / "pristine.xyz"
+    uc = Atoms("C2", positions=[[0, 0, 0], [1.4, 1.4, 1.4]], cell=[2.8, 2.8, 2.8], pbc=True)
+    ase.io.write(str(p_file), uc)
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        foundation_potential_path="dummy.txt",
+        workspace_dir=str(tmp_path / "ws"),
+        temperatures=[10.0],
+        anharmonic_md_steps=16,
+        anharmonic_thermalization_steps=6,
+        anharmonic_n_trajectories=1,
+        supercell_repeat=(1, 1, 1),
+        phonon_supercell_repeat=(2, 2, 2),
+        defect_type="vacancy",
+        defect_site_index=0,
+    )
+    engine = LineshapeEngine(cfg, SimpleHarmonic(k=8.0, shift=0.0))
+    engine.calc_es = SimpleHarmonic(k=8.0, shift=0.05)
+
+    at_dft = Atoms("C2", positions=[[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]], cell=[2.8, 2.8, 2.8], pbc=True)
+    hw_grid = np.linspace(5.0, 120.0, 80)
+    s_cont = np.exp(-0.5 * ((hw_grid - 40.0) / 10.0) ** 2) * 100.0
+
+    # Pre-MD relaxation should bring initial force down on at_es without raising
+    res_md = engine.run_anharmonic_sampling(
+        at_dft,
+        Atoms("C2", positions=[[0.15, 0.0, 0.0], [1.4, 0.0, 0.0]], cell=[2.8, 2.8, 2.8], pbc=True),
+        hw_grid,
+        s_cont,
+        total_S=1.0,
+    )
+    assert res_md[10.0]["fwhm_meV"] >= 0.0
+
+    # 2. Verify separated ZPL + PSB lineshape gives contiguous PSB FWHM, not ZPL-to-PSB distance (~200 meV)
+    eg = np.linspace(-400.0, 50.0, 451)
+    a_two_peak = np.exp(-0.5 * ((eg + 200.0) / 25.0) ** 2) + 0.7 * np.exp(-0.5 * (eg / 1.5) ** 2)
+    with patch("hydeph.lineshape.compute_quantum_lineshape", return_value=(eg, a_two_peak)):
+        res_fwhm = engine.run_anharmonic_sampling(at_dft, at_dft.copy(), hw_grid, s_cont, total_S=1.0)
+    assert res_fwhm[10.0]["fwhm_meV"] < 80.0
+
+    # 3. Verify calculate_spectral_density_and_lineshapes passes DFT cell (not embedded cell) to MD
+    seen_natoms = []
+    orig_anh = engine.run_anharmonic_sampling
+
+    def spy_anh(g_cell, e_cell, *args, **kwargs):
+        seen_natoms.append((len(g_cell), len(e_cell)))
+        return orig_anh(g_cell, e_cell, *args, **kwargs)
+
+    engine_harm_vib_modes = np.array([0.04, 0.05, 0.06])
+    with patch.object(engine, "_run_vibrations_for_calculator", return_value=(engine_harm_vib_modes, lambda i: np.zeros((15, 3)))):
+        with patch.object(engine, "run_anharmonic_sampling", side_effect=spy_anh):
+            with patch.object(engine, "plot_all", return_value={}):
+                engine.calculate_spectral_density_and_lineshapes(at_dft, at_dft.copy())
+    assert seen_natoms == [(len(at_dft), len(at_dft))]

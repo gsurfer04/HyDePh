@@ -218,3 +218,68 @@ def test_attach_gap_info_skips_multiline_diagram_for_extxyz_roundtrip(tmp_path):
     reloaded = ase.io.read(str(xyz_path), index=":")
     assert len(reloaded) == 1
     assert reloaded[0].info["dft_gap_eV"] == pytest.approx(at_lab.info["dft_gap_eV"])
+
+
+def test_parse_qe_band_gap_prefers_ingap_minority_lumo_over_cbm(tmp_path):
+    """When majority spin LUMO sits at host CBM while minority spin LUMO is an in-gap defect orbital, select minority spin."""
+    pw_out = tmp_path / "pw_vv0.out"
+    pw_out.write_text(
+        """
+     number of electrons       =       10.00 (up:   6.00, down:   4.00)
+     total magnetization       =        2.00 Bohr mag/cell
+
+ ------ SPIN UP ------------
+          k =   0.0000 0.0000 0.0000 (   100 PWs)   bands (ev):
+    2.0000   4.0000   6.0000   8.5000   9.9469   9.9480  11.5431  12.7000
+
+ ------ SPIN DOWN ----------
+          k =   0.0000 0.0000 0.0000 (   100 PWs)   bands (ev):
+    2.0000   4.0000   6.0000   9.2458  11.0803  11.0820  11.5560  12.7000
+
+     the spin up/dw Fermi energies are    10.4000   10.2000 ev
+""",
+        encoding="utf-8",
+    )
+
+    res = parse_qe_band_gap(str(pw_out))
+    assert res is not None
+    assert res["spin"] == "down"
+    assert res["spin_channel"] == 2
+    assert res["homo_band"] == 4
+    assert res["lumo_band"] == 5
+    assert res["gap_eV"] == pytest.approx(1.8345, abs=1e-3)
+
+
+def test_extract_and_attach_adiabatic_energetics_reads_calculator_energies(tmp_path):
+    """Verify XYZ frames whose energies live on SinglePointCalculator (not .info['energy']) recover ZPL and relaxation."""
+    import ase.io
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from hydeph.qe_runner import extract_and_attach_adiabatic_energetics
+
+    def make_frame(sample_type, lam, energy):
+        fr = Atoms("SiC", positions=[[0, 0, 0], [1.5, 0, 0]], cell=[6, 6, 6], pbc=True)
+        fr.info = {"sample_type": sample_type, "lambda": lam}
+        fr.calc = SinglePointCalculator(fr, energy=energy)
+        return fr
+
+    gs_0 = make_frame("franck_condon", 0.0, -100.0)
+    gs_1 = make_frame("franck_condon", 1.0, -99.8)
+    es_0 = make_frame("franck_condon", 0.0, -98.5)
+    es_1 = make_frame("franck_condon", 1.0, -98.8)
+
+    xyz_gs = tmp_path / "labeled_gs.xyz"
+    xyz_es = tmp_path / "labeled_es.xyz"
+    ase.io.write(str(xyz_gs), [gs_0, gs_1], format="extxyz")
+    ase.io.write(str(xyz_es), [es_0, es_1], format="extxyz")
+
+    reloaded_gs = ase.io.read(str(xyz_gs), index=":")
+    reloaded_es = ase.io.read(str(xyz_es), index=":")
+    assert "energy" not in reloaded_gs[0].info
+
+    at_gs = Atoms("SiC", positions=[[0, 0, 0], [1.5, 0, 0]], cell=[6, 6, 6], pbc=True)
+    at_es = Atoms("SiC", positions=[[0, 0, 0], [1.6, 0, 0]], cell=[6, 6, 6], pbc=True)
+    res = extract_and_attach_adiabatic_energetics(reloaded_gs, reloaded_es, at_gs=at_gs, at_es=at_es)
+    assert res["e_zpl_exact_eV"] == pytest.approx(1.2)
+    assert res["erel_gs_eV"] == pytest.approx(0.2)
+    assert res["erel_es_eV"] == pytest.approx(0.3)
+    assert at_gs.info["e_zpl_exact_eV"] == pytest.approx(1.2)

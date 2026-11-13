@@ -418,14 +418,35 @@ def parse_qe_band_gap(pw_out_path: str, target_spin_channel: Optional[int] = Non
             while (homo_b_d - deg_homo_d) >= 1 and abs(d_bands[homo_b_d - deg_homo_d - 1] - he) < 0.005:
                 deg_homo_d += 1
 
-        # Prioritize the minority or in-gap defect channel (smaller positive gap) or target_spin_channel
+        # Prioritize the in-gap defect channel or target_spin_channel.
+        # When an occupied defect level in one spin channel sits closer to the host CBM than
+        # an intra-defect transition in the opposite spin whose LUMO lies genuinely in-gap
+        # below the other channel's LUMO/CBM, prefer the in-gap LUMO channel when gaps are comparable.
         chosen = None
         if target_spin_channel == 1 and gap_u is not None:
             chosen = ("up", 1, gap_u, homo_u, lumo_u, homo_b_u, lumo_b_u, ef_up)
         elif target_spin_channel == 2 and gap_d is not None:
             chosen = ("down", 2, gap_d, homo_d, lumo_d, homo_b_d, lumo_b_d, ef_dw)
         elif gap_d is not None and gap_u is not None:
-            if 0.05 < gap_d < gap_u:
+            down_ingap_lumo = (
+                0.05 < gap_d
+                and lumo_d is not None
+                and lumo_u is not None
+                and lumo_d <= lumo_u - 0.15
+                and gap_d <= gap_u + 0.50
+            )
+            up_ingap_lumo = (
+                0.05 < gap_u
+                and lumo_u is not None
+                and lumo_d is not None
+                and lumo_u <= lumo_d - 0.15
+                and gap_u <= gap_d + 0.50
+            )
+            if down_ingap_lumo:
+                chosen = ("down", 2, gap_d, homo_d, lumo_d, homo_b_d, lumo_b_d, ef_dw)
+            elif up_ingap_lumo:
+                chosen = ("up", 1, gap_u, homo_u, lumo_u, homo_b_u, lumo_b_u, ef_up)
+            elif 0.05 < gap_d < gap_u:
                 chosen = ("down", 2, gap_d, homo_d, lumo_d, homo_b_d, lumo_b_d, ef_dw)
             else:
                 chosen = ("up", 1, gap_u, homo_u, lumo_u, homo_b_u, lumo_b_u, ef_up)
@@ -866,10 +887,20 @@ def extract_and_attach_adiabatic_energetics(
         )
         return {}
 
+    def _extract_energy_ev(fr):
+        if fr is None:
+            return None
+        if "energy" in fr.info and fr.info["energy"] is not None:
+            return float(fr.info["energy"])
+        try:
+            return float(fr.get_potential_energy())
+        except Exception:
+            return None
+
     results: Dict[str, float] = {}
-    if gs_0 is not None and es_1 is not None and "energy" in gs_0.info and "energy" in es_1.info:
-        e_gs_0 = float(gs_0.info["energy"])
-        e_es_1 = float(es_1.info["energy"])
+    e_gs_0 = _extract_energy_ev(gs_0)
+    e_es_1 = _extract_energy_ev(es_1)
+    if e_gs_0 is not None and e_es_1 is not None:
         e_zpl_exact = float(e_es_1 - e_gs_0)
 
         results["e_gs_0"] = e_gs_0
@@ -890,9 +921,9 @@ def extract_and_attach_adiabatic_energetics(
         logger.info(f"    • Excited State Minimum E_ES(lambda=1): {e_es_1:.4f} eV")
         logger.info(f"    • Exact Adiabatic ZPL E_ZPL: {e_zpl_exact:.4f} eV")
 
-        if gs_1 is not None and es_0 is not None and "energy" in gs_1.info and "energy" in es_0.info:
-            e_gs_1 = float(gs_1.info["energy"])
-            e_es_0 = float(es_0.info["energy"])
+        e_gs_1 = _extract_energy_ev(gs_1)
+        e_es_0 = _extract_energy_ev(es_0)
+        if e_gs_1 is not None and e_es_0 is not None:
             e_abs_exact = float(e_es_0 - e_gs_0)
             e_em_exact = float(e_es_1 - e_gs_1)
             erel_gs = float(e_gs_1 - e_gs_0)

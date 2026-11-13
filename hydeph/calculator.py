@@ -206,4 +206,19 @@ class PairedDefectCalculator:
 
     def get_energy_gap(self, atoms: Atoms) -> float:
         """Returns the instantaneous electronic transition energy gap Delta U(R) = V_ES(R) - V_GS(R)."""
+        if (
+            isinstance(self.calc_gs, HybridDefectCalculator)
+            and isinstance(self.calc_es, HybridDefectCalculator)
+            and self.calc_gs.calc_base is not None
+            and self.calc_gs.calc_base is self.calc_es.calc_base
+        ):
+            def _mean_delta_energy(hcalc: HybridDefectCalculator) -> float:
+                e_deltas = []
+                for calc_d in hcalc.calc_deltas:
+                    calc_d.calculate(atoms, ["energy"], all_changes)
+                    e_deltas.append(float(calc_d.results["energy"]))
+                mean_d = float(np.mean(e_deltas)) if e_deltas else 0.0
+                return mean_d + float(len(atoms) * hcalc.energy_offset_per_atom)
+
+            return float(_mean_delta_energy(self.calc_es) - _mean_delta_energy(self.calc_gs))
         return float(self.get_potential_energy_es(atoms) - self.get_potential_energy_gs(atoms))

@@ -117,3 +117,25 @@ def test_analytic_classical_fluctuation_dissipation_recovery():
     assert pytest.approx(1.2, rel=0.05) == s2_rec
     # Ratio between modes should match 0.8 / 1.2 = 0.667 without frequency bias
     assert pytest.approx(0.8 / 1.2, rel=0.03) == s1_rec / s2_rec
+
+
+def test_paired_defect_calculator_skips_shared_foundation_in_energy_gap():
+    """Verify PairedDefectCalculator cancels shared calc_base in get_energy_gap identically without calling it."""
+    from hydeph.calculator import HybridDefectCalculator
+
+    at = Atoms("Si2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[5, 5, 5], pbc=True)
+    shared_base = SpyHarmonicCalculator(k=10.0, r0=0.0, offset_eV=-100.0)
+    delta_gs = SpyHarmonicCalculator(k=1.0, r0=0.0, offset_eV=-1.0)
+    delta_es = SpyHarmonicCalculator(k=2.0, r0=0.05, offset_eV=1.5)
+
+    h_gs = HybridDefectCalculator(calc_base=shared_base, calc_delta=delta_gs, energy_offset_per_atom=0.25)
+    h_es = HybridDefectCalculator(calc_base=shared_base, calc_delta=delta_es, energy_offset_per_atom=-0.50)
+    paired = PairedDefectCalculator(h_gs, h_es)
+
+    calls_before = shared_base.call_count
+    du = paired.get_energy_gap(at)
+    assert shared_base.call_count == calls_before
+
+    # Verify exact numerical equivalence with V_ES(R) - V_GS(R)
+    du_full = float(h_es.get_potential_energy(at) - h_gs.get_potential_energy(at))
+    assert du == pytest.approx(du_full, abs=1e-12)

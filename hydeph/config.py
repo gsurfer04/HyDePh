@@ -634,7 +634,7 @@ class ToolkitConfig:
     phonon_supercell_repeat: Optional[Tuple[int, int, int]] = None
     phonon_embedding_method: str = "force"  # "force" or "displacement"
     export_normal_modes: bool = True
-    anharmonic_n_trajectories: int = 1
+    anharmonic_n_trajectories: int = 4
     anharmonic_acf_damping_meV: float = 2.0
     calculate_pl_intensity: bool = True
     finite_size_acoustic_cutoff: Optional[bool] = None

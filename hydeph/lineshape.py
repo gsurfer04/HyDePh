@@ -233,14 +233,16 @@ def embed_phonon_supercell(
 
     dr_small = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
     dr_large = np.zeros_like(at_gs_large.positions)
+    core_mask = np.zeros(len(at_gs_large), dtype=bool)
+    ri_rels = mic_displacement(at_gs.positions, c_small, at_gs.cell)
 
     for j, at_j in enumerate(at_gs_large):
         rj_rel = mic_displacement([at_j.position], c_large, at_gs_large.cell)[0]
-        ri_rels = mic_displacement(at_gs.positions, c_small, at_gs.cell)
         dists = np.linalg.norm(ri_rels - rj_rel, axis=1)
         min_i = int(np.argmin(dists))
         if dists[min_i] < 0.25 and at_gs[min_i].symbol == at_j.symbol:
             dr_large[j] = dr_small[min_i]
+            core_mask[j] = True
 
     dq_fc_large = float(np.sqrt(np.sum(at_gs_large.get_masses()[:, None] * (dr_large ** 2))))
     logger.info(
@@ -251,9 +253,17 @@ def embed_phonon_supercell(
     f_es_large = None
     if calc_es is not None and getattr(config, "phonon_embedding_method", "force").lower() == "force":
         logger.info("    [-] Evaluating excited-state forces on relaxed ground-state large supercell (Alkauskas/Razinkovas)...")
-        at_gs_large.calc = calc_es
-        f_es_large = at_gs_large.get_forces().copy()
         at_gs_large.calc = calc_gs
+        f_gs_large = at_gs_large.get_forces().copy()
+        at_gs_large.calc = calc_es
+        f_es_large = at_gs_large.get_forces().copy() - f_gs_large
+        at_gs_large.calc = calc_gs
+        if len(at_gs_large) > len(at_gs):
+            f_es_large[~core_mask] = 0.0
+            logger.info(
+                f"    [+] Masked ES-GS force difference to {int(np.count_nonzero(core_mask))} DFT core atoms "
+                f"(zeroed {int(np.count_nonzero(~core_mask))} far-field bulk atoms)."
+            )
 
     # Propagate DFT energetics, ZPL metadata, and defect coordinates onto embedded cell
     for k in (
@@ -484,8 +494,11 @@ class LineshapeEngine:
         phonon_rep = getattr(self.config, "phonon_supercell_repeat", None)
         supercell_rep = getattr(self.config, "supercell_repeat", (2, 2, 2))
         f_es_mode = None
+        is_embedded = phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep)
+        at_gs_md = at_gs.copy()
+        at_es_md = at_es.copy()
 
-        if phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep):
+        if is_embedded:
             calc_es_opt = getattr(self, "calc_es", None)
             at_gs, dr, f_es_mode = embed_phonon_supercell(
                 at_gs, at_es, self.config, self.calc, calc_es=calc_es_opt
@@ -945,8 +958,13 @@ class LineshapeEngine:
 
         anharmonic_dict = None
         if self.config.enable_anharmonic:
+            if is_embedded:
+                logger.info(
+                    f"    [-] Running anharmonic MD on DFT defect supercell ({len(at_gs_md)} atoms) "
+                    f"rather than embedded {len(at_gs)}-atom phonon cell to prevent far-field bulk Delta-U noise."
+                )
             anharmonic_dict = self.run_anharmonic_sampling(
-                at_gs, at_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts
+                at_gs_md, at_es_md, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts
             )
             self.plot_all(
                 lineshape_dict,
@@ -1185,7 +1203,33 @@ class LineshapeEngine:
             logger.info("    [i] Single-potential fallback: Anharmonic Delta U(t) driven by displaced ground-state potential V_GS(R+Delta R) - V_GS(R)")
 
         anharmonic_dict = {}
-        n_trajectories = max(1, int(getattr(self.config, "anharmonic_n_trajectories", 1)))
+        n_trajectories = max(1, int(getattr(self.config, "anharmonic_n_trajectories", 4)))
+
+        at_es_eq = at_es.copy()
+        at_gs_eq = at_gs.copy()
+        if has_paired and len(at_es_eq) > 0:
+            at_es_eq.calc = calc_es_opt
+            try:
+                f_es_init = float(np.abs(at_es_eq.get_forces()).max())
+                if f_es_init > 0.02:
+                    from ase.optimize import BFGS
+                    logger.info(
+                        f"    [-] Relaxing excited-state MD starting geometry (initial max |F| = {f_es_init:.4f} eV/A)..."
+                    )
+                    BFGS(at_es_eq, logfile=None).run(fmax=0.01, steps=40)
+                    f_es_after = float(np.abs(at_es_eq.get_forces()).max())
+                    logger.info(f"    [+] Pre-MD ES geometry relaxed: max |F| = {f_es_after:.4f} eV/A")
+            except Exception as exc:
+                logger.warning(f"    [!] Pre-MD ES relaxation skipped ({exc}).")
+        elif not has_paired and len(at_gs_eq) > 0:
+            at_gs_eq.calc = self.calc
+            try:
+                f_gs_init = float(np.abs(at_gs_eq.get_forces()).max())
+                if f_gs_init > 0.02:
+                    from ase.optimize import BFGS
+                    BFGS(at_gs_eq, logfile=None).run(fmax=0.01, steps=40)
+            except Exception:
+                pass
 
         for T in self.config.temperatures:
             t0 = time.time()
@@ -1195,10 +1239,10 @@ class LineshapeEngine:
 
             for traj_idx in range(n_trajectories):
                 if has_paired:
-                    at = at_es.copy()
+                    at = at_es_eq.copy()
                     at.calc = calc_es_opt
                 else:
-                    at = at_gs.copy()
+                    at = at_gs_eq.copy()
                     at.calc = self.calc
 
                 # 1. Thermalization with Langevin dynamics (NVT)
@@ -1431,8 +1475,18 @@ class LineshapeEngine:
                 omega_T = omega_0
                 regime_tag = f"Semiclassical Marcus (sigma={sigma_du:.1f} meV)"
 
-            fwhm_idx = np.where(a_anh >= 0.5 * np.max(a_anh))[0]
-            fwhm_meV = eg_out[fwhm_idx[-1]] - eg_out[fwhm_idx[0]] if len(fwhm_idx) > 1 else 0.0
+            if len(a_anh) > 1 and np.max(a_anh) > 0:
+                pk_idx = int(np.argmax(a_anh))
+                half_max = 0.5 * float(a_anh[pk_idx])
+                left_idx = pk_idx
+                while left_idx > 0 and a_anh[left_idx - 1] >= half_max:
+                    left_idx -= 1
+                right_idx = pk_idx
+                while right_idx < len(a_anh) - 1 and a_anh[right_idx + 1] >= half_max:
+                    right_idx += 1
+                fwhm_meV = float(eg_out[right_idx] - eg_out[left_idx])
+            else:
+                fwhm_meV = 0.0
 
             anharmonic_dict[T] = {
                 "energies": eg_out,

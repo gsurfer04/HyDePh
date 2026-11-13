@@ -143,3 +143,44 @@ def test_embedding_supercell_delta_q_conservation(tmp_path):
 
     # Total delta Q must be strictly conserved within 0.1%
     assert dq_embedded == pytest.approx(dq_orig, rel=1e-3)
+
+
+def test_embed_phonon_supercell_masks_far_field_es_forces(tmp_path):
+    """Verify embed_phonon_supercell zeros ES-GS force differences outside the DFT core."""
+    import ase.io
+    pristine_file = tmp_path / "pristine_force_mask.xyz"
+    uc = Atoms("C2", positions=[[0, 0, 0], [1.4, 1.4, 1.4]], cell=[2.8, 2.8, 2.8], pbc=True)
+    ase.io.write(str(pristine_file), uc)
+
+    at_gs = Atoms("C", positions=[[1.4, 1.4, 1.4]], cell=[2.8, 2.8, 2.8], pbc=True)
+    at_es = Atoms("C", positions=[[1.45, 1.4, 1.4]], cell=[2.8, 2.8, 2.8], pbc=True)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path="dummy.txt",
+        workspace_dir=str(tmp_path),
+        supercell_repeat=(1, 1, 1),
+        phonon_supercell_repeat=(2, 2, 2),
+        defect_type="vacancy",
+        defect_site_index=0,
+        phonon_embedding_method="force",
+    )
+
+    class ConstForceCalc:
+        def __init__(self, f_val):
+            self.f_val = f_val
+
+        def get_potential_energy(self, atoms=None, **kwargs):
+            return 0.0
+
+        def get_forces(self, atoms=None, **kwargs):
+            return np.full((len(atoms), 3), self.f_val, dtype=float)
+
+    at_large, _, f_es_large = embed_phonon_supercell(
+        at_gs, at_es, cfg, ConstForceCalc(0.0), calc_es=ConstForceCalc(0.25)
+    )
+    assert f_es_large is not None
+    assert len(at_large) == 15
+    norms = np.linalg.norm(f_es_large, axis=1)
+    assert np.count_nonzero(norms > 1e-6) == len(at_gs)
+    assert np.count_nonzero(norms == 0.0) == len(at_large) - len(at_gs)
