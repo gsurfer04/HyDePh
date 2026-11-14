@@ -8,7 +8,9 @@ import json
 import time
 import hashlib
 import logging
-from typing import Optional, Dict, Any, Tuple
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from typing import Optional, Dict, Any, Tuple, List
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -152,6 +154,224 @@ def compute_photoluminescence_spectrum(
         if area > 0:
             i_pl = i_pl / area
     return photon_energy_eV, i_pl
+
+
+_ANHARM_WORKER_STATE: Dict[str, Any] = {}
+
+
+def _build_worker_calculator(spec: Dict[str, Any], shared_base: Optional[Any] = None) -> Any:
+    """Reconstructs a file-backed HybridDefectCalculator inside a worker process."""
+    return HybridDefectCalculator(
+        foundation_pot_path=spec["foundation_pot_path"],
+        delta_pot_paths=spec["delta_pot_paths"],
+        calc_base=shared_base,
+        energy_offset_per_atom=spec["energy_offset_per_atom"],
+    )
+
+
+def _init_anharmonic_worker(worker_spec: Dict[str, Any]) -> None:
+    """Initializes single-threaded NEP calculators once per anharmonic MD worker process."""
+    for env_var in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ):
+        os.environ[env_var] = "1"
+
+    from .calculator import PairedDefectCalculator
+
+    gs_spec = worker_spec["gs"]
+    es_spec = worker_spec.get("es")
+    calc_gs = _build_worker_calculator(gs_spec)
+    calc_es = None
+    paired_calc = None
+    if es_spec is not None:
+        same_base = (
+            gs_spec["foundation_pot_path"] is not None
+            and es_spec["foundation_pot_path"] is not None
+            and os.path.abspath(gs_spec["foundation_pot_path"])
+            == os.path.abspath(es_spec["foundation_pot_path"])
+        )
+        calc_es = _build_worker_calculator(
+            es_spec, shared_base=calc_gs.calc_base if same_base else None
+        )
+        paired_calc = PairedDefectCalculator(calc_gs, calc_es)
+
+    _ANHARM_WORKER_STATE.clear()
+    _ANHARM_WORKER_STATE.update(
+        {
+            "calc_gs": calc_gs,
+            "calc_es": calc_es,
+            "paired_calc": paired_calc,
+        }
+    )
+
+
+def _is_real_cpunep(calc_obj: Any) -> bool:
+    """Returns True only for an actual calorine CPUNEP instance (never test mocks)."""
+    return (
+        calc_obj is not None
+        and type(calc_obj).__name__ == "CPUNEP"
+        and type(calc_obj).__module__.startswith("calorine")
+    )
+
+
+def _extract_hybrid_calc_spec(calc: Any) -> Optional[Dict[str, Any]]:
+    """Returns a serializable file-backed spec for HybridDefectCalculator, or None."""
+    if not isinstance(calc, HybridDefectCalculator):
+        return None
+    calc_deltas = list(getattr(calc, "calc_deltas", []) or [])
+    if not calc_deltas or not all(_is_real_cpunep(d) for d in calc_deltas):
+        return None
+    delta_paths = list(getattr(calc, "delta_pot_paths", []) or [])
+    if len(delta_paths) != len(calc_deltas) or not all(
+        isinstance(p, str) and os.path.isfile(p) for p in delta_paths
+    ):
+        return None
+    f_path = getattr(calc, "foundation_pot_path", None)
+    calc_base = getattr(calc, "calc_base", None)
+    if calc_base is not None:
+        if not _is_real_cpunep(calc_base) or not (isinstance(f_path, str) and os.path.isfile(f_path)):
+            return None
+    return {
+        "foundation_pot_path": f_path,
+        "delta_pot_paths": delta_paths,
+        "energy_offset_per_atom": float(getattr(calc, "energy_offset_per_atom", 0.0)),
+    }
+
+
+def _run_single_anharmonic_trajectory(
+    at_start: Atoms,
+    T: float,
+    dt_fs: float,
+    n_therm: int,
+    n_steps: int,
+    u_opt: np.ndarray,
+    dr_fc: np.ndarray,
+    calc_gs: Any,
+    calc_es: Optional[Any],
+    paired_calc: Optional[Any],
+    seed: Optional[int] = None,
+    show_progress: bool = True,
+    desc_str: str = "Anharmonic MD",
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Runs NVT Langevin thermalization followed by NVE VelocityVerlet production."""
+    from ase import units
+    from ase.md.langevin import Langevin
+    from ase.md.verlet import VelocityVerlet
+    from ase.md.velocitydistribution import Stationary, ZeroRotation
+
+    has_paired = calc_es is not None
+    at = at_start.copy()
+    at.calc = calc_es if has_paired else calc_gs
+    at_disp = None
+    if not has_paired:
+        at_disp = at_start.copy()
+        at_disp.calc = calc_gs
+
+    rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+
+    t_equil_nvt = float(T)
+    if n_therm > 0:
+        try:
+            from ase.md.velocitydistribution import thermalize_momenta
+
+            thermalize_momenta(at, temperature_K=T, rng=rng)
+        except (ImportError, TypeError):
+            from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+
+            MaxwellBoltzmannDistribution(at, temperature_K=T, rng=rng)
+        Stationary(at)
+        if not np.any(at.pbc):
+            ZeroRotation(at)
+        dyn_therm = Langevin(
+            at,
+            dt_fs * units.fs,
+            temperature_K=T,
+            friction=0.01 / units.fs,
+            fixcm=False,
+            rng=rng,
+            logfile=None,
+        )
+        t_therm_samples: List[float] = []
+        dyn_therm.attach(
+            lambda: t_therm_samples.append(float(at.get_temperature())),
+            interval=max(1, n_therm // 10),
+        )
+        dyn_therm.run(n_therm)
+        if t_therm_samples:
+            t_equil_nvt = float(np.mean(t_therm_samples[-5:]))
+
+    Stationary(at)
+    if not np.any(at.pbc):
+        ZeroRotation(at)
+    dyn = VelocityVerlet(at, dt_fs * units.fs, logfile=None)
+
+    du_list: List[float] = []
+    v_opt_list: List[float] = []
+    t_nve_list: List[float] = []
+
+    def step_observer() -> None:
+        v = at.get_velocities()
+        v_opt_list.append(float(np.sum(v * u_opt)))
+        t_nve_list.append(float(at.get_temperature()))
+
+        if has_paired:
+            if paired_calc is not None:
+                du = float(paired_calc.get_energy_gap(at) * 1000.0)
+            else:
+                ue = at.get_potential_energy()
+                at_gs_eval = at.copy()
+                at_gs_eval.calc = calc_gs
+                ug = at_gs_eval.get_potential_energy()
+                du = float((ue - ug) * 1000.0)
+        else:
+            ug = at.get_potential_energy()
+            at_disp.positions = at.positions + dr_fc
+            at_disp.cell = at.cell
+            ue = at_disp.get_potential_energy()
+            du = float((ue - ug) * 1000.0)
+        du_list.append(du)
+
+    dyn.attach(step_observer, interval=2)
+    if show_progress:
+        pbar = tqdm(total=n_steps, desc=desc_str, unit="step", leave=False)
+        step_chunk = 50
+        steps_done = 0
+        while steps_done < n_steps:
+            this_chunk = min(step_chunk, n_steps - steps_done)
+            dyn.run(this_chunk)
+            steps_done += this_chunk
+            pbar.update(this_chunk)
+        pbar.close()
+    else:
+        dyn.run(n_steps)
+
+    t_equil = float(np.mean(t_nve_list)) if t_nve_list else t_equil_nvt
+    return np.array(du_list, dtype=float), np.array(v_opt_list, dtype=float), t_equil
+
+
+def _run_anharmonic_window_worker(
+    task_args: Tuple[Any, ...]
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Worker entry point executing one NVT->NVE trajectory using cached worker calculators."""
+    at_start, T, dt_fs, n_therm, n_steps, u_opt, dr_fc, seed = task_args
+    return _run_single_anharmonic_trajectory(
+        at_start=at_start,
+        T=T,
+        dt_fs=dt_fs,
+        n_therm=n_therm,
+        n_steps=n_steps,
+        u_opt=u_opt,
+        dr_fc=dr_fc,
+        calc_gs=_ANHARM_WORKER_STATE["calc_gs"],
+        calc_es=_ANHARM_WORKER_STATE.get("calc_es"),
+        paired_calc=_ANHARM_WORKER_STATE.get("paired_calc"),
+        seed=seed,
+        show_progress=False,
+    )
 
 
 def embed_phonon_supercell(
@@ -495,8 +715,6 @@ class LineshapeEngine:
         supercell_rep = getattr(self.config, "supercell_repeat", (2, 2, 2))
         f_es_mode = None
         is_embedded = phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep)
-        at_gs_md = at_gs.copy()
-        at_es_md = at_es.copy()
 
         if is_embedded:
             calc_es_opt = getattr(self, "calc_es", None)
@@ -832,13 +1050,15 @@ class LineshapeEngine:
             try:
                 calc_es_opt = getattr(self, "calc_es", None)
                 cc_dict = self.plot_configuration_coordinate(at_gs, at_es, zpl_energy_eV=zpl_eV, calc_es=calc_es_opt)
-                if zpl_eV is None and cc_dict and "zpl_energy_eV" in cc_dict:
-                    zpl_eV = float(cc_dict["zpl_energy_eV"])
-                    logger.info(f"[+] Derived ZPL energy from CC analysis: {zpl_eV:.4f} eV")
-                    if getattr(self.config, "calculate_pl_intensity", True):
-                        for T, (eg, a_norm) in lineshape_dict.items():
-                            hw_phot, i_pl = compute_photoluminescence_spectrum(eg, a_norm, zpl_eV)
-                            pl_dict[T] = (hw_phot, i_pl)
+                if zpl_eV is None and cc_dict:
+                    raw_zpl = cc_dict.get("e_zpl_eV", cc_dict.get("zpl_energy_eV"))
+                    if raw_zpl is not None and float(raw_zpl) > 0:
+                        zpl_eV = float(raw_zpl)
+                        logger.info(f"[+] Derived ZPL energy from CC analysis: {zpl_eV:.4f} eV")
+                        if getattr(self.config, "calculate_pl_intensity", True):
+                            for T, (eg, a_norm) in lineshape_dict.items():
+                                hw_phot, i_pl = compute_photoluminescence_spectrum(eg, a_norm, zpl_eV)
+                                pl_dict[T] = (hw_phot, i_pl)
             except Exception as e:
                 logger.warning(f"[!] Warning: Configuration coordinate calculation encountered an issue: {e}")
 
@@ -931,8 +1151,8 @@ class LineshapeEngine:
 
                         for T in self.config.temperatures:
                             user_gamma = self.config.dephasing_gamma_meV
-                            base_gamma = 1.5 if user_gamma is None else float(user_gamma)
-                            coeff = getattr(self.config, "dephasing_temperature_coefficient", 5.5e-5)
+                            base_gamma = 1.0 if user_gamma is None else float(user_gamma)
+                            coeff = getattr(self.config, "dephasing_temperature_coefficient", 0.0)
                             gamma = base_gamma + coeff * (T ** 2)
                             _, m_a = compute_quantum_lineshape(
                                 hw_grid,
@@ -960,11 +1180,11 @@ class LineshapeEngine:
         if self.config.enable_anharmonic:
             if is_embedded:
                 logger.info(
-                    f"    [-] Running anharmonic MD on DFT defect supercell ({len(at_gs_md)} atoms) "
-                    f"rather than embedded {len(at_gs)}-atom phonon cell to prevent far-field bulk Delta-U noise."
+                    f"    [-] Running anharmonic MD on embedded {len(at_gs)}-atom phonon supercell "
+                    f"to resolve Brillouin-zone acoustic modes."
                 )
             anharmonic_dict = self.run_anharmonic_sampling(
-                at_gs_md, at_es_md, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts
+                at_gs, at_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts
             )
             self.plot_all(
                 lineshape_dict,
@@ -1140,11 +1360,6 @@ class LineshapeEngine:
         self, at_gs, at_es, hw_grid, s_cont, total_S=None, e_min=None, e_max=None, n_pts=1500
     ):
         """Runs paired molecular dynamics across configured temperatures to evaluate anharmonic lineshapes."""
-        from ase.md.langevin import Langevin
-        from ase.md.verlet import VelocityVerlet
-        from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
-        from ase import units
-
         logger.info("\n[-] Running Finite-Temperature Anharmonic Molecular Dynamics Sampling...")
         dr_fc = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
         m = at_gs.get_masses()
@@ -1198,8 +1413,6 @@ class LineshapeEngine:
                 paired_calc = PairedDefectCalculator(self.calc, calc_es_opt)
             logger.info("    [+] Anharmonic emission Delta U(t) driven by physical paired model: trajectories run on V_ES(R), Delta U = V_ES(R) - V_GS(R)")
         else:
-            at_disp = at_gs.copy()
-            at_disp.calc = self.calc
             logger.info("    [i] Single-potential fallback: Anharmonic Delta U(t) driven by displaced ground-state potential V_GS(R+Delta R) - V_GS(R)")
 
         anharmonic_dict = {}
@@ -1231,96 +1444,91 @@ class LineshapeEngine:
             except Exception:
                 pass
 
-        for T in self.config.temperatures:
-            t0 = time.time()
-            all_du_series = []
-            all_v_opt_series = []
-            t_equil_list = []
+        n_therm = getattr(self.config, "anharmonic_thermalization_steps", 400)
+        at_start_bare = (at_es_eq if has_paired else at_gs_eq).copy()
+        at_start_bare.calc = None
 
-            for traj_idx in range(n_trajectories):
-                if has_paired:
-                    at = at_es_eq.copy()
-                    at.calc = calc_es_opt
-                else:
-                    at = at_gs_eq.copy()
-                    at.calc = self.calc
+        use_parallel = bool(getattr(self.config, "parallel_hessian", True)) and n_trajectories > 1
+        gs_spec = _extract_hybrid_calc_spec(self.calc) if use_parallel else None
+        es_spec = _extract_hybrid_calc_spec(calc_es_opt) if (use_parallel and has_paired) else None
+        can_parallel = use_parallel and gs_spec is not None and (not has_paired or es_spec is not None)
 
-                # 1. Thermalization with Langevin dynamics (NVT)
-                n_therm = getattr(self.config, "anharmonic_thermalization_steps", 400)
-                if n_therm > 0:
-                    try:
-                        from ase.md.velocitydistribution import thermalize_momenta
-                        thermalize_momenta(at, temperature_K=T)
-                    except ImportError:
-                        MaxwellBoltzmannDistribution(at, temperature_K=T)
-                    Stationary(at)
-                    if not np.any(at.pbc):
-                        ZeroRotation(at)
-                    if traj_idx == 0:
-                        logger.info(
-                            f"    [MD T = {T:g} K] Phase 1/2: NVT Langevin thermalization ({n_therm} steps, target T = {T:g} K)..."
+        executor = None
+        if can_parallel:
+            max_cfg = getattr(self.config, "parallel_hessian_workers", None) or os.cpu_count() or 4
+            n_workers = max(1, min(int(max_cfg), n_trajectories, os.cpu_count() or 1))
+            if n_workers > 1:
+                worker_spec = {"gs": gs_spec, "es": es_spec}
+                executor = ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_init_anharmonic_worker,
+                    initargs=(worker_spec,),
+                )
+                logger.info(
+                    f"    [+] Using {n_workers} parallel single-threaded MD workers across {n_trajectories} trajectories."
+                )
+
+        md_results_by_T: Dict[float, Tuple[List[np.ndarray], List[np.ndarray], float, float]] = {}
+        try:
+            for T in self.config.temperatures:
+                t_md0 = time.time()
+                logger.info(
+                    f"    [MD T = {T:g} K] Running NVT ({n_therm} steps) -> NVE ({n_steps} steps, {n_trajectories} trajectories)..."
+                )
+                if executor is not None:
+                    tasks = [
+                        (
+                            at_start_bare,
+                            float(T),
+                            dt_fs,
+                            n_therm,
+                            n_steps,
+                            u_opt,
+                            dr_fc,
+                            int(round(T * 100.0)) * 1000 + traj_idx,
                         )
-                    dyn_therm = Langevin(at, dt_fs * units.fs, temperature_K=T, friction=0.01 / units.fs, fixcm=False, logfile=None)
-                    t_therm_samples = []
-                    dyn_therm.attach(lambda: t_therm_samples.append(at.get_temperature()), interval=max(1, n_therm // 10))
-                    dyn_therm.run(n_therm)
-                    t_equil = float(np.mean(t_therm_samples[-5:])) if t_therm_samples else T
+                        for traj_idx in range(n_trajectories)
+                    ]
+                    traj_results = list(executor.map(_run_anharmonic_window_worker, tasks))
                 else:
-                    t_equil = T
-                t_equil_list.append(t_equil)
+                    traj_results = [
+                        _run_single_anharmonic_trajectory(
+                            at_start=at_start_bare,
+                            T=float(T),
+                            dt_fs=dt_fs,
+                            n_therm=n_therm,
+                            n_steps=n_steps,
+                            u_opt=u_opt,
+                            dr_fc=dr_fc,
+                            calc_gs=self.calc,
+                            calc_es=calc_es_opt if has_paired else None,
+                            paired_calc=paired_calc if has_paired else None,
+                            seed=int(round(T * 100.0)) * 1000 + traj_idx,
+                            show_progress=True,
+                            desc_str=(
+                                f"Anharmonic MD ({T:g} K)"
+                                if n_trajectories == 1
+                                else f"Anharmonic MD ({T:g} K traj {traj_idx+1}/{n_trajectories})"
+                            ),
+                        )
+                        for traj_idx in range(n_trajectories)
+                    ]
+                t_equil_val = float(np.mean([r[2] for r in traj_results])) if traj_results else float(T)
+                md_elapsed_s = time.time() - t_md0
+                md_results_by_T[T] = (
+                    [r[0] for r in traj_results],
+                    [r[1] for r in traj_results],
+                    t_equil_val,
+                    md_elapsed_s,
+                )
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
-                # 2. Production dynamics: VelocityVerlet (NVE) eliminates artificial friction broadening
-                if traj_idx == 0:
-                    traj_desc = f" ({n_trajectories} trajectories)" if n_trajectories > 1 else ""
-                    logger.info(
-                        f"    [MD T = {T:g} K] Phase 2/2: NVE VelocityVerlet production ({n_steps} steps, equilibrated T = {t_equil:.1f} K){traj_desc}..."
-                    )
-                Stationary(at)
-                if not np.any(at.pbc):
-                    ZeroRotation(at)
-                dyn = VelocityVerlet(at, dt_fs * units.fs, logfile=None)
-
-                du_list = []
-                v_opt_list = []
-
-                def step_observer():
-                    v = at.get_velocities()
-                    v_opt = float(np.sum(v * u_opt))
-                    v_opt_list.append(v_opt)
-
-                    if has_paired:
-                        if paired_calc is not None:
-                            du = float(paired_calc.get_energy_gap(at) * 1000.0)
-                        else:
-                            ue = at.get_potential_energy()
-                            at_gs_eval = at.copy()
-                            at_gs_eval.calc = self.calc
-                            ug = at_gs_eval.get_potential_energy()
-                            du = float((ue - ug) * 1000.0)
-                    else:
-                        ug = at.get_potential_energy()
-                        at_disp.positions = at.positions + dr_fc
-                        at_disp.cell = at.cell
-                        ue = at_disp.get_potential_energy()
-                        du = float((ue - ug) * 1000.0)
-                    du_list.append(du)
-
-                dyn.attach(step_observer, interval=2)
-                desc_str = f"Anharmonic MD ({T:g} K)" if n_trajectories == 1 else f"Anharmonic MD ({T:g} K traj {traj_idx+1}/{n_trajectories})"
-                pbar = tqdm(total=n_steps, desc=desc_str, unit="step", leave=False)
-                step_chunk = 50
-                steps_done = 0
-                while steps_done < n_steps:
-                    this_chunk = min(step_chunk, n_steps - steps_done)
-                    dyn.run(this_chunk)
-                    steps_done += this_chunk
-                    pbar.update(this_chunk)
-                pbar.close()
-
-                all_du_series.append(np.array(du_list, dtype=float))
-                all_v_opt_series.append(np.array(v_opt_list, dtype=float))
-
-            t_equil = float(np.mean(t_equil_list)) if t_equil_list else T
+        for T in self.config.temperatures:
+            t_post0 = time.time()
+            all_du_series, all_v_opt_series, t_equil, md_elapsed_s = md_results_by_T[T]
 
             # Combine energy gap fluctuations across trajectories
             all_du_fluc = []
@@ -1398,7 +1606,7 @@ class LineshapeEngine:
                 kbt_eff = max(1e-4, KB_MEV_K * t_equil)
 
                 # Acoustic suppression filter to prevent low-frequency drift divergence below host acoustic threshold:
-                hw_cutoff = max(3.0, 0.25 * omega_0)
+                hw_cutoff = max(3.0, min(8.0, 0.25 * omega_0))
                 filter_acoustic = 1.0 - np.exp(- (hw_grid / hw_cutoff) ** 4)
 
                 # Exact classical fluctuation-dissipation relation:
@@ -1419,8 +1627,8 @@ class LineshapeEngine:
                     int_s_anh = float(trapz_fn(s_anh / 1000.0, hw_grid))
 
                 user_gamma = self.config.dephasing_gamma_meV
-                base_gamma = 1.5 if user_gamma is None else float(user_gamma)
-                coeff = getattr(self.config, "dephasing_temperature_coefficient", 5.5e-5)
+                base_gamma = 1.0 if user_gamma is None else float(user_gamma)
+                coeff = getattr(self.config, "dephasing_temperature_coefficient", 0.0)
                 gamma = base_gamma + coeff * (T ** 2)
 
                 eg_out, a_anh = compute_quantum_lineshape(
@@ -1445,7 +1653,7 @@ class LineshapeEngine:
                 s_anh = np.interp(hw_shifted, hw_grid, s_cont, left=0.0, right=0.0) / alpha_soft
 
                 user_gamma = self.config.dephasing_gamma_meV
-                gamma_base = 1.5 if user_gamma is None else float(user_gamma)
+                gamma_base = 1.0 if user_gamma is None else float(user_gamma)
                 delta_gamma_anh = 0.3 * np.sqrt(max(1.0, T) / 10.0)
                 gamma_total = gamma_base + delta_gamma_anh
 
@@ -1508,9 +1716,12 @@ class LineshapeEngine:
                 "n_trajectories": n_trajectories,
                 "target_T_K": float(T),
                 "equilibrated_T_K": float(t_equil),
-                "walltime_s": time.time() - t0,
+                "walltime_s": md_elapsed_s + (time.time() - t_post0),
             }
-            logger.info(f"    [+] Anharmonic MD T = {T:5.1f} K | {regime_tag} | Lineshape FWHM = {fwhm_meV:5.1f} meV ({time.time()-t0:.1f} s)")
+            logger.info(
+                f"    [+] Anharmonic MD T = {T:5.1f} K | {regime_tag} | Lineshape FWHM = {fwhm_meV:5.1f} meV "
+                f"({anharmonic_dict[T]['walltime_s']:.1f} s)"
+            )
 
         return anharmonic_dict
 

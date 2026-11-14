@@ -78,6 +78,7 @@ class HybridDefectCalculator(Calculator):
         energy_offset_per_atom: Optional[float] = None,
     ):
         super().__init__()
+        self.foundation_pot_path = foundation_pot_path
         self.calc_base = load_foundation_calculator(
             potential_path=foundation_pot_path,
             existing_calc=calc_base,
@@ -206,12 +207,23 @@ class PairedDefectCalculator:
 
     def get_energy_gap(self, atoms: Atoms) -> float:
         """Returns the instantaneous electronic transition energy gap Delta U(R) = V_ES(R) - V_GS(R)."""
-        if (
+        same_foundation = (
             isinstance(self.calc_gs, HybridDefectCalculator)
             and isinstance(self.calc_es, HybridDefectCalculator)
             and self.calc_gs.calc_base is not None
-            and self.calc_gs.calc_base is self.calc_es.calc_base
-        ):
+            and (
+                self.calc_gs.calc_base is self.calc_es.calc_base
+                or (
+                    isinstance(self.calc_gs.calc_base, CPUNEP)
+                    and isinstance(self.calc_es.calc_base, CPUNEP)
+                    and bool(getattr(self.calc_gs, "foundation_pot_path", None))
+                    and bool(getattr(self.calc_es, "foundation_pot_path", None))
+                    and os.path.abspath(str(self.calc_gs.foundation_pot_path))
+                    == os.path.abspath(str(self.calc_es.foundation_pot_path))
+                )
+            )
+        )
+        if same_foundation:
             def _mean_delta_energy(hcalc: HybridDefectCalculator) -> float:
                 e_deltas = []
                 for calc_d in hcalc.calc_deltas:

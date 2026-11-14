@@ -264,19 +264,28 @@ def cli_lineshape(config_path: str, args: Any) -> int:
     at_gs = ase.io.read(relaxed_gs_path)
     at_es = ase.io.read(relaxed_es_path)
 
-    from .calculator import HybridDefectCalculator
+    from .calculator import HybridDefectCalculator, PairedDefectCalculator
     from .lineshape import LineshapeEngine
 
     logger.info(f"[-] Initializing Hybrid Calculator from workspace {ws}...")
-    hybrid_calc = HybridDefectCalculator(cfg)
+    delta_gs_file = os.path.join(ws, "nep_delta_gs.txt")
+    if not os.path.isfile(delta_gs_file):
+        delta_gs_file = os.path.join(ws, "nep_delta.txt")
+    hybrid_calc = HybridDefectCalculator(
+        cfg.foundation_potential_path,
+        delta_gs_file if os.path.isfile(delta_gs_file) else None,
+    )
     calc_es = None
     paired_calc = None
 
     delta_es_file = os.path.join(ws, "nep_delta_es.txt")
     if os.path.isfile(delta_es_file):
         try:
-            calc_es = HybridDefectCalculator(cfg, delta_potential_file=delta_es_file)
-            from .delta_trainer import PairedDefectCalculator
+            calc_es = HybridDefectCalculator(
+                cfg.foundation_potential_path,
+                delta_es_file,
+                calc_base=hybrid_calc.calc_base,
+            )
             paired_calc = PairedDefectCalculator(hybrid_calc, calc_es)
             logger.info(f"[+] Paired Excited-State Hybrid Calculator initialized ({delta_es_file}).")
         except Exception as e:
@@ -323,7 +332,13 @@ def cli_converge(config_path: str, args: Any) -> int:
     from .calculator import HybridDefectCalculator
     from .lineshape import LineshapeEngine
 
-    hybrid_calc = HybridDefectCalculator(cfg)
+    delta_gs_file = os.path.join(ws, "nep_delta_gs.txt")
+    if not os.path.isfile(delta_gs_file):
+        delta_gs_file = os.path.join(ws, "nep_delta.txt")
+    hybrid_calc = HybridDefectCalculator(
+        cfg.foundation_potential_path,
+        delta_gs_file if os.path.isfile(delta_gs_file) else None,
+    )
     engine = LineshapeEngine(cfg, hybrid_calc)
 
     supercell_list = [(1, 1, 1), (2, 2, 2)]

@@ -133,6 +133,19 @@ class ConfigurationCoordinateEngine:
             zpl_source = "user_configured"
         else:
             derived, src = self._derive_zpl(at_gs, at_es, e_rel_es_eV=e_rel_gs_eV)
+            if derived is None and calc_es is not None:
+                from .calculator import HybridDefectCalculator
+
+                if isinstance(calc_es, HybridDefectCalculator):
+                    try:
+                        at_es_min = at_es.copy()
+                        at_es_min.calc = calc_es
+                        e_paired = float(at_es_min.get_potential_energy()) - v_ref
+                        if e_paired > 0.1:
+                            derived = e_paired
+                            src = "paired_potential_surface"
+                    except Exception:
+                        pass
             if derived is not None and derived > 0:
                 e_zpl = derived
                 zpl_source = src

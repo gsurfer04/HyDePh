@@ -139,3 +139,49 @@ def test_paired_defect_calculator_skips_shared_foundation_in_energy_gap():
     # Verify exact numerical equivalence with V_ES(R) - V_GS(R)
     du_full = float(h_es.get_potential_energy(at) - h_gs.get_potential_energy(at))
     assert du == pytest.approx(du_full, abs=1e-12)
+
+
+def test_paired_defect_calculator_skips_shared_foundation_by_matching_path(tmp_path, monkeypatch):
+    """Verify PairedDefectCalculator cancels distinct CPUNEP calc_base objects sharing the same potential path."""
+    import hydeph.calculator as calc_mod
+    from hydeph.calculator import HybridDefectCalculator
+
+    pot_file = tmp_path / "nep_foundation.txt"
+    pot_file.write_text("dummy", encoding="utf-8")
+
+    created_bases = []
+
+    class _SpyCPUNEP(SpyHarmonicCalculator):
+        def __init__(self, path):
+            super().__init__(k=10.0, r0=0.0, offset_eV=-100.0)
+            self.path = path
+            created_bases.append(self)
+
+    monkeypatch.setattr(calc_mod, "CPUNEP", _SpyCPUNEP)
+    # Also ensure load_foundation_calculator sees our patched CPUNEP
+    at = Atoms("Si2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[5, 5, 5], pbc=True)
+    delta_gs = SpyHarmonicCalculator(k=1.0, r0=0.0, offset_eV=-1.0)
+    delta_es = SpyHarmonicCalculator(k=2.0, r0=0.05, offset_eV=1.5)
+
+    h_gs = HybridDefectCalculator(
+        foundation_pot_path=str(pot_file),
+        calc_delta=delta_gs,
+        energy_offset_per_atom=0.25,
+    )
+    h_es = HybridDefectCalculator(
+        foundation_pot_path=str(pot_file),
+        calc_delta=delta_es,
+        energy_offset_per_atom=-0.50,
+    )
+    assert len(created_bases) == 2
+    assert h_gs.calc_base is not h_es.calc_base
+
+    paired = PairedDefectCalculator(h_gs, h_es)
+    calls_gs_before = h_gs.calc_base.call_count
+    calls_es_before = h_es.calc_base.call_count
+    du = paired.get_energy_gap(at)
+    assert h_gs.calc_base.call_count == calls_gs_before
+    assert h_es.calc_base.call_count == calls_es_before
+
+    du_full = float(h_es.get_potential_energy(at) - h_gs.get_potential_energy(at))
+    assert du == pytest.approx(du_full, abs=1e-12)
