@@ -184,3 +184,51 @@ def test_embed_phonon_supercell_masks_far_field_es_forces(tmp_path):
     norms = np.linalg.norm(f_es_large, axis=1)
     assert np.count_nonzero(norms > 1e-6) == len(at_gs)
     assert np.count_nonzero(norms == 0.0) == len(at_large) - len(at_gs)
+
+
+def test_embed_phonon_supercell_preserves_zero_net_force_on_core_mask(tmp_path):
+    """Verify non-uniform masked ES-GS defect forces conserve momentum (sum F == 0)."""
+    import ase.io
+    pristine_file = tmp_path / "pristine_force_net.xyz"
+    uc = Atoms("C4", positions=[[0, 0, 0], [1.4, 0, 0], [0, 1.4, 0], [1.4, 1.4, 1.4]], cell=[2.8, 2.8, 2.8], pbc=True)
+    ase.io.write(str(pristine_file), uc)
+
+    at_gs = uc.copy()
+    del at_gs[0]
+    at_es = at_gs.copy()
+    at_es.positions[0] += [0.04, 0.0, 0.0]
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_file),
+        foundation_potential_path="dummy.txt",
+        workspace_dir=str(tmp_path),
+        supercell_repeat=(1, 1, 1),
+        phonon_supercell_repeat=(2, 2, 2),
+        defect_type="vacancy",
+        defect_site_index=0,
+        phonon_embedding_method="force",
+    )
+
+    class SpatiallyVaryingForceCalc:
+        def __init__(self, scale):
+            self.scale = scale
+
+        def get_potential_energy(self, atoms=None, **kwargs):
+            return 0.0
+
+        def get_forces(self, atoms=None, **kwargs):
+            pos = atoms.get_positions()
+            # Spatially varying non-zero-mean force over arbitrary core subsets
+            return self.scale * np.column_stack([
+                np.sin(pos[:, 0]) + 0.3,
+                np.cos(pos[:, 1]) - 0.2,
+                0.5 * np.sin(pos[:, 2]) + 0.1,
+            ])
+
+    at_large, _, f_es_large = embed_phonon_supercell(
+        at_gs, at_es, cfg, SpatiallyVaryingForceCalc(0.0), calc_es=SpatiallyVaryingForceCalc(1.0)
+    )
+    assert f_es_large is not None
+    assert len(at_large) > len(at_gs)
+    assert np.count_nonzero(np.linalg.norm(f_es_large, axis=1) == 0.0) == len(at_large) - len(at_gs)
+    assert np.allclose(np.sum(f_es_large, axis=0), 0.0, atol=1e-10)

@@ -406,7 +406,7 @@ def embed_phonon_supercell(
         Excited-state forces evaluated on at_gs_large (if calc_es provided and force method used).
     """
     import copy
-    from ase.optimize import BFGS
+    from ase.optimize import BFGS, LBFGS
     import ase.io
     from .defect_builder import DefectBuilder, detect_defect_sites
 
@@ -444,7 +444,7 @@ def embed_phonon_supercell(
 
     logger.info(f"    [-] Relaxing large phonon supercell ({len(at_gs_large)} atoms) on hybrid potential...")
     at_gs_large.calc = calc_gs
-    opt = BFGS(at_gs_large, logfile=None)
+    opt = LBFGS(at_gs_large, logfile=None) if len(at_gs_large) > 400 else BFGS(at_gs_large, logfile=None)
     fmax_thr = getattr(config, "relax_forc_conv_thr", 0.01)
     opt.run(fmax=fmax_thr, steps=100)
     e_large = at_gs_large.get_potential_energy()
@@ -480,8 +480,11 @@ def embed_phonon_supercell(
         at_gs_large.calc = calc_gs
         if len(at_gs_large) > len(at_gs):
             f_es_large[~core_mask] = 0.0
+            n_core = int(np.count_nonzero(core_mask))
+            if n_core > 1 and float(np.max(np.ptp(f_es_large[core_mask], axis=0))) > 1e-6:
+                f_es_large[core_mask] -= np.mean(f_es_large[core_mask], axis=0)
             logger.info(
-                f"    [+] Masked ES-GS force difference to {int(np.count_nonzero(core_mask))} DFT core atoms "
+                f"    [+] Masked ES-GS force difference to {n_core} DFT core atoms "
                 f"(zeroed {int(np.count_nonzero(~core_mask))} far-field bulk atoms)."
             )
 
@@ -1605,8 +1608,8 @@ class LineshapeEngine:
                 HBAR_MEV_FS = HBAR_EV_FS * 1000.0
                 kbt_eff = max(1e-4, KB_MEV_K * t_equil)
 
-                # Acoustic suppression filter to prevent low-frequency drift divergence below host acoustic threshold:
-                hw_cutoff = max(3.0, min(8.0, 0.25 * omega_0))
+                # Acoustic suppression filter to prevent hw -> 0 drift/1/omega divergence while preserving >= 4 meV acoustic phonons:
+                hw_cutoff = max(2.0, min(3.5, 0.08 * omega_0))
                 filter_acoustic = 1.0 - np.exp(- (hw_grid / hw_cutoff) ** 4)
 
                 # Exact classical fluctuation-dissipation relation:

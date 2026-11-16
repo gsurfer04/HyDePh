@@ -185,3 +185,57 @@ def test_paired_defect_calculator_skips_shared_foundation_by_matching_path(tmp_p
 
     du_full = float(h_es.get_potential_energy(at) - h_gs.get_potential_energy(at))
     assert du == pytest.approx(du_full, abs=1e-12)
+
+
+def test_run_anharmonic_sampling_preserves_low_energy_acoustic_mode(tmp_path, monkeypatch):
+    """Verify MD-ACF acoustic filter preserves ~6 meV low-energy modes even when omega_0 ~ 50 meV."""
+    import hydeph.lineshape as ls_mod
+
+    p_file = tmp_path / "p.xyz"
+    at = Atoms("Si2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[5, 5, 5], pbc=True)
+    import ase.io
+    ase.io.write(str(p_file), at)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        foundation_potential_path=str(tmp_path / "f.txt"),
+        workspace_dir=str(tmp_path),
+        enable_anharmonic=True,
+        temperatures=[100.0],
+        anharmonic_n_trajectories=1,
+        anharmonic_md_steps=3000,
+        anharmonic_dt_fs=1.0,
+        anharmonic_coupling_regime="cumulant",
+        parallel_hessian=False,
+    )
+    calc_gs = SpyHarmonicCalculator(k=10.0)
+    engine = LineshapeEngine(cfg, calc_gs)
+
+    # S_cont centered around 50 meV so omega_0 = 50 meV (previously clamped hw_cutoff = 8.0 meV)
+    hw_grid = np.linspace(0.5, 120.0, 600)
+    s_cont = np.exp(-0.5 * ((hw_grid - 50.0) / 4.0) ** 2) * 100.0
+
+    # Mock single trajectory to emit exact classical fluctuation for a 6 meV mode (S=1.0) and 50 meV mode (S=1.0)
+    T_k = 100.0
+    kbt = KB_MEV_K * T_k
+    dt_obs = 2.0
+    t_arr = np.arange(1500, dtype=float) * dt_obs
+
+    def fake_single_traj(**kwargs):
+        rng = np.random.default_rng(kwargs.get("seed", 0))
+        du_series = np.zeros_like(t_arr)
+        for hw_k, S_k in [(6.0, 1.0), (50.0, 1.0)]:
+            wk_fs = (hw_k / 1000.0) / HBAR_EV_FS
+            phi = rng.uniform(0.0, 2.0 * np.pi)
+            amp = np.sqrt(4.0 * S_k * hw_k * kbt)
+            du_series += amp * np.cos(wk_fs * t_arr + phi)
+        return du_series, np.zeros_like(t_arr), T_k
+
+    monkeypatch.setattr(ls_mod, "_run_single_anharmonic_trajectory", fake_single_traj)
+    res = engine.run_anharmonic_sampling(at, at, hw_grid, s_cont, total_S=1.0, e_min=-200.0, e_max=40.0, n_pts=400)
+    s_anh = res[100.0]["s_anh"]
+    trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    m_low = (hw_grid >= 3.5) & (hw_grid <= 10.0)
+    s_low = float(trapz_fn(s_anh[m_low] / 1000.0, hw_grid[m_low]))
+    # Previously ~0.35 when hw_cutoff=8.0 suppressed 6 meV; with hw_cutoff<=3.5 should retain > 0.70
+    assert s_low > 0.70
