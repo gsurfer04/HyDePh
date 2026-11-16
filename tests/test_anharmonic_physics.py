@@ -487,3 +487,33 @@ def test_embedded_acf_uses_dispersion_matched_damping(tmp_path, monkeypatch):
         return float(above[-1] - above[0])
 
     assert fwhm_around(20.0, hw_grid, s_anh) > fwhm_around(90.0, hw_grid, s_anh) + 1.5
+
+
+
+def test_anharmonic_md_surface_gs_skips_es_dynamics(tmp_path):
+    """Verify anharmonic_md_surface='gs' runs MD on calc_gs even when calc_es is attached."""
+    pristine_path = tmp_path / "pristine.xyz"
+    at_gs = Atoms("C2", positions=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], cell=[6.0, 6.0, 6.0], pbc=True)
+    at_gs.info["is_embedded"] = True
+    at_gs.write(str(pristine_path))
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_path),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "out"),
+        temperatures=[100.0],
+        anharmonic_md_steps=20,
+        anharmonic_thermalization_steps=10,
+        anharmonic_n_trajectories=1,
+        anharmonic_md_surface="gs",
+        parallel_hessian=False,
+    )
+    calc_gs = SpyHarmonicCalculator(k=10.0)
+    calc_es = SpyHarmonicCalculator(k=10.0, offset_eV=2.0)
+    eng = LineshapeEngine(cfg, calc_gs)
+    eng.calc_es = calc_es
+    hw_grid = np.linspace(1.0, 100.0, 100)
+    f_core = np.array([[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]], dtype=float)
+    eng.run_anharmonic_sampling(at_gs, at_gs.copy(), hw_grid, np.zeros_like(hw_grid), total_S=1.0, f_es_mode=f_core)
+    assert calc_gs.call_count > 10
+    assert calc_es.call_count == 0

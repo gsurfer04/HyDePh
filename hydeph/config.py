@@ -636,6 +636,7 @@ class ToolkitConfig:
     export_normal_modes: bool = True
     anharmonic_n_trajectories: int = 4
     anharmonic_acf_damping_meV: float = 2.0
+    anharmonic_md_surface: str = "es"  # "es" (excited-state PES) or "gs" (ground-state PES)
     calculate_pl_intensity: bool = True
     finite_size_acoustic_cutoff: Optional[bool] = None
     lineshape_n_points: int = 1500
@@ -1356,6 +1357,8 @@ class ToolkitConfig:
             )
         if int(self.anharmonic_n_trajectories) < 1:
             raise ValueError(f"Invalid anharmonic_n_trajectories: {self.anharmonic_n_trajectories}. Must be >= 1.")
+        if str(self.anharmonic_md_surface).lower() not in ("es", "gs"):
+            raise ValueError(f"Invalid anharmonic_md_surface: '{self.anharmonic_md_surface}'. Must be 'es' or 'gs'.")
         if float(self.anharmonic_acf_damping_meV) <= 0.0:
             raise ValueError(f"Invalid anharmonic_acf_damping_meV: {self.anharmonic_acf_damping_meV}. Must be > 0.")
         if self.time_window_tau_fs is not None and float(self.time_window_tau_fs) <= 0.0:

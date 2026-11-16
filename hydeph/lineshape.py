@@ -1498,7 +1498,8 @@ class LineshapeEngine:
 
         calc_es_opt = getattr(self, "calc_es", None)
         paired_calc = getattr(self, "paired_calc", None)
-        has_paired = calc_es_opt is not None
+        md_surface = str(getattr(self.config, "anharmonic_md_surface", "es")).lower()
+        has_paired = (calc_es_opt is not None) and (md_surface != "gs")
         is_embedded_cell = bool(at_gs.info.get("is_embedded", False))
         use_embedded_core_force = (
             is_embedded_cell
@@ -1522,7 +1523,7 @@ class LineshapeEngine:
                 paired_calc = PairedDefectCalculator(self.calc, calc_es_opt)
             logger.info("    [+] Anharmonic emission Delta U(t) driven by physical paired model: trajectories run on V_ES(R), Delta U = V_ES(R) - V_GS(R)")
         else:
-            logger.info("    [i] Single-potential fallback: Anharmonic Delta U(t) driven by displaced ground-state potential V_GS(R+Delta R) - V_GS(R)")
+            logger.info("    [i] Ground-state MD sampling: Delta U(t) driven on V_GS(R) trajectory")
 
         anharmonic_dict = {}
         n_trajectories = max(1, int(getattr(self.config, "anharmonic_n_trajectories", 4)))
@@ -1740,7 +1741,7 @@ class LineshapeEngine:
                 )
                 denom_du = t_du[-1] if len(t_du) > 1 and t_du[-1] > 0 else 1.0
                 gamma_hw = (
-                    3.0 - 1.5 * (hw_grid / max(1e-6, float(hw_grid[-1])))
+                    3.5 - 2.0 * (hw_grid / max(1e-6, float(hw_grid[-1])))
                     if use_var_acf
                     else np.full_like(hw_grid, gamma_acf, dtype=float)
                 )
