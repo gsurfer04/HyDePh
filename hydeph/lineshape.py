@@ -256,6 +256,8 @@ def _run_single_anharmonic_trajectory(
     seed: Optional[int] = None,
     show_progress: bool = True,
     desc_str: str = "Anharmonic MD",
+    f_core: Optional[np.ndarray] = None,
+    r_ref: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Runs NVT Langevin thermalization followed by NVE VelocityVerlet production."""
     from ase import units
@@ -264,10 +266,16 @@ def _run_single_anharmonic_trajectory(
     from ase.md.velocitydistribution import Stationary, ZeroRotation
 
     has_paired = calc_es is not None
+    use_core_force_gap = f_core is not None and r_ref is not None and len(f_core) == len(at_start)
+    core_idx = np.flatnonzero(np.linalg.norm(f_core, axis=1) > 1e-12) if use_core_force_gap else np.array([], dtype=int)
+    use_core_force_gap = use_core_force_gap and len(core_idx) > 0
+    f_core_nz = np.asarray(f_core[core_idx], dtype=float) if use_core_force_gap else None
+    r_ref_nz = np.asarray(r_ref[core_idx], dtype=float) if use_core_force_gap else None
+
     at = at_start.copy()
     at.calc = calc_es if has_paired else calc_gs
     at_disp = None
-    if not has_paired:
+    if not has_paired and not use_core_force_gap:
         at_disp = at_start.copy()
         at_disp.calc = calc_gs
 
@@ -318,7 +326,10 @@ def _run_single_anharmonic_trajectory(
         v_opt_list.append(float(np.sum(v * u_opt)))
         t_nve_list.append(float(at.get_temperature()))
 
-        if has_paired:
+        if use_core_force_gap:
+            disp = mic_displacement(at.positions[core_idx], r_ref_nz, at.cell)
+            du = float(-np.sum(f_core_nz * disp) * 1000.0)
+        elif has_paired:
             if paired_calc is not None:
                 du = float(paired_calc.get_energy_gap(at) * 1000.0)
             else:
@@ -357,7 +368,11 @@ def _run_anharmonic_window_worker(
     task_args: Tuple[Any, ...]
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Worker entry point executing one NVT->NVE trajectory using cached worker calculators."""
-    at_start, T, dt_fs, n_therm, n_steps, u_opt, dr_fc, seed = task_args
+    if len(task_args) == 10:
+        at_start, T, dt_fs, n_therm, n_steps, u_opt, dr_fc, seed, f_core, r_ref = task_args
+    else:
+        at_start, T, dt_fs, n_therm, n_steps, u_opt, dr_fc, seed = task_args
+        f_core, r_ref = None, None
     return _run_single_anharmonic_trajectory(
         at_start=at_start,
         T=T,
@@ -371,7 +386,29 @@ def _run_anharmonic_window_worker(
         paired_calc=_ANHARM_WORKER_STATE.get("paired_calc"),
         seed=seed,
         show_progress=False,
+        f_core=f_core,
+        r_ref=r_ref,
     )
+
+
+def _wigner_seitz_radius(cell: Any) -> float:
+    """Returns the inscribed Wigner-Seitz sphere radius 0.5 * min_{n!=0} ||n @ cell||."""
+    cell_arr = np.asarray(cell, dtype=float)
+    if cell_arr.shape != (3, 3):
+        return float("inf")
+    combos = np.array(
+        [
+            [i, j, k]
+            for i in (-1, 0, 1)
+            for j in (-1, 0, 1)
+            for k in (-1, 0, 1)
+            if (i, j, k) != (0, 0, 0)
+        ],
+        dtype=float,
+    )
+    norms = np.linalg.norm(combos @ cell_arr, axis=1)
+    pos_norms = norms[norms > 1e-8]
+    return 0.5 * float(np.min(pos_norms)) if len(pos_norms) > 0 else float("inf")
 
 
 def embed_phonon_supercell(
@@ -454,10 +491,12 @@ def embed_phonon_supercell(
     dr_small = mic_displacement(at_es.positions, at_gs.positions, at_gs.cell)
     dr_large = np.zeros_like(at_gs_large.positions)
     core_mask = np.zeros(len(at_gs_large), dtype=bool)
+    r_from_center = np.full(len(at_gs_large), float("inf"), dtype=float)
     ri_rels = mic_displacement(at_gs.positions, c_small, at_gs.cell)
 
     for j, at_j in enumerate(at_gs_large):
         rj_rel = mic_displacement([at_j.position], c_large, at_gs_large.cell)[0]
+        r_from_center[j] = float(np.linalg.norm(rj_rel))
         dists = np.linalg.norm(ri_rels - rj_rel, axis=1)
         min_i = int(np.argmin(dists))
         if dists[min_i] < 0.25 and at_gs[min_i].symbol == at_j.symbol:
@@ -479,13 +518,21 @@ def embed_phonon_supercell(
         f_es_large = at_gs_large.get_forces().copy() - f_gs_large
         at_gs_large.calc = calc_gs
         if len(at_gs_large) > len(at_gs):
-            f_es_large[~core_mask] = 0.0
-            n_core = int(np.count_nonzero(core_mask))
-            if n_core > 1 and float(np.max(np.ptp(f_es_large[core_mask], axis=0))) > 1e-6:
-                f_es_large[core_mask] -= np.mean(f_es_large[core_mask], axis=0)
+            force_mask = core_mask
+            r_ws = _wigner_seitz_radius(at_gs.cell) if len(at_gs) > 8 else float("inf")
+            if np.isfinite(r_ws):
+                # Exclude DFT periodic-boundary corners outside the Wigner-Seitz inscribed sphere.
+                ws_mask = core_mask & (r_from_center <= r_ws)
+                if int(np.count_nonzero(ws_mask)) >= 4:
+                    force_mask = ws_mask
+            f_es_large[~force_mask] = 0.0
+            n_core = int(np.count_nonzero(force_mask))
+            if n_core > 1 and float(np.max(np.ptp(f_es_large[force_mask], axis=0))) > 1e-6:
+                f_es_large[force_mask] -= np.mean(f_es_large[force_mask], axis=0)
+            ws_note = f" within R_WS = {r_ws:.2f} A" if np.isfinite(r_ws) else ""
             logger.info(
-                f"    [+] Masked ES-GS force difference to {n_core} DFT core atoms "
-                f"(zeroed {int(np.count_nonzero(~core_mask))} far-field bulk atoms)."
+                f"    [+] Masked ES-GS force difference to {n_core} DFT core atoms{ws_note} "
+                f"(zeroed {int(np.count_nonzero(~force_mask))} outer/bulk atoms)."
             )
 
     # Propagate DFT energetics, ZPL metadata, and defect coordinates onto embedded cell
@@ -1187,7 +1234,8 @@ class LineshapeEngine:
                     f"to resolve Brillouin-zone acoustic modes."
                 )
             anharmonic_dict = self.run_anharmonic_sampling(
-                at_gs, at_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts
+                at_gs, at_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts,
+                f_es_mode=f_es_mode,
             )
             self.plot_all(
                 lineshape_dict,
@@ -1360,7 +1408,8 @@ class LineshapeEngine:
         return {"summary": summary_json, "spectral_density": spectral_csv, "lineshapes": lineshape_csv}
 
     def run_anharmonic_sampling(
-        self, at_gs, at_es, hw_grid, s_cont, total_S=None, e_min=None, e_max=None, n_pts=1500
+        self, at_gs, at_es, hw_grid, s_cont, total_S=None, e_min=None, e_max=None, n_pts=1500,
+        f_es_mode=None,
     ):
         """Runs paired molecular dynamics across configured temperatures to evaluate anharmonic lineshapes."""
         logger.info("\n[-] Running Finite-Temperature Anharmonic Molecular Dynamics Sampling...")
@@ -1410,7 +1459,24 @@ class LineshapeEngine:
         calc_es_opt = getattr(self, "calc_es", None)
         paired_calc = getattr(self, "paired_calc", None)
         has_paired = calc_es_opt is not None
-        if has_paired:
+        is_embedded_cell = bool(at_gs.info.get("is_embedded", False))
+        use_embedded_core_force = (
+            is_embedded_cell
+            and f_es_mode is not None
+            and len(f_es_mode) == len(at_gs)
+            and bool(np.any(np.abs(f_es_mode) > 1e-12))
+        )
+        f_core_pass = np.asarray(f_es_mode, dtype=float) if use_embedded_core_force else None
+        r_ref_pass = np.asarray(at_gs.positions, dtype=float).copy() if use_embedded_core_force else None
+
+        if use_embedded_core_force:
+            n_active_core = int(np.count_nonzero(np.linalg.norm(f_core_pass, axis=1) > 1e-12))
+            pot_label = "V_ES(R)" if has_paired else "V_GS(R)"
+            logger.info(
+                f"    [+] Embedded anharmonic Delta U(t) localized to {n_active_core} core atoms via F_core ({pot_label}), "
+                f"suppressing bulk Delta-NEP quadratic noise."
+            )
+        elif has_paired:
             if paired_calc is None:
                 from .calculator import PairedDefectCalculator
                 paired_calc = PairedDefectCalculator(self.calc, calc_es_opt)
@@ -1428,11 +1494,12 @@ class LineshapeEngine:
             try:
                 f_es_init = float(np.abs(at_es_eq.get_forces()).max())
                 if f_es_init > 0.02:
-                    from ase.optimize import BFGS
+                    from ase.optimize import BFGS, LBFGS
                     logger.info(
                         f"    [-] Relaxing excited-state MD starting geometry (initial max |F| = {f_es_init:.4f} eV/A)..."
                     )
-                    BFGS(at_es_eq, logfile=None).run(fmax=0.01, steps=40)
+                    opt_es = LBFGS(at_es_eq, logfile=None) if len(at_es_eq) > 400 else BFGS(at_es_eq, logfile=None)
+                    opt_es.run(fmax=0.01, steps=40)
                     f_es_after = float(np.abs(at_es_eq.get_forces()).max())
                     logger.info(f"    [+] Pre-MD ES geometry relaxed: max |F| = {f_es_after:.4f} eV/A")
             except Exception as exc:
@@ -1442,8 +1509,9 @@ class LineshapeEngine:
             try:
                 f_gs_init = float(np.abs(at_gs_eq.get_forces()).max())
                 if f_gs_init > 0.02:
-                    from ase.optimize import BFGS
-                    BFGS(at_gs_eq, logfile=None).run(fmax=0.01, steps=40)
+                    from ase.optimize import BFGS, LBFGS
+                    opt_gs = LBFGS(at_gs_eq, logfile=None) if len(at_gs_eq) > 400 else BFGS(at_gs_eq, logfile=None)
+                    opt_gs.run(fmax=0.01, steps=40)
             except Exception:
                 pass
 
@@ -1490,6 +1558,8 @@ class LineshapeEngine:
                             u_opt,
                             dr_fc,
                             int(round(T * 100.0)) * 1000 + traj_idx,
+                            f_core_pass,
+                            r_ref_pass,
                         )
                         for traj_idx in range(n_trajectories)
                     ]
@@ -1514,6 +1584,8 @@ class LineshapeEngine:
                                 if n_trajectories == 1
                                 else f"Anharmonic MD ({T:g} K traj {traj_idx+1}/{n_trajectories})"
                             ),
+                            f_core=f_core_pass,
+                            r_ref=r_ref_pass,
                         )
                         for traj_idx in range(n_trajectories)
                     ]

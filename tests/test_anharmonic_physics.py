@@ -285,3 +285,88 @@ def test_run_anharmonic_sampling_detrends_linear_gap_drift(tmp_path, monkeypatch
     res_drift = engine.run_anharmonic_sampling(at, at, hw_grid, s_cont, total_S=1.0, e_min=-200.0, e_max=40.0, n_pts=400)
 
     assert np.allclose(res_clean[300.0]["s_anh"], res_drift[300.0]["s_anh"], rtol=1e-4, atol=1e-4)
+
+
+def test_embedded_anharmonic_uses_core_force_gap_avoiding_bulk_noise(tmp_path):
+    """Embedded supercells with f_es_mode use core-force Delta U(t), ignoring bulk gap noise."""
+
+    class NoisyBulkGapCalc(Calculator):
+        implemented_properties = ["energy", "forces"]
+
+        def __init__(self, k_bond: float = 8.0, bulk_noise: float = 0.0):
+            super().__init__()
+            self.k_bond = k_bond
+            self.bulk_noise = bulk_noise
+
+        def calculate(self, atoms=None, properties=("energy", "forces"), system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            pos = atoms.positions
+            forces = np.zeros_like(pos)
+            # Pair (0,1) core oscillator along x around dx0 = 1.5 A
+            dx = pos[1, 0] - pos[0, 0] - 1.5
+            e = 0.5 * self.k_bond * (dx ** 2)
+            forces[0, 0] = self.k_bond * dx
+            forces[1, 0] = -self.k_bond * dx
+            # Pair (2,3) harmonic bath oscillator along x around dx0 = 1.5 A
+            dx_b = pos[3, 0] - pos[2, 0] - 1.5
+            e += 0.5 * self.k_bond * (dx_b ** 2)
+            forces[2, 0] = self.k_bond * dx_b
+            forces[3, 0] = -self.k_bond * dx_b
+            if self.bulk_noise != 0.0:
+                # Huge unphysical energy bias solely from outer/bulk atoms (2, 3)
+                e += self.bulk_noise * np.sum((pos[2:] - np.array([[5.0, 0.0, 0.0], [6.5, 0.0, 0.0]])) ** 2)
+            self.results["energy"] = float(e)
+            self.results["forces"] = forces
+
+    at_gs = Atoms(
+        "Si4",
+        positions=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [5.0, 0.0, 0.0], [6.5, 0.0, 0.0]],
+        cell=[20.0, 20.0, 20.0],
+        pbc=True,
+    )
+    at_gs.info["is_embedded"] = True
+    at_es = at_gs.copy()
+    at_es.positions[1, 0] += 0.08
+    at_es.positions[0, 0] -= 0.08
+
+    f_es_mode = np.array(
+        [[-0.8, 0.0, 0.0], [0.8, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        dtype=float,
+    )
+    hw_grid = np.linspace(1.0, 150.0, 300)
+    s_cont = np.zeros_like(hw_grid)
+
+    pristine_path = tmp_path / "pristine.xyz"
+    at_gs.write(str(pristine_path))
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_path),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "out"),
+        temperatures=[100.0],
+        anharmonic_dt_fs=1.0,
+        anharmonic_thermalization_steps=10,
+        anharmonic_md_steps=40,
+        anharmonic_n_trajectories=1,
+        parallel_hessian=False,
+        dephasing_gamma_meV=1.0,
+        zpl_energy_eV=1.5,
+    )
+
+    calc_gs = NoisyBulkGapCalc(bulk_noise=0.0)
+    calc_es_clean = NoisyBulkGapCalc(bulk_noise=0.0)
+    calc_es_noisy = NoisyBulkGapCalc(bulk_noise=50.0)
+
+    eng_clean = LineshapeEngine(cfg, calc_gs)
+    eng_clean.calc_es = calc_es_clean
+    res_clean = eng_clean.run_anharmonic_sampling(
+        at_gs, at_es, hw_grid, s_cont, total_S=1.0, e_min=-100.0, e_max=100.0, n_pts=201, f_es_mode=f_es_mode
+    )
+
+    eng_noisy = LineshapeEngine(cfg, calc_gs)
+    eng_noisy.calc_es = calc_es_noisy
+    res_noisy = eng_noisy.run_anharmonic_sampling(
+        at_gs, at_es, hw_grid, s_cont, total_S=1.0, e_min=-100.0, e_max=100.0, n_pts=201, f_es_mode=f_es_mode
+    )
+
+    assert np.allclose(res_clean[100.0]["s_anh"], res_noisy[100.0]["s_anh"], rtol=1e-6, atol=1e-8)

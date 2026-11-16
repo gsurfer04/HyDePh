@@ -232,3 +232,63 @@ def test_embed_phonon_supercell_preserves_zero_net_force_on_core_mask(tmp_path):
     assert len(at_large) > len(at_gs)
     assert np.count_nonzero(np.linalg.norm(f_es_large, axis=1) == 0.0) == len(at_large) - len(at_gs)
     assert np.allclose(np.sum(f_es_large, axis=0), 0.0, atol=1e-10)
+
+
+def test_embed_phonon_supercell_wigner_seitz_core_mask(tmp_path):
+    """For DFT cells with >8 atoms, excitation forces are restricted within R_WS."""
+    from hydeph.lineshape import _wigner_seitz_radius
+
+    pristine_uc = Atoms("Si", positions=[[0.0, 0.0, 0.0]], cell=[3.0, 3.0, 3.0], pbc=True)
+    pristine_path = tmp_path / "pristine.vasp"
+    pristine_uc.write(str(pristine_path), format="vasp")
+
+    at_gs = pristine_uc.repeat((3, 3, 3))
+    # Place a substitutional C defect near the center so centroid aligns at a lattice site.
+    center_idx = int(np.argmin(np.linalg.norm(at_gs.positions - np.array([3.0, 3.0, 3.0]), axis=1)))
+    at_gs[center_idx].symbol = "C"
+    defect_path = tmp_path / "defect.vasp"
+    at_gs.write(str(defect_path), format="vasp")
+    at_es = at_gs.copy()
+
+    class RadialESCalc(Calculator):
+        implemented_properties = ["energy", "forces"]
+
+        def __init__(self, scale: float = 0.0):
+            super().__init__()
+            self.scale = scale
+
+        def calculate(self, atoms=None, properties=("energy", "forces"), system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            center = np.mean(atoms.cell, axis=0)
+            disp = atoms.positions - center
+            norms = np.linalg.norm(disp, axis=1, keepdims=True)
+            self.results["energy"] = 0.0
+            self.results["forces"] = self.scale * disp / np.maximum(norms, 1.0)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_path),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "out"),
+        defect_cell_path=str(defect_path),
+        supercell_repeat=(3, 3, 3),
+        phonon_supercell_repeat=(4, 4, 4),
+        phonon_embedding_method="force",
+        relax_forc_conv_thr=1.0,
+    )
+
+    r_ws = _wigner_seitz_radius(at_gs.cell)
+    assert np.isclose(r_ws, 4.5, atol=1e-6)
+
+    at_gs_large, _, f_es_large = embed_phonon_supercell(
+        at_gs, at_es, cfg, RadialESCalc(scale=0.0), calc_es=RadialESCalc(scale=1.0)
+    )
+    assert f_es_large is not None
+    c_large = np.asarray(at_gs_large.info["defect_center"], dtype=float)
+    from hydeph.lineshape import mic_displacement
+
+    dists = np.linalg.norm(mic_displacement(at_gs_large.positions, c_large, at_gs_large.cell), axis=1)
+    norms = np.linalg.norm(f_es_large, axis=1)
+    # Corner atoms of the 3x3x3 cube (sqrt(3)*3 ~ 5.20 A > R_WS = 4.5 A) must be zeroed.
+    assert np.all(norms[dists > r_ws + 1e-6] < 1e-10)
+    assert np.any(norms[dists <= r_ws] > 1e-3)
+    assert np.allclose(np.sum(f_es_large, axis=0), 0.0, atol=1e-10)
