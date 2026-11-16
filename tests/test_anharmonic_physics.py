@@ -435,3 +435,55 @@ def test_variable_dispersion_smearing_conserves_total_s_and_smooths_acoustic():
     pk_high = float(np.max(s_var[(hw_grid >= 85.0) & (hw_grid <= 105.0)]))
     # Acoustic peak uses broader sigma (~3.0 meV) than high-energy optical peak (~1.8 meV).
     assert pk_high > pk_low * 1.4
+
+
+
+def test_embedded_acf_uses_dispersion_matched_damping(tmp_path, monkeypatch):
+    """Embedded supercells with default smearing use broader low-hw than high-hw ACF damping."""
+    import hydeph.lineshape as ls_mod
+
+    dt_vacf = 2.0
+    n_samples = 1500
+    t_series = np.arange(n_samples, dtype=float) * dt_vacf
+    w_lo = (20.0 / 1000.0) / HBAR_EV_FS
+    w_hi = (90.0 / 1000.0) / HBAR_EV_FS
+    du_series = 20.0 * np.cos(w_lo * t_series) + 20.0 * np.cos(w_hi * t_series)
+    v_opt_series = np.zeros_like(t_series)
+
+    monkeypatch.setattr(
+        ls_mod,
+        "_run_single_anharmonic_trajectory",
+        lambda **kwargs: (du_series.copy(), v_opt_series.copy(), 300.0),
+    )
+
+    pristine_path = tmp_path / "pristine.xyz"
+    at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]], cell=[6, 6, 6], pbc=True)
+    at_gs.info["is_embedded"] = True
+    at_gs.write(str(pristine_path))
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_path),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "out"),
+        temperatures=[300.0],
+        anharmonic_dt_fs=1.0,
+        anharmonic_thermalization_steps=10,
+        anharmonic_md_steps=2 * n_samples,
+        anharmonic_n_trajectories=1,
+        anharmonic_acf_damping_meV=2.0,
+        phonon_smearing_meV=None,
+        parallel_hessian=False,
+    )
+    eng = LineshapeEngine(cfg, SpyHarmonicCalculator())
+    hw_grid = np.linspace(1.0, 120.0, 1191)
+    res = eng.run_anharmonic_sampling(at_gs, at_gs.copy(), hw_grid, np.zeros_like(hw_grid), total_S=1.0, e_min=-80.0, e_max=80.0, n_pts=201)
+    s_anh = res[300.0]["s_anh"]
+
+    def fwhm_around(center, hw_arr, s_arr):
+        m = (hw_arr >= center - 12.0) & (hw_arr <= center + 12.0)
+        sub_h = hw_arr[m]
+        sub_s = s_arr[m]
+        above = sub_h[sub_s >= 0.5 * np.max(sub_s)]
+        return float(above[-1] - above[0])
+
+    assert fwhm_around(20.0, hw_grid, s_anh) > fwhm_around(90.0, hw_grid, s_anh) + 1.5

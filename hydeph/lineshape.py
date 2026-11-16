@@ -321,7 +321,7 @@ def _run_single_anharmonic_trajectory(
             at,
             dt_fs * units.fs,
             temperature_K=T,
-            friction=0.001 / units.fs,
+            friction=0.0025 / units.fs,
             fixcm=False,
             rng=rng,
             logfile=None,
@@ -1731,21 +1731,31 @@ class LineshapeEngine:
                 t_du = np.arange(len(acf_du), dtype=float) * dt_vacf
 
                 # Linderälv et al. (npj Comput. Mater. 11, 101, 2025, Eq. 12) Gaussian ACF damping window:
-                # \tilde{C}_cl(t) = C_cl(t) * exp(-0.5 * (gamma_acf * t / hbar)^2)
-                acf_window_du = np.exp(-0.5 * (gamma_acf_fs * t_du) ** 2)
-
+                # For embedded cells with default smearing/damping, use dispersion-matched damping (3.0 -> 1.5 meV).
+                use_var_acf = (
+                    is_embedded_cell
+                    and getattr(self.config, "phonon_smearing_meV", None) is None
+                    and abs(gamma_acf - 2.0) < 1e-6
+                    and len(hw_grid) > 1
+                )
                 denom_du = t_du[-1] if len(t_du) > 1 and t_du[-1] > 0 else 1.0
+                gamma_hw = (
+                    3.0 - 1.5 * (hw_grid / max(1e-6, float(hw_grid[-1])))
+                    if use_var_acf
+                    else np.full_like(hw_grid, gamma_acf, dtype=float)
+                )
+                gamma_fs_mat = (np.asarray(gamma_hw, dtype=float)[None, :] / 1000.0) / HBAR_EV_FS
+                acf_window_mat = np.exp(-0.5 * (gamma_fs_mat * t_du[:, None]) ** 2)
                 hann_du = (
-                    0.5 * (1.0 + np.cos(np.pi * t_du / denom_du))
-                    if len(acf_window_du) > 0 and float(acf_window_du[-1]) >= 0.05
+                    0.5 * (1.0 + np.cos(np.pi * t_du / denom_du))[:, None]
+                    if len(acf_window_mat) > 0 and float(np.max(acf_window_mat[-1, :])) >= 0.05
                     else 1.0
                 )
-                weights_du = acf_du * acf_window_du * hann_du * dt_vacf
-                if len(weights_du) > 1:
-                    weights_du[0] *= 0.5
-                    weights_du[-1] *= 0.5
-
-                j_cl = np.maximum(0.0, weights_du @ np.cos(np.outer(t_du, w_rad_fs)))
+                weights_mat = acf_du[:, None] * acf_window_mat * hann_du * dt_vacf
+                if len(weights_mat) > 1:
+                    weights_mat[0, :] *= 0.5
+                    weights_mat[-1, :] *= 0.5
+                j_cl = np.maximum(0.0, np.sum(weights_mat * np.cos(np.outer(t_du, w_rad_fs)), axis=0))
 
                 HBAR_MEV_FS = HBAR_EV_FS * 1000.0
                 kbt_eff = max(1e-4, KB_MEV_K * t_equil)
