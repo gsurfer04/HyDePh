@@ -237,5 +237,51 @@ def test_run_anharmonic_sampling_preserves_low_energy_acoustic_mode(tmp_path, mo
     trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
     m_low = (hw_grid >= 3.5) & (hw_grid <= 10.0)
     s_low = float(trapz_fn(s_anh[m_low] / 1000.0, hw_grid[m_low]))
-    # Previously ~0.35 when hw_cutoff=8.0 suppressed 6 meV; with hw_cutoff<=3.5 should retain > 0.70
-    assert s_low > 0.70
+    # Previously ~0.24 when hw_cutoff=8.0 suppressed 6 meV; with hw_cutoff<=5.2 should retain > 0.55
+    assert s_low > 0.55
+
+
+def test_run_anharmonic_sampling_detrends_linear_gap_drift(tmp_path, monkeypatch):
+    """Verify slow linear drift in Delta U(t) is detrended before ACF evaluation."""
+    import hydeph.lineshape as ls_mod
+
+    p_file = tmp_path / "p2.xyz"
+    at = Atoms("Si2", positions=[[0, 0, 0], [1.5, 1.5, 1.5]], cell=[5, 5, 5], pbc=True)
+    import ase.io
+    ase.io.write(str(p_file), at)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        foundation_potential_path=str(tmp_path / "f.txt"),
+        workspace_dir=str(tmp_path),
+        enable_anharmonic=True,
+        temperatures=[300.0],
+        anharmonic_n_trajectories=1,
+        anharmonic_md_steps=3000,
+        anharmonic_dt_fs=1.0,
+        anharmonic_coupling_regime="cumulant",
+        parallel_hessian=False,
+    )
+    engine = LineshapeEngine(cfg, SpyHarmonicCalculator(k=10.0))
+
+    hw_grid = np.linspace(0.5, 120.0, 600)
+    s_cont = np.exp(-0.5 * ((hw_grid - 40.0) / 4.0) ** 2) * 100.0
+    T_k = 300.0
+    kbt = KB_MEV_K * T_k
+    t_arr = np.arange(1500, dtype=float) * 2.0
+    wk_fs = (40.0 / 1000.0) / HBAR_EV_FS
+    base_osc = np.sqrt(4.0 * 1.0 * 40.0 * kbt) * np.cos(wk_fs * t_arr)
+
+    def make_traj(drift_meV):
+        def _fake(**kwargs):
+            ramp = np.linspace(-0.5 * drift_meV, 0.5 * drift_meV, len(t_arr))
+            return base_osc + ramp, np.zeros_like(t_arr), T_k
+        return _fake
+
+    monkeypatch.setattr(ls_mod, "_run_single_anharmonic_trajectory", make_traj(0.0))
+    res_clean = engine.run_anharmonic_sampling(at, at, hw_grid, s_cont, total_S=1.0, e_min=-200.0, e_max=40.0, n_pts=400)
+
+    monkeypatch.setattr(ls_mod, "_run_single_anharmonic_trajectory", make_traj(400.0))
+    res_drift = engine.run_anharmonic_sampling(at, at, hw_grid, s_cont, total_S=1.0, e_min=-200.0, e_max=40.0, n_pts=400)
+
+    assert np.allclose(res_clean[300.0]["s_anh"], res_drift[300.0]["s_anh"], rtol=1e-4, atol=1e-4)

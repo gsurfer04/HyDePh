@@ -1582,7 +1582,11 @@ class LineshapeEngine:
                 # Energy-gap cumulant approach: C(tau) = <delta Delta U(tau) delta Delta U(0)>
                 acf_du_list = []
                 for du_arr in all_du_series:
-                    du_demean = du_arr - np.mean(du_arr)
+                    if len(du_arr) > 10:
+                        from scipy.signal import detrend
+                        du_demean = detrend(du_arr)
+                    else:
+                        du_demean = du_arr - np.mean(du_arr)
                     n_du = len(du_demean)
                     n_half_du = max(1, n_du // 2)
                     acf_full = correlate(du_demean, du_demean, mode="full")[n_du - 1 : n_du - 1 + n_half_du]
@@ -1608,8 +1612,8 @@ class LineshapeEngine:
                 HBAR_MEV_FS = HBAR_EV_FS * 1000.0
                 kbt_eff = max(1e-4, KB_MEV_K * t_equil)
 
-                # Acoustic suppression filter to prevent hw -> 0 drift/1/omega divergence while preserving >= 4 meV acoustic phonons:
-                hw_cutoff = max(2.0, min(3.5, 0.08 * omega_0))
+                # Acoustic suppression filter: suppress hw -> 0 drift/1/omega divergence while preserving >= 6 meV acoustic phonons:
+                hw_cutoff = max(3.0, min(5.2, 0.11 * omega_0))
                 filter_acoustic = 1.0 - np.exp(- (hw_grid / hw_cutoff) ** 4)
 
                 # Exact classical fluctuation-dissipation relation:
