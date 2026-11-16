@@ -417,3 +417,21 @@ def test_long_acf_window_skips_redundant_hann_broadening(tmp_path, monkeypatch):
     # Pure gamma_acf=2.0 meV Gaussian has FWHM = 2*sqrt(2*ln2)*2.0 = 4.71 meV (< 5.2 meV);
     # with redundant Hann on 1500 fs it widens noticeably.
     assert 4.3 <= fwhm <= 5.2
+
+
+
+def test_variable_dispersion_smearing_conserves_total_s_and_smooths_acoustic():
+    """Verify linear dispersion-matched smearing conserves integral S and broadens low modes."""
+    from hydeph.lineshape import _smear_harmonic_spectral_density
+
+    hw_grid = np.linspace(0.5, 130.0, 2600)
+    hw_modes = np.array([25.0, 95.0], dtype=float)
+    sk_modes = np.array([1.0, 1.0], dtype=float)
+    s_var = _smear_harmonic_spectral_density(hw_grid, hw_modes, sk_modes, sigma_smear=1.93, variable_dispersion=True)
+
+    trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    assert pytest.approx(2.0, rel=1e-2) == float(trapz_fn(s_var, hw_grid))
+    pk_low = float(np.max(s_var[(hw_grid >= 15.0) & (hw_grid <= 35.0)]))
+    pk_high = float(np.max(s_var[(hw_grid >= 85.0) & (hw_grid <= 105.0)]))
+    # Acoustic peak uses broader sigma (~3.0 meV) than high-energy optical peak (~1.8 meV).
+    assert pk_high > pk_low * 1.4

@@ -315,7 +315,19 @@ def _run_single_anharmonic_trajectory(
     Stationary(at)
     if not np.any(at.pbc):
         ZeroRotation(at)
-    dyn = VelocityVerlet(at, dt_fs * units.fs, logfile=None)
+    if n_therm > 0 and use_core_force_gap:
+        # Gentle thermal coupling keeps localized core modes canonically equilibrated across multi-ps MD.
+        dyn = Langevin(
+            at,
+            dt_fs * units.fs,
+            temperature_K=T,
+            friction=0.001 / units.fs,
+            fixcm=False,
+            rng=rng,
+            logfile=None,
+        )
+    else:
+        dyn = VelocityVerlet(at, dt_fs * units.fs, logfile=None)
 
     du_list: List[float] = []
     v_opt_list: List[float] = []
@@ -409,6 +421,29 @@ def _wigner_seitz_radius(cell: Any) -> float:
     norms = np.linalg.norm(combos @ cell_arr, axis=1)
     pos_norms = norms[norms > 1e-8]
     return 0.5 * float(np.min(pos_norms)) if len(pos_norms) > 0 else float("inf")
+
+
+def _smear_harmonic_spectral_density(
+    hw_grid: np.ndarray,
+    hw_modes: np.ndarray,
+    sk_modes: np.ndarray,
+    sigma_smear: float,
+    variable_dispersion: bool = False,
+) -> np.ndarray:
+    """Broadens discrete Huang-Rhys sticks S_k using constant or linear frequency-dependent sigma."""
+    if len(hw_modes) == 0:
+        return np.zeros_like(hw_grid)
+    if variable_dispersion:
+        max_hw = max(1e-6, float(np.max(hw_modes)))
+        sigma_low = float(np.clip(1.8 * sigma_smear, 3.2, 6.0))
+        sigma_high = float(np.clip(0.78 * sigma_smear, 1.2, 3.0))
+        sigmas = sigma_low + (sigma_high - sigma_low) * (np.asarray(hw_modes, dtype=float) / max_hw)
+        sigmas = sigmas[None, :]
+    else:
+        sigmas = float(sigma_smear)
+    diff = (hw_grid[:, None] - hw_modes[None, :]) / sigmas
+    gauss = np.exp(-0.5 * (diff ** 2)) / (np.sqrt(2.0 * np.pi) * sigmas)
+    return gauss @ sk_modes
 
 
 def embed_phonon_supercell(
@@ -1000,12 +1035,18 @@ class LineshapeEngine:
             else:
                 sigma_smear = float(np.clip(target_smear, 1.5, 8.5))
 
-        logger.info(f"[+] Phonon Spectral Smearing (Finite-Size Correction): sigma = {sigma_smear:.2f} meV")
-        if len(hw_modes) > 0:
-            diff = (hw_grid[:, None] - hw_modes[None, :]) / sigma_smear
-            s_cont = (np.exp(-0.5 * (diff ** 2)) @ sk_modes) / (np.sqrt(2.0 * np.pi) * sigma_smear)
+        use_var_smear = (user_smear is None) and is_embedded
+        if use_var_smear and len(hw_modes) > 0:
+            s_lo = float(np.clip(1.8 * sigma_smear, 3.2, 6.0))
+            s_hi = float(np.clip(0.78 * sigma_smear, 1.2, 3.0))
+            logger.info(
+                f"[+] Phonon Spectral Smearing (Dispersion-Matched): sigma = {s_lo:.2f} -> {s_hi:.2f} meV"
+            )
         else:
-            s_cont = np.zeros_like(hw_grid)
+            logger.info(f"[+] Phonon Spectral Smearing (Finite-Size Correction): sigma = {sigma_smear:.2f} meV")
+        s_cont = _smear_harmonic_spectral_density(
+            hw_grid, hw_modes, sk_modes, sigma_smear, variable_dispersion=use_var_smear
+        )
 
         trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
         moment_before = None
@@ -1185,9 +1226,8 @@ class LineshapeEngine:
                         member_S.append(m_tot_s)
 
                         if len(m_hw_arr) > 0:
-                            diff_m = (hw_grid[:, None] - m_hw_arr[None, :]) / sigma_smear
-                            m_s_cont = (np.exp(-0.5 * (diff_m ** 2)) @ m_sk_arr) / (
-                                np.sqrt(2.0 * np.pi) * sigma_smear
+                            m_s_cont = _smear_harmonic_spectral_density(
+                                hw_grid, m_hw_arr, m_sk_arr, sigma_smear, variable_dispersion=use_var_smear
                             )
                             if self.config.finite_size_acoustic_cutoff:
                                 m_s_cont *= np.tanh((hw_grid / max(1.0, sigma_smear)) ** 2)
