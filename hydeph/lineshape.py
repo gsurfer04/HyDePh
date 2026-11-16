@@ -1525,9 +1525,10 @@ class LineshapeEngine:
         can_parallel = use_parallel and gs_spec is not None and (not has_paired or es_spec is not None)
 
         executor = None
+        total_md_tasks = len(self.config.temperatures) * n_trajectories
         if can_parallel:
             max_cfg = getattr(self.config, "parallel_hessian_workers", None) or os.cpu_count() or 4
-            n_workers = max(1, min(int(max_cfg), n_trajectories, os.cpu_count() or 1))
+            n_workers = max(1, min(int(max_cfg), total_md_tasks, os.cpu_count() or 1))
             if n_workers > 1:
                 worker_spec = {"gs": gs_spec, "es": es_spec}
                 executor = ProcessPoolExecutor(
@@ -1537,34 +1538,51 @@ class LineshapeEngine:
                     initargs=(worker_spec,),
                 )
                 logger.info(
-                    f"    [+] Using {n_workers} parallel single-threaded MD workers across {n_trajectories} trajectories."
+                    f"    [+] Using {n_workers} parallel single-threaded MD workers across "
+                    f"{total_md_tasks} total trajectories ({len(self.config.temperatures)} temperatures x {n_trajectories})."
                 )
 
         md_results_by_T: Dict[float, Tuple[List[np.ndarray], List[np.ndarray], float, float]] = {}
         try:
-            for T in self.config.temperatures:
-                t_md0 = time.time()
-                logger.info(
-                    f"    [MD T = {T:g} K] Running NVT ({n_therm} steps) -> NVE ({n_steps} steps, {n_trajectories} trajectories)..."
-                )
-                if executor is not None:
-                    tasks = [
-                        (
-                            at_start_bare,
-                            float(T),
-                            dt_fs,
-                            n_therm,
-                            n_steps,
-                            u_opt,
-                            dr_fc,
-                            int(round(T * 100.0)) * 1000 + traj_idx,
-                            f_core_pass,
-                            r_ref_pass,
-                        )
-                        for traj_idx in range(n_trajectories)
-                    ]
-                    traj_results = list(executor.map(_run_anharmonic_window_worker, tasks))
-                else:
+            if executor is not None:
+                t_md_all0 = time.time()
+                for T in self.config.temperatures:
+                    logger.info(
+                        f"    [MD T = {T:g} K] Queuing NVT ({n_therm} steps) -> NVE ({n_steps} steps, {n_trajectories} trajectories)..."
+                    )
+                all_tasks = [
+                    (
+                        at_start_bare,
+                        float(T),
+                        dt_fs,
+                        n_therm,
+                        n_steps,
+                        u_opt,
+                        dr_fc,
+                        int(round(T * 100.0)) * 1000 + traj_idx,
+                        f_core_pass,
+                        r_ref_pass,
+                    )
+                    for T in self.config.temperatures
+                    for traj_idx in range(n_trajectories)
+                ]
+                all_traj_results = list(executor.map(_run_anharmonic_window_worker, all_tasks))
+                per_t_elapsed = (time.time() - t_md_all0) / max(1, len(self.config.temperatures))
+                for t_idx, T in enumerate(self.config.temperatures):
+                    sl = all_traj_results[t_idx * n_trajectories : (t_idx + 1) * n_trajectories]
+                    t_equil_val = float(np.mean([r[2] for r in sl])) if sl else float(T)
+                    md_results_by_T[T] = (
+                        [r[0] for r in sl],
+                        [r[1] for r in sl],
+                        t_equil_val,
+                        per_t_elapsed,
+                    )
+            else:
+                for T in self.config.temperatures:
+                    t_md0 = time.time()
+                    logger.info(
+                        f"    [MD T = {T:g} K] Running NVT ({n_therm} steps) -> NVE ({n_steps} steps, {n_trajectories} trajectories)..."
+                    )
                     traj_results = [
                         _run_single_anharmonic_trajectory(
                             at_start=at_start_bare,
@@ -1589,14 +1607,14 @@ class LineshapeEngine:
                         )
                         for traj_idx in range(n_trajectories)
                     ]
-                t_equil_val = float(np.mean([r[2] for r in traj_results])) if traj_results else float(T)
-                md_elapsed_s = time.time() - t_md0
-                md_results_by_T[T] = (
-                    [r[0] for r in traj_results],
-                    [r[1] for r in traj_results],
-                    t_equil_val,
-                    md_elapsed_s,
-                )
+                    t_equil_val = float(np.mean([r[2] for r in traj_results])) if traj_results else float(T)
+                    md_elapsed_s = time.time() - t_md0
+                    md_results_by_T[T] = (
+                        [r[0] for r in traj_results],
+                        [r[1] for r in traj_results],
+                        t_equil_val,
+                        md_elapsed_s,
+                    )
         finally:
             if executor is not None:
                 executor.shutdown(wait=True)
@@ -1634,13 +1652,17 @@ class LineshapeEngine:
 
             vacf = np.mean(acf_v_list, axis=0) if acf_v_list else np.zeros(1)
             t_vacf = np.arange(len(vacf), dtype=float) * dt_vacf
-            denom = t_vacf[-1] if len(t_vacf) > 1 and t_vacf[-1] > 0 else 1.0
-            hann = 0.5 * (1.0 + np.cos(np.pi * t_vacf / denom))
-
             # Linderälv et al. (npj Comput. Mater. 11, 101, 2025, Eq. 12) Gaussian ACF damping window:
             gamma_acf = float(getattr(self.config, "anharmonic_acf_damping_meV", 2.0))
             gamma_acf_fs = (gamma_acf / 1000.0) / HBAR_EV_FS
             acf_window_v = np.exp(-0.5 * (gamma_acf_fs * t_vacf) ** 2)
+            # Only add Hann boundary taper when the Gaussian window has not already decayed below 5%.
+            denom = t_vacf[-1] if len(t_vacf) > 1 and t_vacf[-1] > 0 else 1.0
+            hann = (
+                0.5 * (1.0 + np.cos(np.pi * t_vacf / denom))
+                if len(acf_window_v) > 0 and float(acf_window_v[-1]) >= 0.05
+                else 1.0
+            )
 
             weights_t = vacf * acf_window_v * hann * dt_vacf
             if len(weights_t) > 1:
@@ -1673,7 +1695,11 @@ class LineshapeEngine:
                 acf_window_du = np.exp(-0.5 * (gamma_acf_fs * t_du) ** 2)
 
                 denom_du = t_du[-1] if len(t_du) > 1 and t_du[-1] > 0 else 1.0
-                hann_du = 0.5 * (1.0 + np.cos(np.pi * t_du / denom_du))
+                hann_du = (
+                    0.5 * (1.0 + np.cos(np.pi * t_du / denom_du))
+                    if len(acf_window_du) > 0 and float(acf_window_du[-1]) >= 0.05
+                    else 1.0
+                )
                 weights_du = acf_du * acf_window_du * hann_du * dt_vacf
                 if len(weights_du) > 1:
                     weights_du[0] *= 0.5

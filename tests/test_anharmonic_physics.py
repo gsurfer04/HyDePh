@@ -370,3 +370,50 @@ def test_embedded_anharmonic_uses_core_force_gap_avoiding_bulk_noise(tmp_path):
     )
 
     assert np.allclose(res_clean[100.0]["s_anh"], res_noisy[100.0]["s_anh"], rtol=1e-6, atol=1e-8)
+
+
+
+def test_long_acf_window_skips_redundant_hann_broadening(tmp_path, monkeypatch):
+    """When Gaussian ACF window decays <5% at t_max, skip redundant Hann double-apodization."""
+    import hydeph.lineshape as ls_mod
+
+    dt_vacf = 2.0
+    n_samples = 1500  # t_max = 1500 fs -> exp(-0.5 * (2.0/658.2 * 1500)^2) ~ 3e-5 < 0.05
+    t_series = np.arange(n_samples, dtype=float) * dt_vacf
+    hw_0 = 40.0
+    w_rad = (hw_0 / 1000.0) / HBAR_EV_FS
+    du_series = 25.0 * np.cos(w_rad * t_series)
+    v_opt_series = np.zeros_like(t_series)
+
+    monkeypatch.setattr(
+        ls_mod,
+        "_run_single_anharmonic_trajectory",
+        lambda **kwargs: (du_series.copy(), v_opt_series.copy(), 300.0),
+    )
+
+    pristine_path = tmp_path / "pristine.xyz"
+    at_gs = Atoms("C2", positions=[[0, 0, 0], [1.5, 0, 0]], cell=[6, 6, 6], pbc=True)
+    at_gs.write(str(pristine_path))
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(pristine_path),
+        foundation_potential_path=str(tmp_path / "pot.txt"),
+        workspace_dir=str(tmp_path / "out"),
+        temperatures=[300.0],
+        anharmonic_dt_fs=1.0,
+        anharmonic_thermalization_steps=10,
+        anharmonic_md_steps=2 * n_samples,
+        anharmonic_n_trajectories=1,
+        anharmonic_acf_damping_meV=2.0,
+        parallel_hessian=False,
+    )
+    eng = LineshapeEngine(cfg, SpyHarmonicCalculator())
+    hw_grid = np.linspace(1.0, 100.0, 991)
+    s_cont = np.zeros_like(hw_grid)
+    res = eng.run_anharmonic_sampling(at_gs, at_gs.copy(), hw_grid, s_cont, total_S=1.0, e_min=-80.0, e_max=80.0, n_pts=201)
+    s_anh = res[300.0]["s_anh"]
+    above_half = hw_grid[s_anh >= 0.5 * np.max(s_anh)]
+    fwhm = float(above_half[-1] - above_half[0])
+    # Pure gamma_acf=2.0 meV Gaussian has FWHM = 2*sqrt(2*ln2)*2.0 = 4.71 meV (< 5.2 meV);
+    # with redundant Hann on 1500 fs it widens noticeably.
+    assert 4.3 <= fwhm <= 5.2
