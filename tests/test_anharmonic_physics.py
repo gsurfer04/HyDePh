@@ -517,3 +517,69 @@ def test_anharmonic_md_surface_gs_skips_es_dynamics(tmp_path):
     eng.run_anharmonic_sampling(at_gs, at_gs.copy(), hw_grid, np.zeros_like(hw_grid), total_S=1.0, f_es_mode=f_core)
     assert calc_gs.call_count > 10
     assert calc_es.call_count == 0
+
+
+def test_sub_acoustic_cutoff_and_bandwidth_scaled_acf(tmp_path, monkeypatch):
+    """Verify hw_min_phonon suppresses sub-lattice 1/omega spikes and hw_max_phonon scales ACF damping."""
+    import hydeph.lineshape as ls_mod
+
+    p_file = tmp_path / "p_diamond.xyz"
+    at = Atoms("C2", positions=[[0, 0, 0], [0.89, 0.89, 0.89]], cell=[3.57, 3.57, 3.57], pbc=True)
+    at.info["is_embedded"] = True
+    import ase.io
+    ase.io.write(str(p_file), at)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        foundation_potential_path=str(tmp_path / "f.txt"),
+        workspace_dir=str(tmp_path / "out"),
+        enable_anharmonic=True,
+        temperatures=[300.0],
+        anharmonic_n_trajectories=1,
+        anharmonic_md_steps=2000,
+        anharmonic_dt_fs=1.0,
+        anharmonic_coupling_regime="cumulant",
+        parallel_hessian=False,
+    )
+    calc_gs = SpyHarmonicCalculator(k=10.0)
+    engine = LineshapeEngine(cfg, calc_gs)
+    hw_grid = np.linspace(0.5, 175.0, 700)
+    s_cont = np.exp(-0.5 * ((hw_grid - 70.0) / 8.0) ** 2) * 80.0
+    T_k = 300.0
+    kbt = KB_MEV_K * T_k
+    t_arr = np.arange(1000, dtype=float) * 2.0
+
+    def fake_traj(**kwargs):
+        du_series = np.zeros_like(t_arr)
+        # Spurious 7.5 meV thermostat leak + real 35 meV and 70 meV lattice modes
+        for hw_k, s_k in [(7.5, 0.25), (35.0, 0.8), (70.0, 2.0)]:
+            wk_fs = (hw_k / 1000.0) / HBAR_EV_FS
+            amp = np.sqrt(4.0 * s_k * hw_k * kbt)
+            du_series += amp * np.cos(wk_fs * t_arr)
+        return du_series, np.zeros_like(t_arr), T_k
+
+    monkeypatch.setattr(ls_mod, "_run_single_anharmonic_trajectory", fake_traj)
+    res_def = engine.run_anharmonic_sampling(at, at, hw_grid, s_cont, total_S=3.0, e_min=-300.0, e_max=50.0, n_pts=300)
+    res_scaled = engine.run_anharmonic_sampling(
+        at, at, hw_grid, s_cont, total_S=3.0, e_min=-300.0, e_max=50.0, n_pts=300,
+        hw_min_phonon=26.0, hw_max_phonon=162.0,
+    )
+    trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    m_sub = (hw_grid >= 3.0) & (hw_grid <= 14.0)
+    s_sub_def = float(trapz_fn(res_def[300.0]["s_anh"][m_sub] / 1000.0, hw_grid[m_sub]))
+    s_sub_scaled = float(trapz_fn(res_scaled[300.0]["s_anh"][m_sub] / 1000.0, hw_grid[m_sub]))
+    assert s_sub_scaled < 0.25 * s_sub_def
+
+    res_narrow = engine.run_anharmonic_sampling(
+        at, at, hw_grid, s_cont, total_S=3.0, e_min=-300.0, e_max=50.0, n_pts=300,
+        hw_min_phonon=4.0, hw_max_phonon=26.0,
+    )
+    # Check wider phonon bandwidth broadens the 35 meV line smoothly relative to narrow-band crystals
+    m_35 = (hw_grid >= 20.0) & (hw_grid <= 50.0)
+    def fwhm(arr):
+        sub_h = hw_grid[m_35]
+        sub_s = arr[m_35]
+        ab = sub_h[sub_s >= 0.5 * np.max(sub_s)]
+        return float(ab[-1] - ab[0])
+
+    assert fwhm(res_scaled[300.0]["s_anh"]) > fwhm(res_narrow[300.0]["s_anh"]) + 5.0

@@ -321,7 +321,7 @@ def _run_single_anharmonic_trajectory(
             at,
             dt_fs * units.fs,
             temperature_K=T,
-            friction=0.0025 / units.fs,
+            friction=0.0005 / units.fs,
             fixcm=False,
             rng=rng,
             logfile=None,
@@ -1273,9 +1273,13 @@ class LineshapeEngine:
                     f"    [-] Running anharmonic MD on embedded {len(at_gs)}-atom phonon supercell "
                     f"to resolve Brillouin-zone acoustic modes."
                 )
+            hw_min_ph = float(np.min(hw_modes)) if len(hw_modes) > 0 else None
+            hw_max_ph = float(np.max(hw_modes)) if len(hw_modes) > 0 else None
             anharmonic_dict = self.run_anharmonic_sampling(
                 at_gs, at_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts,
                 f_es_mode=f_es_mode,
+                hw_min_phonon=hw_min_ph,
+                hw_max_phonon=hw_max_ph,
             )
             self.plot_all(
                 lineshape_dict,
@@ -1449,7 +1453,7 @@ class LineshapeEngine:
 
     def run_anharmonic_sampling(
         self, at_gs, at_es, hw_grid, s_cont, total_S=None, e_min=None, e_max=None, n_pts=1500,
-        f_es_mode=None,
+        f_es_mode=None, hw_min_phonon: Optional[float] = None, hw_max_phonon: Optional[float] = None,
     ):
         """Runs paired molecular dynamics across configured temperatures to evaluate anharmonic lineshapes."""
         logger.info("\n[-] Running Finite-Temperature Anharmonic Molecular Dynamics Sampling...")
@@ -1732,7 +1736,7 @@ class LineshapeEngine:
                 t_du = np.arange(len(acf_du), dtype=float) * dt_vacf
 
                 # Linderälv et al. (npj Comput. Mater. 11, 101, 2025, Eq. 12) Gaussian ACF damping window:
-                # For embedded cells with default smearing/damping, use dispersion-matched damping (3.0 -> 1.5 meV).
+                # For embedded cells with default smearing/damping, scale damping with phonon bandwidth.
                 use_var_acf = (
                     is_embedded_cell
                     and getattr(self.config, "phonon_smearing_meV", None) is None
@@ -1740,11 +1744,20 @@ class LineshapeEngine:
                     and len(hw_grid) > 1
                 )
                 denom_du = t_du[-1] if len(t_du) > 1 and t_du[-1] > 0 else 1.0
-                gamma_hw = (
-                    3.5 - 2.0 * (hw_grid / max(1e-6, float(hw_grid[-1])))
-                    if use_var_acf
-                    else np.full_like(hw_grid, gamma_acf, dtype=float)
-                )
+                if use_var_acf:
+                    bw_ref = (
+                        float(hw_max_phonon)
+                        if (hw_max_phonon is not None and float(hw_max_phonon) > 10.0)
+                        else float(hw_grid[-1])
+                    )
+                    bw_scale = bw_ref / 120.0
+                    gamma_lo = float(np.clip(4.2 * bw_scale, 2.0, 6.5))
+                    gamma_hi = float(np.clip(2.0 * bw_scale, 1.0, 3.2))
+                    gamma_hw = gamma_lo - (gamma_lo - gamma_hi) * np.minimum(
+                        1.0, hw_grid / max(1e-6, bw_ref)
+                    )
+                else:
+                    gamma_hw = np.full_like(hw_grid, gamma_acf, dtype=float)
                 gamma_fs_mat = (np.asarray(gamma_hw, dtype=float)[None, :] / 1000.0) / HBAR_EV_FS
                 acf_window_mat = np.exp(-0.5 * (gamma_fs_mat * t_du[:, None]) ** 2)
                 hann_du = (
@@ -1761,8 +1774,12 @@ class LineshapeEngine:
                 HBAR_MEV_FS = HBAR_EV_FS * 1000.0
                 kbt_eff = max(1e-4, KB_MEV_K * t_equil)
 
-                # Acoustic suppression filter: suppress hw -> 0 drift/1/omega divergence while preserving >= 6 meV acoustic phonons:
-                hw_cutoff = max(3.0, min(5.2, 0.11 * omega_0))
+                # Acoustic suppression filter: suppress sub-lattice thermostat/drift 1/omega leakage
+                # below the supercell minimum acoustic phonon while preserving >= 6 meV modes when unknown.
+                if hw_min_phonon is not None and float(hw_min_phonon) > 1.0:
+                    hw_cutoff = max(3.0, min(0.58 * float(hw_min_phonon), 0.22 * omega_0))
+                else:
+                    hw_cutoff = max(3.0, min(5.2, 0.11 * omega_0))
                 filter_acoustic = 1.0 - np.exp(- (hw_grid / hw_cutoff) ** 4)
 
                 # Exact classical fluctuation-dissipation relation:
