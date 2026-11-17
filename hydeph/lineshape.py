@@ -1530,7 +1530,7 @@ class LineshapeEngine:
             logger.info("    [i] Ground-state MD sampling: Delta U(t) driven on V_GS(R) trajectory")
 
         anharmonic_dict = {}
-        n_trajectories = max(1, int(getattr(self.config, "anharmonic_n_trajectories", 4)))
+        n_trajectories = max(1, int(getattr(self.config, "anharmonic_n_trajectories", 16)))
 
         at_es_eq = at_es.copy()
         at_gs_eq = at_gs.copy()

@@ -221,8 +221,9 @@ $$
   When `phonon_supercell_repeat` is specified, HyDePh embeds the relaxed defect core into an expanded bulk supercell evaluated with the fast hybrid potential [5, 35]. Mode-resolved electron-phonon displacements $\Delta Q_k$ are obtained via either:
   1. **Direct Displacement Projection** (`phonon_embedding_method = "displacement"`):
      $$\Delta Q_k = \sum_{i=1}^N \sqrt{M_i} \Delta \mathbf{R}_i \cdot \mathbf{e}_{k, i}$$
-  2. **Alkauskas–Razinkovas Force Projection** (`phonon_embedding_method = "force"` [5, 35]), using the excited-state force $\mathbf{F}_i = -\nabla_i V_{\mathrm{hybrid,GS}}(\mathbf{R}_{\mathrm{ES}})$ mapped onto the phonon supercell:
+  2. **Alkauskas–Razinkovas Force Projection** (`phonon_embedding_method = "force"` [5, 35]), mapping the state-difference core force (masked to the DFT Wigner–Seitz sphere on large embedded supercells to prevent far-field $\Delta$-NEP drift) onto the phonon eigenvectors:
      $$\Delta Q_k = \frac{\sum_{i=1}^N M_i^{-1/2} \mathbf{F}_i \cdot \mathbf{e}_{k, i}}{\omega_k^2}$$
+     where emission lineshapes formally project the final-state restoring force $\mathbf{F}_i^{\mathrm{em}} = -\nabla_i V_{\mathrm{hybrid,GS}}(\mathbf{R}_{\mathrm{ES}}) + \nabla_i V_{\mathrm{hybrid,ES}}(\mathbf{R}_{\mathrm{ES}})$ onto ground-state phonons, whereas evaluating $-\nabla_i V_{\mathrm{hybrid,ES}}(\mathbf{R}_{\mathrm{GS}}) + \nabla_i V_{\mathrm{hybrid,GS}}(\mathbf{R}_{\mathrm{GS}})$ samples the absorption-geometry gradient. In stiff covalent crystals ($\hbar\Omega_{\mathrm{ES}} \approx \hbar\Omega_{\mathrm{GS}}$), both agree closely; in soft ionic hosts with strong curvature asymmetry (e.g., NaCl F-center, $S_{\mathrm{em}} \approx 17.6$ vs. $S_{\mathrm{abs}} \approx 40.5$), matching the emission geometry prevents artificial red-shifting of the PL peak.
 
 The partial Huang-Rhys factor $S_k$ and total Huang-Rhys factor $S$ follow as [5, 7, 24]:
 
@@ -278,7 +279,7 @@ Following the time-dependent cumulant formalism of Mukamel [10] and Linderälv, 
 #### (A) NVT Thermalization $\to$ Multi-Trajectory NVE Production
 For each target temperature $T$:
 1. **Stochastic Langevin Equilibration**: The defect supercell is initialized at $\mathbf{R}_{\mathrm{GS}}$ with Maxwell-Boltzmann velocities and equilibrated under a Langevin thermostat (`anharmonic_thermalization_steps`) to sample the canonical configurational distribution $P(\mathbf{R}) \propto \exp[-V_{\mathrm{hybrid,GS}}(\mathbf{R})/k_B T]$ without KAM invariant-tori trapping [28, 29].
-2. **Unperturbed NVE Production Ensemble**: The thermostat is detached and $N_{\mathrm{traj}}$ independent **microcanonical (NVE) Velocity-Verlet trajectories** (`anharmonic_n_trajectories`, `anharmonic_md_steps`) are propagated on $V_{\mathrm{hybrid,GS}}(\mathbf{R})$, guaranteeing conservative Hamiltonian phase-space evolution free of thermostat friction.
+2. **Unperturbed NVE Production Ensemble**: The thermostat is detached and $N_{\mathrm{traj}}$ independent **microcanonical (NVE) Velocity-Verlet trajectories** (`anharmonic_n_trajectories`, default `16`, recommended `16–24`; `anharmonic_md_steps`, default `3000` $\equiv 3.0\ \text{ps}$) are propagated on `anharmonic_md_surface` ($V_{\mathrm{hybrid,ES}}$ by default, or $V_{\mathrm{hybrid,GS}}$ when `"gs"` is selected), guaranteeing conservative Hamiltonian phase-space evolution free of thermostat friction. Sampling $48\text{--}72\ \text{ps}$ across $16\text{--}24$ trajectories follows Linderälv *et al.* [33] in suppressing finite-trajectory $1/\omega$ statistical variance on localized vibronic modes.
 
 #### (B) Paired Energy-Gap Fluctuation & Autocorrelation Function
 At each NVE timestep $t_m$, both the ground-state and excited-state hybrid potentials are evaluated to obtain the instantaneous vertical transition energy gap $\Delta U(t)$ and its thermal fluctuation $\delta\Delta U(t)$ [10, 33]:

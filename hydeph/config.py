@@ -449,11 +449,15 @@ class ToolkitConfig:
     enable_anharmonic : bool
         Whether to compute anharmonic MD velocity-autocorrelation spectra.
     anharmonic_md_steps : int
-        Number of MD steps for anharmonic VACF propagation. Default is 2500.
+        Number of NVE production MD steps per trajectory for anharmonic VACF propagation. Default is 3000 (3.0 ps at dt=1.0 fs).
     anharmonic_dt_fs : float
         Time step (fs) for anharmonic MD propagation. Default is 1.0.
     anharmonic_coupling_regime : str
         "auto", "quantum", or "semiclassical". Default is "auto".
+    anharmonic_n_trajectories : int
+        Number of independent NVE trajectories for ensemble averaging. Default is 16 (48 ps total sampling at 3000 steps).
+    anharmonic_md_surface : str
+        Potential energy surface used to propagate NVE dynamics ("es" or "gs"). Default is "es".
 
     phonon_y_min : float, optional
         Minimum y-axis limit for phonon spectral density plots.
@@ -601,7 +605,7 @@ class ToolkitConfig:
     subtract_mean_energy_offset: bool = True
 
     enable_anharmonic: bool = True
-    anharmonic_md_steps: int = 2500
+    anharmonic_md_steps: int = 3000
     anharmonic_dt_fs: float = 1.0
     anharmonic_coupling_regime: str = "cumulant"  # "cumulant", "auto", "quantum", or "semiclassical"
     anharmonic_thermalization_steps: int = 400
@@ -634,7 +638,7 @@ class ToolkitConfig:
     phonon_supercell_repeat: Optional[Tuple[int, int, int]] = None
     phonon_embedding_method: str = "force"  # "force" or "displacement"
     export_normal_modes: bool = True
-    anharmonic_n_trajectories: int = 4
+    anharmonic_n_trajectories: int = 16
     anharmonic_acf_damping_meV: float = 2.0
     anharmonic_md_surface: str = "es"  # "es" (excited-state PES) or "gs" (ground-state PES)
     calculate_pl_intensity: bool = True

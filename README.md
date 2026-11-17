@@ -285,8 +285,9 @@ summary = run_pipeline(config)
 | `temperatures` | `list of float` | `[10.0, 77.0, 150.0, 300.0]` | Emission temperatures in Kelvin. |
 | `enable_anharmonic` | `bool` | `True` | Evaluates multi-temperature anharmonic lineshapes via NVE cumulant dynamics. |
 | `anharmonic_thermalization_steps` | `int` | `400` | Langevin equilibration steps prior to NVE production. |
-| `anharmonic_md_steps` | `int` | `2500` | NVE production steps per trajectory for energy-gap autocorrelation sampling. |
-| `anharmonic_n_trajectories` | `int` | `1` | Number of independent NVE trajectories for ensemble averaging. |
+| `anharmonic_md_steps` | `int` | `3000` | NVE production steps per trajectory ($3.0\ \text{ps}$ at `1.0 fs`) for energy-gap autocorrelation sampling. |
+| `anharmonic_n_trajectories` | `int` | `16` | Number of independent NVE trajectories for ensemble averaging ($16\text{--}24$ recommended; $48\text{--}72\ \text{ps}$ total). |
+| `anharmonic_md_surface` | `str` | `"es"` | Born-Oppenheimer PES (`"es"` excited state or `"gs"` ground state) used to propagate NVE dynamics. |
 | `anharmonic_acf_damping_meV` | `float` | `2.0` | Gaussian time-domain window width $\gamma_{\mathrm{acf}}$ for smoothing autocorrelation truncation noise. |
 | `dephasing_gamma_meV` | `float` | `1.0` | Base ZPL instrument/lifetime dephasing width $\gamma_0$ in meV. |
 | `dephasing_temperature_coefficient` | `float` | `0.0` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). Defaults to 0.0 (no artificial thermal broadening). |
@@ -329,9 +330,15 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 
 | Host Material Platform | Crystal Type | Recommended Supercell | Atom Count | Minimum Dimension $L$ | Guidelines & Expected Features |
 |---|---|---|---|---|---|
-| **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` | $215$ atoms | $\ge 10.7\ \text{Å}$ | Use $\ge 215$ atoms. $2\times 2\times 2$ (63 atoms) produces artificial $73\ \text{meV}$ multi-phonon spike combs. |
-| **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` or `(4, 4, 2)` | $142\text{--}254$ atoms | $\ge 9.2\text{--}12.3\ \text{Å}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
-| **Alkali Halides** (NaCl) | Rocksalt ($\Theta_D \approx 320\ \mathrm{K}$) | `(2, 2, 2)` | $63$ atoms | $\ge 11.4\ \text{Å}$ | $a \approx 5.69\ \text{Å}$ means `(2, 2, 2)` already exceeds $L \ge 11\ \text{Å}$ with $< 1\ \text{GB}$ VRAM usage. |
+| **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` DFT; `(8, 8, 8)` emb | $215$ DFT / $4095$ emb | $\ge 10.7\ \text{Å}$ ($28.6\ \text{Å}$ emb) | Use $\ge 215$ atoms for DFT $\Delta$SCF, and `phonon_supercell_repeat=(7, 7, 7)`–`(8, 8, 8)` with Wigner-Seitz core force splicing to avoid $5\times 5\times 5$ zone-boundary peak splitting ($55/72\ \text{meV}$). |
+| **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` DFT; `(5, 5, 2)` emb | $142\text{--}254$ DFT | $\ge 9.2\text{--}12.3\ \text{Å}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
+| **Alkali Halides** (NaCl) | Rocksalt ($\Theta_D \approx 320\ \mathrm{K}$) | `(2, 2, 2)` DFT; `(4, 4, 4)` emb | $63$ DFT / $511$ emb | $\ge 11.4\ \text{Å}$ ($22.8\ \text{Å}$ emb) | `(2, 2, 2)` satisfies $L \ge 11\ \text{Å}$ for DFT; `(4, 4, 4)` embedding (`511` atoms) converges strong-coupling soft optical bands cleanly. |
+
+### Anharmonic MD-ACF & Surface Guidelines (Production Convergence)
+
+1. **Multi-Trajectory Ensemble Length (`anharmonic_n_trajectories >= 16`, `anharmonic_md_steps = 3000`)**: Because the power-spectrum-to-spectral-density map scales as $S_{\mathrm{MD}}(\omega) \propto J_{\mathrm{cl}}(\omega)/(\hbar\omega)^2$, localized modes exhibit large $1/\omega$ statistical variance in single or short MD runs ($1\text{--}8$ trajectories). Averaging **`16–24` independent `3,000`-step NVE trajectories (`48–72 ps`)** suppresses stochastic noise cleanly—eliminating artificial main-peak splitting in Diamond $\mathrm{NV}^-$ and eliminating `±50–70 meV` peak jitter in NaCl F-center temperature scans.
+2. **Core-Localized Splicing on Large Embedded Supercells**: When pairing `phonon_supercell_repeat` with a fine-tuned foundation $\Delta$-NEP, restricting the $\mathrm{GS}/\mathrm{ES}$ NEP force difference to the Wigner-Seitz inscribed sphere around the defect core prevents cumulative far-field bulk drift from corrupting $\Delta U(t)$ and acoustic phonon tails.
+3. **Emission vs. Absorption Force & $\omega^3$ Prefactor in Soft Ionic Hosts**: Strongly coupled ionic centers exhibit marked excited/ground PES curvature asymmetry ($\hbar\Omega_{\mathrm{ES}} \ne \hbar\Omega_{\mathrm{GS}}$; e.g., NaCl F-center $S_{\mathrm{abs}} \approx 40.5$ from $\mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{GS}})$ vs. $S_{\mathrm{em}} \approx 17.6$ from $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}})$). For emission bands, match the final-state curvature using ground-state forces at $\mathbf{R}_{\mathrm{ES}}$ (`F_GS(R_ES) - F_ES(R_ES)`), and inspect the Einstein $(\hbar\omega)^3$-weighted `I_PL` band rather than the unweighted absorption-like lineshape $A(\hbar\omega)$.
 
 ---
 
