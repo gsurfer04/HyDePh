@@ -42,7 +42,7 @@ def test_lineshape_and_embedding_defaults(tmp_path):
     assert cfg_default.n_pristine_rattle_frames == 0
     assert cfg_default.anharmonic_md_steps == 3000
     assert cfg_default.anharmonic_n_trajectories == 16
-    assert cfg_default.anharmonic_md_surface == "es"
+    assert cfg_default.anharmonic_md_surface == "auto"
 
     # 2. Config with phonon_supercell_repeat automatically disables finite_size_acoustic_cutoff
     cfg_embedded = _make_cfg(tmp_path / "t2", phonon_supercell_repeat=(4, 4, 4))

@@ -15,6 +15,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import ase.io
 from ase import Atoms
 from ase.vibrations import Vibrations as _AseVibrations
 from scipy.signal import fftconvolve, correlate
@@ -482,10 +483,18 @@ def embed_phonon_supercell(
     import ase.io
     from .defect_builder import DefectBuilder, detect_defect_sites
 
-    rep_large = config.phonon_supercell_repeat
-    logger.info(f"\n[-] Embedding defect into large phonon supercell (repeat={rep_large})...")
-
     pristine_uc = ase.io.read(config.pristine_cell_path)
+    rep_cfg = config.phonon_supercell_repeat
+    if isinstance(rep_cfg, str) and rep_cfg.strip().lower() == "auto":
+        from .system_profile import resolve_phonon_supercell_repeat
+        rep_large = resolve_phonon_supercell_repeat(
+            pristine_uc,
+            calc_bulk=calc_gs,
+            min_repeat=getattr(config, "supercell_repeat", (1, 1, 1)),
+        )
+    else:
+        rep_large = tuple(int(x) for x in rep_cfg)
+    logger.info(f"\n[-] Embedding defect into large phonon supercell (repeat={rep_large})...")
     pristine_large = pristine_uc.repeat(rep_large)
 
     pristine_small = pristine_uc.repeat(config.supercell_repeat)
@@ -529,6 +538,7 @@ def embed_phonon_supercell(
     r_from_center = np.full(len(at_gs_large), float("inf"), dtype=float)
     ri_rels = mic_displacement(at_gs.positions, c_small, at_gs.cell)
 
+    large_to_small = np.full(len(at_gs_large), -1, dtype=int)
     for j, at_j in enumerate(at_gs_large):
         rj_rel = mic_displacement([at_j.position], c_large, at_gs_large.cell)[0]
         r_from_center[j] = float(np.linalg.norm(rj_rel))
@@ -537,6 +547,7 @@ def embed_phonon_supercell(
         if dists[min_i] < 0.25 and at_gs[min_i].symbol == at_j.symbol:
             dr_large[j] = dr_small[min_i]
             core_mask[j] = True
+            large_to_small[j] = min_i
 
     dq_fc_large = float(np.sqrt(np.sum(at_gs_large.get_masses()[:, None] * (dr_large ** 2))))
     logger.info(
@@ -544,17 +555,76 @@ def embed_phonon_supercell(
         f"({np.count_nonzero(np.linalg.norm(dr_large, axis=1) > 1e-4)} active atoms)"
     )
 
+    r_ws = _wigner_seitz_radius(at_gs.cell) if len(at_gs) > 8 else float("inf")
     f_es_large = None
     if calc_es is not None and getattr(config, "phonon_embedding_method", "force").lower() == "force":
-        logger.info("    [-] Evaluating excited-state forces on relaxed ground-state large supercell (Alkauskas/Razinkovas)...")
-        at_gs_large.calc = calc_gs
-        f_gs_large = at_gs_large.get_forces().copy()
-        at_gs_large.calc = calc_es
-        f_es_large = at_gs_large.get_forces().copy() - f_gs_large
-        at_gs_large.calc = calc_gs
+        from .system_profile import assess_relaxation_asymmetry, load_dft_optical_forces
+
+        force_state = str(getattr(config, "phonon_force_state", "auto")).lower()
+        dft_pref = getattr(config, "use_dft_core_forces", "auto")
+        allow_dft = (dft_pref is True) or (str(dft_pref).lower() in ("auto", "true", "always"))
+
+        if force_state == "auto":
+            if getattr(config, "calculate_pl_intensity", True):
+                try:
+                    drel_es, drel_gs, asym_ratio = assess_relaxation_asymmetry(at_gs, at_es, calc_gs, calc_es)
+                except Exception:
+                    drel_es, drel_gs, asym_ratio = 0.0, 0.0, 1.0
+                if asym_ratio >= 1.8:
+                    force_state = "emission"
+                    logger.info(
+                        f"    [+] Strong PES curvature asymmetry detected "
+                        f"(Delta E_rel,ES={drel_es:.3f} vs GS={drel_gs:.3f} eV, ratio={asym_ratio:.2f} >= 1.8); "
+                        f"selecting conjugate emission force F_GS(R_ES) - F_ES(R_ES)."
+                    )
+                elif allow_dft and load_dft_optical_forces(at_gs, at_es, getattr(config, "workspace_dir", ""), "emission") is not None:
+                    force_state = "emission"
+                else:
+                    force_state = "absorption"
+            else:
+                force_state = "absorption"
+
+        df_dft_small = (
+            load_dft_optical_forces(at_gs, at_es, getattr(config, "workspace_dir", ""), force_state)
+            if allow_dft
+            else None
+        )
+
+        if df_dft_small is not None and len(at_gs_large) >= len(at_gs):
+            f_es_large = np.zeros_like(at_gs_large.positions)
+            for j in np.flatnonzero(large_to_small >= 0):
+                f_es_large[j] = df_dft_small[large_to_small[j]]
+            logger.info(
+                f"    [+] Using exact DFT core optical force difference ({force_state}, "
+                f"||dF||={np.linalg.norm(df_dft_small):.3f} eV/A) mapped onto embedded cell."
+            )
+        elif force_state == "emission":
+            if len(at_gs_large) > len(at_gs):
+                logger.info("    [-] Evaluating conjugate emission forces F_GS(R_ES) - F_ES(R_ES) on relaxed ES DFT core...")
+                at_probe = at_es.copy()
+                at_probe.calc = calc_gs
+                f_gs_es = at_probe.get_forces().copy()
+                at_probe.calc = calc_es
+                df_em_small = f_gs_es - at_probe.get_forces().copy()
+                f_es_large = np.zeros_like(at_gs_large.positions)
+                for j in np.flatnonzero(large_to_small >= 0):
+                    f_es_large[j] = df_em_small[large_to_small[j]]
+            else:
+                at_probe = at_es.copy()
+                at_probe.calc = calc_gs
+                f_gs_es = at_probe.get_forces().copy()
+                at_probe.calc = calc_es
+                f_es_large = f_gs_es - at_probe.get_forces().copy()
+        else:
+            logger.info("    [-] Evaluating excited-state forces on relaxed ground-state large supercell (Alkauskas/Razinkovas)...")
+            at_gs_large.calc = calc_gs
+            f_gs_large = at_gs_large.get_forces().copy()
+            at_gs_large.calc = calc_es
+            f_es_large = at_gs_large.get_forces().copy() - f_gs_large
+            at_gs_large.calc = calc_gs
+
         if len(at_gs_large) > len(at_gs):
             force_mask = core_mask
-            r_ws = _wigner_seitz_radius(at_gs.cell) if len(at_gs) > 8 else float("inf")
             if np.isfinite(r_ws):
                 # Exclude DFT periodic-boundary corners outside the Wigner-Seitz inscribed sphere.
                 ws_mask = core_mask & (r_from_center <= r_ws)
@@ -566,7 +636,7 @@ def embed_phonon_supercell(
                 f_es_large[force_mask] -= np.mean(f_es_large[force_mask], axis=0)
             ws_note = f" within R_WS = {r_ws:.2f} A" if np.isfinite(r_ws) else ""
             logger.info(
-                f"    [+] Masked ES-GS force difference to {n_core} DFT core atoms{ws_note} "
+                f"    [+] Masked {force_state} force difference to {n_core} DFT core atoms{ws_note} "
                 f"(zeroed {int(np.count_nonzero(~force_mask))} outer/bulk atoms)."
             )
 
@@ -584,6 +654,9 @@ def embed_phonon_supercell(
     at_gs_large.info["defect_center"] = c_large
     at_gs_large.info["is_embedded"] = True
     at_gs_large.info["dft_supercell_natoms"] = len(at_gs)
+    at_gs_large.info["phonon_supercell_repeat"] = tuple(rep_large)
+    if np.isfinite(r_ws):
+        at_gs_large.info["dft_wigner_seitz_radius_A"] = float(r_ws)
 
     return at_gs_large, dr_large, f_es_large
 
@@ -718,13 +791,69 @@ class LineshapeEngine:
         n_workers_vib = getattr(self.config, "parallel_hessian_workers", None) or 4
         delta_vib = getattr(self.config, "displacement_delta", 0.01)
         vib_cls = self.vibrations_cls if self.vibrations_cls is not None else Vibrations
+        current_fp = _compute_hessian_fingerprint(at_gs, calc, delta=delta_vib)
+
+        hess_mode = str(getattr(self.config, "hessian_embedding_mode", "auto")).lower()
+        splice_thr = int(getattr(self.config, "hessian_splice_threshold_atoms", 600))
+        pristine_p = getattr(self.config, "pristine_cell_path", None)
+        should_splice = (
+            bool(at_gs.info.get("is_embedded", False))
+            and self.vibrations_cls is None
+            and vib_cls is _AseVibrations
+            and Vibrations is _AseVibrations
+            and pristine_p
+            and os.path.isfile(pristine_p)
+            and (hess_mode == "spliced" or (hess_mode == "auto" and len(at_gs) >= splice_thr))
+        )
+        if should_splice:
+            from ase.vibrations.data import VibrationsData
+            from .system_profile import build_spliced_hessian, is_bulk_phonon_stable
+
+            pristine_uc = ase.io.read(pristine_p)
+            rep_large = at_gs.info.get("phonon_supercell_repeat", getattr(self.config, "phonon_supercell_repeat", None))
+            if not isinstance(rep_large, (tuple, list)) or len(rep_large) != 3:
+                rep_large = tuple(getattr(self.config, "supercell_repeat", (2, 2, 2)))
+            bulk_pref = str(getattr(self.config, "spliced_bulk_potential", "auto")).lower()
+            base_candidate = getattr(calc, "calc_base", None)
+            if bulk_pref == "foundation":
+                calc_bulk = base_candidate if base_candidate is not None else calc
+            elif bulk_pref == "hybrid":
+                calc_bulk = calc
+            else:
+                if base_candidate is not None and is_bulk_phonon_stable(pristine_uc, base_candidate, delta=delta_vib):
+                    calc_bulk = base_candidate
+                    bulk_pref = "foundation"
+                else:
+                    calc_bulk = calc
+                    bulk_pref = "hybrid"
+                    if base_candidate is not None:
+                        logger.info("    [i] Foundation potential showed bulk soft/imaginary modes at DFT lattice constant; using Hybrid potential for spliced bulk phonons.")
+            H_clean = build_spliced_hessian(
+                pristine_uc=pristine_uc,
+                at_large=at_gs,
+                rep_large=(int(rep_large[0]), int(rep_large[1]), int(rep_large[2])),
+                calc_gs=calc,
+                calc_bulk=calc_bulk,
+                core_radius_A=getattr(self.config, "hessian_core_radius_A", None),
+                delta=delta_vib,
+                n_workers=n_workers_vib if use_parallel else 1,
+                cache_dir=vib_dir,
+                fingerprint=f"{current_fp}|{bulk_pref}",
+            )
+            vdata_clean = VibrationsData(at_gs, H_clean.reshape(len(at_gs), 3, len(at_gs), 3))
+            energies_ev = vdata_clean.get_energies()
+            all_modes_arr = vdata_clean.get_modes()
+
+            def _get_mode_spliced(idx):
+                return all_modes_arr[idx]
+
+            return energies_ev, _get_mode_spliced
         if use_parallel and n_workers_vib > 1 and vib_cls is _AseVibrations and Vibrations is _AseVibrations:
             from .hpc.parallel_vib import ParallelVibrations
             vib = ParallelVibrations(at, name=vib_path, delta=delta_vib, n_workers=n_workers_vib)
         else:
             vib = vib_cls(at, name=vib_path, delta=delta_vib)
 
-        current_fp = _compute_hessian_fingerprint(at_gs, calc, delta=delta_vib)
         cached_fp = None
         if os.path.isfile(state_file):
             try:
@@ -799,7 +928,9 @@ class LineshapeEngine:
         phonon_rep = getattr(self.config, "phonon_supercell_repeat", None)
         supercell_rep = getattr(self.config, "supercell_repeat", (2, 2, 2))
         f_es_mode = None
-        is_embedded = phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep)
+        is_embedded = (str(phonon_rep).strip().lower() == "auto") or (
+            phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep)
+        )
 
         if is_embedded:
             calc_es_opt = getattr(self, "calc_es", None)
@@ -1502,9 +1633,11 @@ class LineshapeEngine:
 
         calc_es_opt = getattr(self, "calc_es", None)
         paired_calc = getattr(self, "paired_calc", None)
-        md_surface = str(getattr(self.config, "anharmonic_md_surface", "es")).lower()
-        has_paired = (calc_es_opt is not None) and (md_surface != "gs")
+        md_surface = str(getattr(self.config, "anharmonic_md_surface", "auto")).lower()
         is_embedded_cell = bool(at_gs.info.get("is_embedded", False))
+        if md_surface == "auto":
+            md_surface = "gs" if is_embedded_cell else "es"
+        has_paired = (calc_es_opt is not None) and (md_surface != "gs")
         use_embedded_core_force = (
             is_embedded_cell
             and f_es_mode is not None

@@ -287,12 +287,16 @@ summary = run_pipeline(config)
 | `anharmonic_thermalization_steps` | `int` | `400` | Langevin equilibration steps prior to NVE production. |
 | `anharmonic_md_steps` | `int` | `3000` | NVE production steps per trajectory ($3.0\ \text{ps}$ at `1.0 fs`) for energy-gap autocorrelation sampling. |
 | `anharmonic_n_trajectories` | `int` | `16` | Number of independent NVE trajectories for ensemble averaging ($16\text{--}24$ recommended; $48\text{--}72\ \text{ps}$ total). |
-| `anharmonic_md_surface` | `str` | `"es"` | Born-Oppenheimer PES (`"es"` excited state or `"gs"` ground state) used to propagate NVE dynamics. |
+| `anharmonic_md_surface` | `str` | `"auto"` | Born-Oppenheimer PES (`"auto"`, `"es"`, or `"gs"`) used for NVE dynamics (`"auto"` chooses `"gs"` on embedded cells and `"es"` otherwise). |
 | `anharmonic_acf_damping_meV` | `float` | `2.0` | Gaussian time-domain window width $\gamma_{\mathrm{acf}}$ for smoothing autocorrelation truncation noise. |
 | `dephasing_gamma_meV` | `float` | `1.0` | Base ZPL instrument/lifetime dephasing width $\gamma_0$ in meV. |
 | `dephasing_temperature_coefficient` | `float` | `0.0` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). Defaults to 0.0 (no artificial thermal broadening). |
-| `phonon_supercell_repeat` | `tuple of int` | `None` | Supercell repeat for expanded phonon embedding calculations. |
+| `phonon_supercell_repeat` | `tuple` or `"auto"` | `None` | Supercell repeat for phonon embedding; `"auto"` sizes $(N_x,N_y,N_z)$ from host stiffness $\hbar\omega_{\max}$ and cell vectors. |
 | `phonon_embedding_method` | `str` | `"force"` | Embedding mode projection: `"force"` (Alkauskas/Razinkovas) or `"displacement"`. |
+| `hessian_embedding_mode` | `str` | `"auto"` | Embedded Hessian mode (`"auto"`, `"spliced"`, `"full"`); `"auto"` uses Alkauskas bulk+core splicing above `hessian_splice_threshold_atoms` (`600`). |
+| `spliced_bulk_potential` | `str` | `"auto"` | Bulk force-constant calculator (`"auto"`, `"foundation"`, `"hybrid"`); `"auto"` uses foundation if dynamically stable, else hybrid. |
+| `phonon_force_state` | `str` | `"auto"` | Force geometry (`"auto"`, `"emission"`, `"absorption"`); `"auto"` switches to $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}})-\mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$ when PES asymmetry $\ge 1.8$. |
+| `use_dft_core_forces` | `bool` or `"auto"` | `"auto"` | Uses exact paired DFT core forces from Stage 1/3 when available (`"auto"`, `True`, or `False`). |
 | `acoustic_sum_rule` | `bool` | `True` | Enforces tensorial Acoustic Sum Rule ($\sum_j \Phi_{ij} = 0$) and projects out center-of-mass translations from the dynamical matrix. |
 | `displacement_delta` | `float` | `0.01` | Finite-difference displacement step (Å) for numerical Hessian evaluation. |
 | `max_imaginary_modes` | `int` | `0` | Maximum imaginary normal modes permitted before raising a `ValueError`. |
@@ -333,6 +337,14 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 | **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` DFT; `(8, 8, 8)` emb | $215$ DFT / $4095$ emb | $\ge 10.7\ \text{Å}$ ($28.6\ \text{Å}$ emb) | Use $\ge 215$ atoms for DFT $\Delta$SCF, and `phonon_supercell_repeat=(7, 7, 7)`–`(8, 8, 8)` with Wigner-Seitz core force splicing to avoid $5\times 5\times 5$ zone-boundary peak splitting ($55/72\ \text{meV}$). |
 | **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` DFT; `(5, 5, 2)` emb | $142\text{--}254$ DFT | $\ge 9.2\text{--}12.3\ \text{Å}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
 | **Alkali Halides** (NaCl) | Rocksalt ($\Theta_D \approx 320\ \mathrm{K}$) | `(2, 2, 2)` DFT; `(4, 4, 4)` emb | $63$ DFT / $511$ emb | $\ge 11.4\ \text{Å}$ ($22.8\ \text{Å}$ emb) | `(2, 2, 2)` satisfies $L \ge 11\ \text{Å}$ for DFT; `(4, 4, 4)` embedding (`511` atoms) converges strong-coupling soft optical bands cleanly. |
+
+### Unified Property-Aware Workflow (`phonon_supercell_repeat="auto"`)
+
+Setting `phonon_supercell_repeat="auto"` (paired with `"auto"` defaults for `hessian_embedding_mode`, `spliced_bulk_potential`, `phonon_force_state`, `use_dft_core_forces`, and `anharmonic_md_surface`) routes each defect–host system through one shared physics-driven workflow:
+
+- **Host-stiffness supercell sizing (`resolve_phonon_supercell_repeat`)**: Probes the pristine crystal's optical phonon bandwidth $\hbar\omega_{\max}$ and expands each cell axis to $L_{\min} = 27\ \text{Å}$ (stiff covalent $\ge 140\ \text{meV}$ $\to$ `8×8×8` Diamond), $24\ \text{Å}$ (polar covalent $75\text{--}140\ \text{meV}$ $\to$ `8×8×3` 4H-SiC), or $20\ \text{Å}$ (soft ionic $<75\ \text{meV}$ $\to$ `4×4×4` NaCl).
+- **Universal Alkauskas bulk+core Hessian splicing**: Above `600` atoms, tiles pristine `Phonons` bulk force constants (using the foundation potential when dynamically stable at the DFT lattice constant, or the hybrid potential if soft foundation bulk modes appear) and splices parallel defect-core columns within `max(R_WS, 5.5) Å`.
+- **PES-asymmetry force routing & exact DFT core forces**: Detects strong excited/ground curvature asymmetry ($\Delta E_{\mathrm{rel,ES}} / \Delta E_{\mathrm{rel,GS}} \ge 1.8$, e.g. NaCl F-center) to switch automatically to conjugate emission forces $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$, while prioritizing exact paired DFT core forces (`qe_es_relax`/`labeled_dft_frames`) whenever available.
 
 ### Anharmonic MD-ACF & Surface Guidelines (Production Convergence)
 

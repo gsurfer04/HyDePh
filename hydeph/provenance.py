@@ -149,7 +149,7 @@ def generate_provenance_manifest(
         },
         "lineshape_parameters": {
             "temperatures": list(getattr(config, "temperatures", [10.0, 77.0, 150.0, 300.0])),
-            "phonon_supercell_repeat": list(getattr(config, "phonon_supercell_repeat", [])) if getattr(config, "phonon_supercell_repeat", None) else None,
+            "phonon_supercell_repeat": "auto" if str(getattr(config, "phonon_supercell_repeat", "")).lower() == "auto" else (list(getattr(config, "phonon_supercell_repeat", [])) if getattr(config, "phonon_supercell_repeat", None) else None),
             "phonon_embedding_method": getattr(config, "phonon_embedding_method", "force"),
             "dephasing_gamma_meV": getattr(config, "dephasing_gamma_meV", 1.0),
             "dephasing_temperature_coefficient": getattr(config, "dephasing_temperature_coefficient", 0.0),

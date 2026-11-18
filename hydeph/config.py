@@ -457,7 +457,21 @@ class ToolkitConfig:
     anharmonic_n_trajectories : int
         Number of independent NVE trajectories for ensemble averaging. Default is 16 (48 ps total sampling at 3000 steps).
     anharmonic_md_surface : str
-        Potential energy surface used to propagate NVE dynamics ("es" or "gs"). Default is "es".
+        Potential energy surface used to propagate NVE dynamics ("auto", "es", or "gs"). Default is "auto"
+        ("gs" on embedded emission supercells to avoid ES ML state-mixing instabilities; "es" otherwise).
+    hessian_embedding_mode : str
+        Hessian evaluation mode on embedded supercells ("auto", "spliced", or "full"). Default is "auto"
+        (uses Alkauskas bulk+core splicing above hessian_splice_threshold_atoms).
+    hessian_splice_threshold_atoms : int
+        Atom-count threshold for automatic bulk+core Hessian splicing. Default is 600.
+    hessian_core_radius_A : float, optional
+        Radius (Angstrom) around the defect centroid included in the spliced core Hessian.
+    spliced_bulk_potential : str
+        Calculator used for bulk periodic force constants in spliced Hessians ("auto", "foundation", or "hybrid").
+    phonon_force_state : str
+        Optical force geometry for mode projection ("auto", "emission", or "absorption"). Default is "auto".
+    use_dft_core_forces : bool or str
+        Whether to prioritize exact DFT core force differences when available ("auto", True, or False).
 
     phonon_y_min : float, optional
         Minimum y-axis limit for phonon spectral density plots.
@@ -635,12 +649,18 @@ class ToolkitConfig:
     max_imaginary_modes: int = 0
     acoustic_sum_rule: bool = True
     displacement_delta: float = 0.01
-    phonon_supercell_repeat: Optional[Tuple[int, int, int]] = None
+    phonon_supercell_repeat: Optional[Any] = None  # None, "auto", or (nx, ny, nz)
     phonon_embedding_method: str = "force"  # "force" or "displacement"
+    hessian_embedding_mode: str = "auto"  # "auto", "spliced", or "full"
+    hessian_splice_threshold_atoms: int = 600
+    hessian_core_radius_A: Optional[float] = None
+    spliced_bulk_potential: str = "auto"  # "auto", "foundation", or "hybrid"
+    phonon_force_state: str = "auto"  # "auto", "emission", or "absorption"
+    use_dft_core_forces: Any = "auto"  # "auto", True, or False
     export_normal_modes: bool = True
     anharmonic_n_trajectories: int = 16
     anharmonic_acf_damping_meV: float = 2.0
-    anharmonic_md_surface: str = "es"  # "es" (excited-state PES) or "gs" (ground-state PES)
+    anharmonic_md_surface: str = "auto"  # "auto", "es" (excited-state PES), or "gs" (ground-state PES)
     calculate_pl_intensity: bool = True
     finite_size_acoustic_cutoff: Optional[bool] = None
     lineshape_n_points: int = 1500
@@ -726,7 +746,10 @@ class ToolkitConfig:
         elif self.excited_state_spin_multiplicity is not None:
             self.excited_state_tot_magnetization = max(0, int(self.excited_state_spin_multiplicity) - 1)
 
-        if self.phonon_supercell_repeat is not None:
+        if isinstance(self.phonon_supercell_repeat, str):
+            val_rep = self.phonon_supercell_repeat.strip().lower()
+            self.phonon_supercell_repeat = "auto" if val_rep == "auto" else tuple(int(x) for x in val_rep.replace("x", ",").split(","))
+        elif self.phonon_supercell_repeat is not None:
             self.phonon_supercell_repeat = tuple(int(x) for x in self.phonon_supercell_repeat)
 
         if self.zpl_energy_eV is not None and self.zpl_energy_eV <= 0:
@@ -1344,11 +1367,25 @@ class ToolkitConfig:
         # Phonon and lineshape parameters validation
         if self.finite_size_acoustic_cutoff is None:
             self.finite_size_acoustic_cutoff = bool(self.phonon_supercell_repeat is None)
-        if self.phonon_supercell_repeat is not None:
+        if self.phonon_supercell_repeat is not None and str(self.phonon_supercell_repeat).lower() != "auto":
             if len(self.phonon_supercell_repeat) != 3 or any(int(r) < 1 for r in self.phonon_supercell_repeat):
                 raise ValueError(
-                    f"Invalid phonon_supercell_repeat: {self.phonon_supercell_repeat}. Must be a 3-tuple of integers >= 1."
+                    f"Invalid phonon_supercell_repeat: {self.phonon_supercell_repeat}. Must be 'auto' or a 3-tuple of integers >= 1."
                 )
+        if str(self.hessian_embedding_mode).lower() not in ("auto", "spliced", "full"):
+            raise ValueError(
+                f"Invalid hessian_embedding_mode: '{self.hessian_embedding_mode}'. Must be 'auto', 'spliced', or 'full'."
+            )
+        if str(self.spliced_bulk_potential).lower() not in ("auto", "foundation", "hybrid"):
+            raise ValueError(
+                f"Invalid spliced_bulk_potential: '{self.spliced_bulk_potential}'. Must be 'auto', 'foundation', or 'hybrid'."
+            )
+        if str(self.phonon_force_state).lower() not in ("auto", "emission", "absorption"):
+            raise ValueError(
+                f"Invalid phonon_force_state: '{self.phonon_force_state}'. Must be 'auto', 'emission', or 'absorption'."
+            )
+        if self.hessian_core_radius_A is not None and float(self.hessian_core_radius_A) <= 0.0:
+            raise ValueError(f"Invalid hessian_core_radius_A: {self.hessian_core_radius_A}. Must be > 0.")
         if self.phonon_embedding_method.lower() not in ("displacement", "force"):
             raise ValueError(
                 f"Invalid phonon_embedding_method: '{self.phonon_embedding_method}'. Must be 'displacement' or 'force'."
@@ -1361,8 +1398,10 @@ class ToolkitConfig:
             )
         if int(self.anharmonic_n_trajectories) < 1:
             raise ValueError(f"Invalid anharmonic_n_trajectories: {self.anharmonic_n_trajectories}. Must be >= 1.")
-        if str(self.anharmonic_md_surface).lower() not in ("es", "gs"):
-            raise ValueError(f"Invalid anharmonic_md_surface: '{self.anharmonic_md_surface}'. Must be 'es' or 'gs'.")
+        if str(self.anharmonic_md_surface).lower() not in ("auto", "es", "gs"):
+            raise ValueError(
+                f"Invalid anharmonic_md_surface: '{self.anharmonic_md_surface}'. Must be 'auto', 'es', or 'gs'."
+            )
         if float(self.anharmonic_acf_damping_meV) <= 0.0:
             raise ValueError(f"Invalid anharmonic_acf_damping_meV: {self.anharmonic_acf_damping_meV}. Must be > 0.")
         if self.time_window_tau_fs is not None and float(self.time_window_tau_fs) <= 0.0:
