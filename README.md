@@ -364,7 +364,6 @@ Setting `phonon_supercell_repeat="auto"` (paired with `"auto"` defaults for `hes
 |---|---|---|---|---|---|---|
 | **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $8\times 8\times 8$ spliced ($4095$) | $3.46$ / $3.71\text{--}3.87$ | $0.534$ | $1.945\ \mathrm{eV}$ | Single $69\text{--}70\ \mathrm{meV}$ main peak (no $5\times 5\times 5$ splitting); $\mathrm{DWF}_0 = 3.15\%$, ZPL preserved to $300\ \mathrm{K}$ |
 | **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $8\times 8\times 3$ spliced ($1534$) | $2.26$ / $2.61\text{--}2.77$ | $0.457$ | $1.096\ \mathrm{eV}$ | Conjugate `qe_gs_on_es` $\mathbf{F}_{\mathrm{em}}$ reproduces attested $-34, -73, -96\ \mathrm{meV}$ peaks ($\mathrm{DWF}_0 = 10.40\%$) cleanly to $300\ \mathrm{K}$ [Jin et al. PRM 2021] |
-| **CsI F-Center** | Large-lattice ionic ($125\ \mathrm{K}$) | $2\times 2\times 2$ ($15$) | $14.89$ | $4.330$ | $0.694\ \mathrm{eV}$ | Ultra-strong vibronic coupling ($S \gg 10$); zero DWF with smooth Gaussian broadening across temperatures |
 | **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $4\times 4\times 4$ ($511$) | $11.74$ ($17.61$ NEP) / $13.57\text{--}14.12$ | $2.208$ | $1.273\ \mathrm{eV}$ | Auto $\mathbf{F}_{\mathrm{em}}$ (`ratio=2.21`) + $E^3 A$ places $I_{\mathrm{PL}}$ inside $0.97\text{--}1.10\ \mathrm{eV}$ expt (`1.079 -> 1.084 eV`, FWHM $151 \to 257\ \mathrm{meV}$) |
 
 > [!NOTE]

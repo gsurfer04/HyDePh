@@ -12,7 +12,7 @@ import hydeph
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 benchmarks_dir = os.path.join(repo_root, "benchmarks")
 
-systems = ["diamond-nvminus", "CsI", "4H-SiC", "NaCl"]
+systems = ["diamond-nvminus", "4H-SiC", "NaCl"]
 
 for sys_name in systems:
     sdir = os.path.join(benchmarks_dir, sys_name)

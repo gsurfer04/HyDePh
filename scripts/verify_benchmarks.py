@@ -30,12 +30,6 @@ BENCHMARK_SPECS = {
         "s_range": (2.0, 4.5),
         "stiff_lattice": True,
     },
-    "CsI": {
-        "zpl_range": (0.40, 1.20),
-        "stokes_range_meV": (100.0, 350.0),
-        "s_range": (10.0, 40.0),
-        "stiff_lattice": False,
-    },
     "NaCl": {
         "zpl_range": (1.00, 1.80),
         "stokes_range_meV": (300.0, 800.0),

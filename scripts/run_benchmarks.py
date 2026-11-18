@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Unified benchmark execution runner for HyDePh color-center systems.
 
-Runs benchmark pipelines across benchmark directories (diamond-nvminus, 4H-SiC, CsI, NaCl),
+Runs benchmark pipelines across benchmark directories (diamond-nvminus, 4H-SiC, NaCl),
 refreshes provenance manifests, and validates physical invariants.
 
 Usage:
-    python scripts/run_benchmarks.py [--systems diamond-nvminus 4H-SiC CsI] [--from-stage 6] [--verify]
+    python scripts/run_benchmarks.py [--systems diamond-nvminus 4H-SiC NaCl] [--from-stage 6] [--verify]
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import List
 
 
-AVAILABLE_SYSTEMS = ["diamond-nvminus", "4H-SiC", "CsI", "NaCl"]
+AVAILABLE_SYSTEMS = ["diamond-nvminus", "4H-SiC", "NaCl"]
 
 
 def run_system_benchmark(sys_name: str, benchmarks_dir: Path, from_stage: int = 6, to_stage: int = 6) -> bool:
