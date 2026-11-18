@@ -28,6 +28,7 @@ See the root [`README.md`](../README.md) for full configuration tables and [`doc
 - `qe_runner.py`: Quantum ESPRESSO runner with fixed occupations, relative `pseudo_dir` resolution, real-time SCF and BFGS step monitoring, variable-cell parsing, and constrained $\Delta\text{SCF}$ occupations.
 - `delta_trainer.py`: Baseline subtraction, mean energy offset subtraction ($\bar{\Delta e}_S$), automated quality control gates, and GPUMD training.
 - `calculator.py`: `HybridDefectCalculator` and `PairedDefectCalculator` combining foundation potentials with paired ground- and optical excited-state $\Delta$-NEPs.
+- `system_profile.py`: Property-driven host classification, Alkauskas bulk+core Hessian splicing, and conjugate emission/DFT force routing.
 - `lineshape.py`: Large-supercell phonon embedding, Acoustic Sum Rule projection, $(\hbar\omega)^3$ PL spectra, finite-$T$ DWF, normal mode decomposition, and paired cumulant NVE dynamics.
 - `cc_diagram.py`: Paired 1D configuration coordinate curves, vertical transition energies, and Stokes shift analysis.
 - `provenance.py`: Environmental provenance, input SHA256 hashes, and manifest tracking for scientific reproducibility.

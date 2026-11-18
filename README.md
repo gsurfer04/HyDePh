@@ -356,15 +356,19 @@ Setting `phonon_supercell_repeat="auto"` (paired with `"auto"` defaults for `hes
 
 ## Benchmark Systems
 
-| System | Host ($\Theta_D$) | Supercell ($N_{\mathrm{atoms}}$) | $S$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | Adiabatic $E_{\mathrm{ZPL}}$ | Stokes Shift | Key Spectroscopic Result |
-|---|---|---|---|---|---|---|---|
-| **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $3\times 3\times 3$ ($215$) | $2.31$ | $0.534$ | $2.125\ \mathrm{eV}$ | $235.1\ \mathrm{meV}$ | Sharp ZPL ($\mathrm{DWF}_0 = 9.97\%$) visible up to $300\ \mathrm{K}$; $64.6\ \mathrm{meV}$ $a_1$ resonance & smooth sideband wing |
-| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $3\times 3\times 2$ ($142$, $5\times 5\times 2$ emb) | $2.92$ | $0.763$ | $1.096\ \mathrm{eV}$ | $273.6\ \mathrm{meV}$ | Attested 3 peaks reproduced at $-34, -73, -96\ \mathrm{meV}$; distinct prominent ZPL preserved at $300\ \mathrm{K}$ [Jin et al. PRM 2021] |
-| **CsI F-Center** | Large-lattice ionic ($125\ \mathrm{K}$) | $2\times 2\times 2$ ($15$) | $14.89$ | $4.330$ | $0.694\ \mathrm{eV}$ | $193.2\ \mathrm{meV}$ | Ultra-strong vibronic coupling ($S \gg 10$); zero DWF with physical Gaussian broadening across temperatures |
-| **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $2\times 2\times 2$ ($63$) | $11.58$ | $2.220$ | $1.274\ \mathrm{eV}$ | $560.1\ \mathrm{meV}$ | Strong coupling ($\Delta E_{\mathrm{Stokes}} = 0.560\ \mathrm{eV}$); smooth FWHM broadening $163.8 \to 263.1\ \mathrm{meV}$ ($10\text{--}300\ \mathrm{K}$) |
+<p align="center">
+  <img src="assets/unified_workflow_3benchmarks.png" width="98%" alt="HyDePh Unified Workflow Across NaCl F-center, 4H-SiC kk-VV0, and Diamond NV-">
+</p>
+
+| System | Host ($\Theta_D$) | Auto Phonon Supercell ($N_{\mathrm{atoms}}$) | $S_{\mathrm{harm}}$ / $S_{\mathrm{MD}}$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | $E_{\mathrm{ZPL}}$ | Key Spectroscopic Result |
+|---|---|---|---|---|---|---|
+| **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $8\times 8\times 8$ spliced ($4095$) | $3.46$ / $3.71\text{--}3.87$ | $0.534$ | $1.945\ \mathrm{eV}$ | Single $69\text{--}70\ \mathrm{meV}$ main peak (no $5\times 5\times 5$ splitting); $\mathrm{DWF}_0 = 3.15\%$, ZPL preserved to $300\ \mathrm{K}$ |
+| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $8\times 8\times 3$ spliced ($1534$) | $2.26$ / $2.61\text{--}2.77$ | $0.457$ | $1.096\ \mathrm{eV}$ | Conjugate `qe_gs_on_es` $\mathbf{F}_{\mathrm{em}}$ reproduces attested $-34, -73, -96\ \mathrm{meV}$ peaks ($\mathrm{DWF}_0 = 10.40\%$) cleanly to $300\ \mathrm{K}$ [Jin et al. PRM 2021] |
+| **CsI F-Center** | Large-lattice ionic ($125\ \mathrm{K}$) | $2\times 2\times 2$ ($15$) | $14.89$ | $4.330$ | $0.694\ \mathrm{eV}$ | Ultra-strong vibronic coupling ($S \gg 10$); zero DWF with smooth Gaussian broadening across temperatures |
+| **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $4\times 4\times 4$ ($511$) | $11.74$ ($17.61$ NEP) / $13.57\text{--}14.12$ | $2.208$ | $1.273\ \mathrm{eV}$ | Auto $\mathbf{F}_{\mathrm{em}}$ (`ratio=2.21`) + $E^3 A$ places $I_{\mathrm{PL}}$ inside $0.97\text{--}1.10\ \mathrm{eV}$ expt (`1.079 -> 1.084 eV`, FWHM $151 \to 257\ \mathrm{meV}$) |
 
 > [!NOTE]
-> The 4H-SiC benchmark distinguishes the fast foundation-phonon test from the full $\Delta\text{SCF}$ pipeline run. The full pipeline uses embedded $5\times 5\times 2$ supercell phonons driven by exact $\Delta\text{SCF}$ forces to reproduce the experimental Jin et al. vibronic features.
+> All three flagship benchmarks (`NaCl F-center`, `4H-SiC kk-VV0`, `Diamond NV-`) run through the same unified configuration (`phonon_supercell_repeat="auto"`, `hessian_embedding_mode="auto"`, `phonon_force_state="auto"`, `use_dft_core_forces="auto"`, `anharmonic_md_surface="auto"`), with `qe_gs_on_es` providing exact DFT emission forces $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$.
 
 ### 4H-SiC $kk$-Divacancy Benchmark Reproduction (Jin et al., PRM 2021)
 
