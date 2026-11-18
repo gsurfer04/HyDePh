@@ -1246,6 +1246,31 @@ for sub_d, out_f in [('qe_gs_relax', 'relaxed_gs.xyz'), ('qe_es_relax', 'relaxed
             print(f'[-] Extraction notice for {{out_f}}: {{exc}}')
 " 2>/dev/null || true
 
+# 4. Conjugate Ground-State Single-Point SCF at R_ES (for exact DFT emission forces)
+if [ -f "$WORKSPACE_DIR/relaxed_es.xyz" ] && [ -f "$WORKSPACE_DIR/qe_gs_scf/pw.in" ]; then
+    echo "=============================================================================="
+    echo " [3/3] Launching Conjugate Ground-State SCF at R_ES in qe_gs_on_es..."
+    echo "=============================================================================="
+    mkdir -p "$WORKSPACE_DIR/qe_gs_on_es"
+    python3 -c "
+import os, re, ase.io
+at_es = ase.io.read('$WORKSPACE_DIR/relaxed_es.xyz')
+with open('$WORKSPACE_DIR/qe_gs_scf/pw.in', 'r', encoding='utf-8') as f:
+    tpl = f.read()
+lines_pos = ['ATOMIC_POSITIONS (angstrom)'] + [f'  {{s:4s}} {{x:14.8f}} {{y:14.8f}} {{z:14.8f}}' for s, (x, y, z) in zip(at_es.get_chemical_symbols(), at_es.positions)]
+out_txt = re.sub(r'ATOMIC_POSITIONS.*?(?=K_POINTS|\\Z)', '\\n'.join(lines_pos) + '\\n\\n', tpl, flags=re.S)
+with open('$WORKSPACE_DIR/qe_gs_on_es/pw.in', 'w', encoding='utf-8') as f:
+    f.write(out_txt)
+"
+    if [ -n "$PSEUDO_DIR" ] && [ ! -e "$WORKSPACE_DIR/qe_gs_on_es/pseudo" ]; then
+        ln -sfn "$PSEUDO_DIR" "$WORKSPACE_DIR/qe_gs_on_es/pseudo"
+    fi
+    cd "$WORKSPACE_DIR/qe_gs_on_es"
+    srun --cpu-bind=cores pw.x -in pw.in > pw.out 2>&1
+    echo "[+] Conjugate GS-on-ES SCF finished at $(date)"
+    cd "$WORKSPACE_DIR"
+fi
+
 echo "=============================================================================="
 echo " Relaxations completed at $(date)"
 echo " To resume the pipeline, execute:"

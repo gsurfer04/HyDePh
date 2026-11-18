@@ -623,6 +623,40 @@ class DefectBuilder:
         logger.info(f"[+] Ground State relaxation completed: E = {energy_val:.4f} eV")
         return at_gs
 
+    def _ensure_gs_on_es_scf(self, at_es: Atoms) -> None:
+        """Compute or reuse ground-state SCF forces at the relaxed excited-state geometry R_ES."""
+        import shutil
+
+        es_method = getattr(self.config, "excited_state_method", "delta_scf").lower()
+        if es_method not in ("delta_scf", "spin_proxy"):
+            return
+
+        ws = self.config.workspace_dir
+        gs_on_es_dir = os.path.join(ws, "qe_gs_on_es")
+        gs_on_es_out = os.path.join(gs_on_es_dir, "pw.out")
+        es_out = os.path.join(ws, "qe_es_relax", "pw.out")
+
+        pw_exe = getattr(self.config, "pw_exe", "pw.x") or "pw.x"
+        has_pw = bool(os.path.isfile(pw_exe) or shutil.which(pw_exe))
+        can_run = os.path.isfile(gs_on_es_out) or (has_pw and os.path.isfile(es_out))
+        if not can_run:
+            return
+
+        try:
+            qe_runner = self._get_qe_runner()
+            if not hasattr(qe_runner, "label_single_frame"):
+                return
+            at_gs_es = qe_runner.label_single_frame(at_es, gs_on_es_dir)
+            if not isinstance(at_gs_es, Atoms):
+                return
+            f_gs_es = at_gs_es.arrays.get("forces")
+            if f_gs_es is not None and os.path.isfile(es_out):
+                es_last = ase.io.read(es_out, index=-1)
+                if len(es_last) == len(at_es):
+                    at_es.info["dft_optical_forces_em"] = np.asarray(f_gs_es - es_last.get_forces(), dtype=float)
+        except Exception as exc:
+            logger.debug(f"[-] Optional conjugate GS SCF at R_ES skipped: {exc}")
+
     def generate_excited_state_geometry(self, at_gs: Atoms, force_relax: bool = False) -> Tuple[Atoms, float]:
         """Builds or loads the Optical Excited State structure and returns `(at_es, dq_fc)`."""
         es_path = os.path.join(self.config.workspace_dir, "relaxed_es.xyz")
@@ -692,6 +726,9 @@ class DefectBuilder:
                     os.replace(tmp_es, es_path)
                     m = at_gs.get_masses()
                     dq_fc = float(np.sqrt(np.sum(m[:, None] * (dr_fc ** 2))))
+                    gs_on_es_out = os.path.join(self.config.workspace_dir, "qe_gs_on_es", "pw.out")
+                    if os.path.isfile(gs_on_es_out):
+                        self._ensure_gs_on_es_scf(at_rel)
                     logger.info(f"[+] Discovered converged cluster excited-state relaxation at {es_out} -> cached to {es_path} (Delta Q = {dq_fc:.4f} amu^(1/2)*A)")
                     return at_rel, dq_fc
             except Exception as e:
@@ -799,6 +836,7 @@ class DefectBuilder:
                 if "defect_positions" in at_gs.info:
                     at_es.info["defect_positions"] = at_gs.info["defect_positions"]
                 at_es.calc = None
+                self._ensure_gs_on_es_scf(at_es)
                 tmp_es = es_path + ".tmp.xyz"
                 ase.io.write(tmp_es, at_es, format="extxyz")
                 os.replace(tmp_es, es_path)

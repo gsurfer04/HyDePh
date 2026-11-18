@@ -1,5 +1,6 @@
 """Tests for the unified property-driven workflow (auto supercell, Hessian splicing, force & surface routing)."""
 
+from pathlib import Path
 import numpy as np
 import pytest
 from ase import Atoms
@@ -221,3 +222,74 @@ def test_dft_core_force_override_and_embedded_md_surface_auto(tmp_path):
     s_cont = np.exp(-0.5 * ((hw_grid - 50.0) / 5.0) ** 2)
     eng.run_anharmonic_sampling(at_large, at_large.copy(), hw_grid, s_cont, total_S=1.0, f_es_mode=f_large)
     assert spy_es.calls == 0
+
+
+def test_qe_gs_on_es_conjugate_scf_loads_emission_forces_and_slurm_hook(tmp_path):
+    """Verify qe_gs_on_es/pw.out + qe_es_relax/pw.out loads exact emission forces and SLURM runs [3/3]."""
+    from hydeph.qe.runner import QERunner
+
+    uc = bulk("C", "diamond", a=3.57, cubic=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    pdir = tmp_path / "pseudo"
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "C.upf").write_text('<UPF version="2.0.1"><PP_HEADER element="C" pseudo_type="NC" z_valence="4.00"/></UPF>')
+    cfg = _make_base_cfg(
+        tmp_path,
+        uc,
+        workspace_dir=str(ws),
+        pseudo_dir=str(pdir),
+        pseudopotentials={"C": "C.upf"},
+        supercell_repeat=(1, 1, 1),
+        phonon_supercell_repeat=(2, 2, 2),
+        phonon_force_state="auto",
+        use_dft_core_forces=True,
+        spin_multiplicity=3,
+    )
+    at_es = uc.copy()
+    # Stub minimal QE pw.out outputs in qe_gs_on_es and qe_es_relax via monkeypatching ase.io.read isn't needed
+    # if we test load_dft_optical_forces with valid extxyz/pw mock or direct QE output snippet:
+    from unittest.mock import patch
+
+    at_gs_es = at_es.copy()
+    f_gs_es = np.zeros((len(at_es), 3))
+    f_gs_es[0, 0] = 0.8
+    f_gs_es[1, 0] = -0.8
+    at_gs_es.info["dft_optical_forces_em"] = f_gs_es
+
+    loaded = load_dft_optical_forces(at_es.copy(), at_gs_es, str(ws), force_state="emission")
+    assert loaded is not None and np.allclose(loaded, f_gs_es)
+
+    # Test load_dft_optical_forces reading qe_gs_on_es/pw.out - qe_es_relax/pw.out
+    (ws / "qe_gs_on_es").mkdir()
+    (ws / "qe_es_relax").mkdir()
+    pw_gs_on_es = ws / "qe_gs_on_es" / "pw.out"
+    pw_es_relax = ws / "qe_es_relax" / "pw.out"
+    pw_gs_on_es.write_text("stub")
+    pw_es_relax.write_text("stub")
+
+    at_a = at_es.copy()
+    at_b = at_es.copy()
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    f_a = np.zeros((len(at_es), 3))
+    f_a[0, 0] = 1.25
+    f_a[1, 0] = -1.25
+    at_a.calc = SinglePointCalculator(at_a, energy=-10.0, forces=f_a)
+    f_b = np.zeros((len(at_es), 3))
+    f_b[0, 0] = 0.05
+    f_b[1, 0] = -0.05
+    at_b.calc = SinglePointCalculator(at_b, energy=-9.0, forces=f_b)
+
+    at_es_clean = at_es.copy()
+    with patch("hydeph.system_profile.ase.io.read", side_effect=lambda p, **kw: at_a if "qe_gs_on_es/pw.out" in str(p) else at_b):
+        df_em = load_dft_optical_forces(at_es.copy(), at_es_clean, str(ws), force_state="emission")
+    assert df_em is not None
+    assert np.allclose(df_em, f_a - f_b)
+
+    # Verify SLURM prepare_relaxation_inputs includes [3/3] qe_gs_on_es
+    runner = QERunner(cfg)
+    prep = runner.prepare_relaxation_inputs(at_es)
+    slurm_txt = Path(prep["slurm_script"]).read_text(encoding="utf-8")
+    assert "qe_gs_on_es" in slurm_txt
+    assert "[3/3] Launching Conjugate Ground-State SCF at R_ES" in slurm_txt

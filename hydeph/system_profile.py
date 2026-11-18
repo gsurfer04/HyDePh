@@ -514,10 +514,28 @@ def load_dft_optical_forces(
         except Exception:
             pass
 
-    # 2. Fallback for absorption at R_GS: qe_es_relax step 0 minus qe_gs_relax last step
-    if state == "absorption":
-        qe_es_p = os.path.join(workspace_dir, "qe_es_relax", "pw.out")
-        qe_gs_p = os.path.join(workspace_dir, "qe_gs_relax", "pw.out")
+    # 2. Fallback to relaxation endpoints + conjugate single-point SCF
+    qe_es_p = os.path.join(workspace_dir, "qe_es_relax", "pw.out")
+    qe_gs_p = os.path.join(workspace_dir, "qe_gs_relax", "pw.out")
+    if state == "emission":
+        qe_gs_es_p = os.path.join(workspace_dir, "qe_gs_on_es", "pw.out")
+        if os.path.isfile(qe_gs_es_p) and os.path.isfile(qe_es_p):
+            try:
+                gs_es = ase.io.read(qe_gs_es_p, index=-1)
+                es_last = ase.io.read(qe_es_p, index=-1)
+                if (
+                    len(gs_es) == nat
+                    and len(es_last) == nat
+                    and gs_es.get_chemical_symbols() == syms
+                    and es_last.get_chemical_symbols() == syms
+                    and _pbc_rmsd(gs_es.positions, es_last.positions, cell) < 0.02
+                    and _pbc_rmsd(gs_es.positions, at_es.positions, cell) < 0.08
+                    and _pbc_max_disp(gs_es.positions, at_es.positions) < 0.08
+                ):
+                    return np.asarray(gs_es.get_forces() - es_last.get_forces(), dtype=float)
+            except Exception:
+                pass
+    elif state == "absorption":
         if os.path.isfile(qe_es_p) and os.path.isfile(qe_gs_p):
             try:
                 es0 = ase.io.read(qe_es_p, index=0)
