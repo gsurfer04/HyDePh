@@ -293,3 +293,85 @@ def test_qe_gs_on_es_conjugate_scf_loads_emission_forces_and_slurm_hook(tmp_path
     slurm_txt = Path(prep["slurm_script"]).read_text(encoding="utf-8")
     assert "qe_gs_on_es" in slurm_txt
     assert "[3/3] Launching Conjugate Ground-State SCF at R_ES" in slurm_txt
+
+
+def test_load_dft_optical_forces_extxyz_arrays_roundtrip(tmp_path):
+    """Verify dft_optical_forces_{em,abs} round-trip via extxyz arrays cleanly."""
+    import ase.io
+
+    at_gs = bulk("Si", "diamond", a=5.43, cubic=True)
+    at_es = at_gs.copy()
+    f_em = np.zeros((len(at_es), 3))
+    f_em[0, 2] = 0.75
+    f_em[1, 2] = -0.75
+    f_abs = np.zeros((len(at_gs), 3))
+    f_abs[0, 1] = -0.55
+    f_abs[1, 1] = 0.55
+
+    at_gs.arrays["dft_optical_forces_abs"] = f_abs
+    at_es.arrays["dft_optical_forces_em"] = f_em
+    p_gs = tmp_path / "relaxed_gs.xyz"
+    p_es = tmp_path / "relaxed_es.xyz"
+    ase.io.write(str(p_gs), at_gs, format="extxyz")
+    ase.io.write(str(p_es), at_es, format="extxyz")
+
+    gs_re = ase.io.read(str(p_gs))
+    es_re = ase.io.read(str(p_es))
+    loaded_em = load_dft_optical_forces(gs_re, es_re, str(tmp_path), force_state="emission")
+    loaded_abs = load_dft_optical_forces(gs_re, es_re, str(tmp_path), force_state="absorption")
+    assert loaded_em is not None and np.allclose(loaded_em, f_em)
+    assert loaded_abs is not None and np.allclose(loaded_abs, f_abs)
+
+
+def test_load_dft_optical_forces_prefers_exact_endpoint_scf_over_labeled_frames(tmp_path):
+    """Verify exact qe_gs_on_es / qe_es_relax endpoints take precedence over labeled_* frames."""
+    from unittest.mock import patch
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    uc = bulk("C", "diamond", a=3.57, cubic=True)
+    ws = tmp_path / "ws"
+    (ws / "qe_gs_on_es").mkdir(parents=True)
+    (ws / "qe_es_relax").mkdir(parents=True)
+    (ws / "qe_gs_on_es" / "pw.out").write_text("stub", encoding="utf-8")
+    (ws / "qe_es_relax" / "pw.out").write_text("stub", encoding="utf-8")
+    (ws / "labeled_dft_frames.xyz").write_text("stub", encoding="utf-8")
+    (ws / "labeled_frames_es.xyz").write_text("stub", encoding="utf-8")
+
+    at_gs = uc.copy()
+    at_es = uc.copy()
+
+    f_exact_gs = np.zeros((len(uc), 3))
+    f_exact_gs[0, 0] = 1.10
+    f_exact_es = np.zeros((len(uc), 3))
+    f_exact_es[0, 0] = 0.02
+
+    f_labeled_gs = np.zeros((len(uc), 3))
+    f_labeled_es = np.zeros((len(uc), 3))
+    f_labeled_es[0, 0] = 9.99  # mismatched electronic state should NOT override qe_gs_on_es
+
+    a_gs_es = at_es.copy()
+    a_gs_es.calc = SinglePointCalculator(a_gs_es, energy=-10.0, forces=f_exact_gs)
+    a_es_last = at_es.copy()
+    a_es_last.calc = SinglePointCalculator(a_es_last, energy=-9.0, forces=f_exact_es)
+
+    a_lbl_g = at_es.copy()
+    a_lbl_g.calc = SinglePointCalculator(a_lbl_g, energy=-10.0, forces=f_labeled_gs)
+    a_lbl_e = at_es.copy()
+    a_lbl_e.calc = SinglePointCalculator(a_lbl_e, energy=-9.0, forces=f_labeled_es)
+
+    def _fake_read(path, **kw):
+        s = str(path)
+        if "qe_gs_on_es" in s:
+            return a_gs_es
+        if "qe_es_relax" in s:
+            return a_es_last
+        if "labeled_dft_frames" in s:
+            return [a_lbl_g]
+        if "labeled_frames_es" in s:
+            return [a_lbl_e]
+        raise AssertionError(f"Unexpected path: {s}")
+
+    with patch("hydeph.system_profile.ase.io.read", side_effect=_fake_read):
+        loaded = load_dft_optical_forces(at_gs, at_es, str(ws), force_state="emission")
+    assert loaded is not None
+    assert np.allclose(loaded, f_exact_gs - f_exact_es)

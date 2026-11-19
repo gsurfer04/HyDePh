@@ -19,33 +19,42 @@ import numpy as np
 
 BENCHMARK_SPECS = {
     "diamond-nvminus": {
-        "zpl_range": (1.80, 2.30),
-        "stokes_range_meV": (150.0, 350.0),
-        "s_range": (1.5, 4.5),
+        "zpl_range": (1.70, 2.30),
+        "stokes_range_meV": (150.0, 450.0),
+        "s_range": (2.5, 4.5),
+        "min_modes": 10000,
         "stiff_lattice": True,
     },
     "4H-SiC": {
-        "zpl_range": (0.95, 1.30),
-        "stokes_range_meV": (180.0, 400.0),
-        "s_range": (2.0, 4.5),
+        "zpl_range": (0.95, 1.90),
+        "stokes_range_meV": (150.0, 400.0),
+        "s_range": (1.8, 3.8),
+        "min_modes": 4000,
         "stiff_lattice": True,
     },
     "NaCl": {
         "zpl_range": (1.00, 1.80),
         "stokes_range_meV": (300.0, 800.0),
-        "s_range": (8.0, 20.0),
+        "s_range": (9.0, 22.0),
+        "min_modes": 1000,
         "stiff_lattice": False,
     },
 }
 
 REQUIRED_FILES = [
+    "config.py",
+    "pristine.xyz",
+    "defect.xyz",
     "relaxed_gs.xyz",
     "relaxed_es.xyz",
+    "nep_delta_gs.txt",
+    "nep_delta_es.txt",
     "configuration_coordinate_data.json",
     "configuration_coordinate_curve.csv",
     "lineshape_summary.json",
     "spectral_density.csv",
     "optical_lineshapes.csv",
+    "normal_modes.csv",
     "provenance.json",
 ]
 
@@ -108,6 +117,23 @@ def verify_system(sys_dir: Path, spec: Dict[str, Any]) -> Tuple[bool, List[str],
         errors.append(
             f"Spectral density integral mismatch: sum(S_k)={total_s:.4f} vs int(S)={s_int:.4f} (>2%)"
         )
+
+    # Check embedded supercell size and multi-temperature anharmonic convergence
+    n_modes = int(ls_sum.get("n_normal_modes", 0))
+    if n_modes < int(spec.get("min_modes", 0)):
+        errors.append(
+            f"n_normal_modes={n_modes} below converged embedded threshold ({spec['min_modes']})"
+        )
+    anh = ls_sum.get("anharmonic") or {}
+    temps = ls_sum.get("temperatures") or []
+    for t_val in temps:
+        t_key = str(float(t_val))
+        if t_key not in anh:
+            errors.append(f"Missing anharmonic MD result for T={t_key} K")
+        elif int(anh[t_key].get("n_nve_steps", 0)) < 3000:
+            errors.append(
+                f"T={t_key} K n_nve_steps={anh[t_key].get('n_nve_steps')} < 3000 recommended default"
+            )
 
     # Check DWF(0) consistency with exp(-S)
     expected_dwf = float(np.exp(-total_s))

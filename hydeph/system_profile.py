@@ -471,6 +471,10 @@ def load_dft_optical_forces(
     state = str(force_state).lower()
     info_key = "dft_optical_forces_em" if state == "emission" else "dft_optical_forces_abs"
     ref_at = at_es if state == "emission" else at_gs
+    if info_key in ref_at.arrays:
+        arr = np.asarray(ref_at.arrays[info_key], dtype=float)
+        if arr.shape == (len(ref_at), 3):
+            return arr
     if info_key in ref_at.info:
         arr = np.asarray(ref_at.info[info_key], dtype=float)
         if arr.shape == (len(ref_at), 3):
@@ -489,32 +493,7 @@ def load_dft_optical_forces(
         frac -= np.round(frac)
         return float(np.max(np.linalg.norm(frac @ cell, axis=1)))
 
-    # 1. Check exact paired labeled DFT frames (smallest RMSD within strict max atom displacement < 0.035 A)
-    f_gs_xyz = os.path.join(workspace_dir, "labeled_dft_frames.xyz")
-    f_es_xyz = os.path.join(workspace_dir, "labeled_frames_es.xyz")
-    if os.path.isfile(f_gs_xyz) and os.path.isfile(f_es_xyz):
-        try:
-            frames_g = ase.io.read(f_gs_xyz, index=":")
-            frames_e = ase.io.read(f_es_xyz, index=":")
-            best_rmsd = float("inf")
-            best_diff = None
-            for fg, fe in zip(frames_g, frames_e):
-                if len(fg) != nat or len(fe) != nat or fg.get_chemical_symbols() != syms:
-                    continue
-                if _pbc_rmsd(fg.positions, fe.positions, cell) > 0.01:
-                    continue
-                rmsd_ref = _pbc_rmsd(fg.positions, ref_at.positions, cell)
-                max_ref = _pbc_max_disp(fg.positions, ref_at.positions)
-                if rmsd_ref < 0.025 and max_ref < 0.035 and rmsd_ref < best_rmsd:
-                    best_rmsd = rmsd_ref
-                    diff = fe.get_forces() - fg.get_forces()
-                    best_diff = np.asarray(-diff if state == "emission" else diff, dtype=float)
-            if best_diff is not None:
-                return best_diff
-        except Exception:
-            pass
-
-    # 2. Fallback to relaxation endpoints + conjugate single-point SCF
+    # 1. Prefer exact relaxation endpoints + conjugate single-point SCF at R_ES / R_GS
     qe_es_p = os.path.join(workspace_dir, "qe_es_relax", "pw.out")
     qe_gs_p = os.path.join(workspace_dir, "qe_gs_relax", "pw.out")
     if state == "emission":
@@ -551,5 +530,30 @@ def load_dft_optical_forces(
                     return np.asarray(es0.get_forces() - gs_last.get_forces(), dtype=float)
             except Exception:
                 pass
+
+    # 2. Fallback to exact paired labeled DFT frames (smallest RMSD within strict max atom displacement < 0.035 A)
+    f_gs_xyz = os.path.join(workspace_dir, "labeled_dft_frames.xyz")
+    f_es_xyz = os.path.join(workspace_dir, "labeled_frames_es.xyz")
+    if os.path.isfile(f_gs_xyz) and os.path.isfile(f_es_xyz):
+        try:
+            frames_g = ase.io.read(f_gs_xyz, index=":")
+            frames_e = ase.io.read(f_es_xyz, index=":")
+            best_rmsd = float("inf")
+            best_diff = None
+            for fg, fe in zip(frames_g, frames_e):
+                if len(fg) != nat or len(fe) != nat or fg.get_chemical_symbols() != syms:
+                    continue
+                if _pbc_rmsd(fg.positions, fe.positions, cell) > 0.01:
+                    continue
+                rmsd_ref = _pbc_rmsd(fg.positions, ref_at.positions, cell)
+                max_ref = _pbc_max_disp(fg.positions, ref_at.positions)
+                if rmsd_ref < 0.025 and max_ref < 0.035 and rmsd_ref < best_rmsd:
+                    best_rmsd = rmsd_ref
+                    diff = fe.get_forces() - fg.get_forces()
+                    best_diff = np.asarray(-diff if state == "emission" else diff, dtype=float)
+            if best_diff is not None:
+                return best_diff
+        except Exception:
+            pass
 
     return None
