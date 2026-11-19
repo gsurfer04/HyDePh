@@ -1,5 +1,5 @@
 215
-Lattice="10.72113 0.0 0.0 0.0 10.72113 0.0 0.0 0.0 10.72113" Properties=species:S:1:pos:R:3 defect_center="5.7439766146 5.7439767031999995 5.743976791800001" defect_positions="_JSON [[6.2539922392000005, 6.2539923563999995, 6.2539924736], [5.23396099, 5.23396105, 5.23396111]]" gs_source=dft energy=-33418.55369189767 es_source=delta_scf delta_scf_spin_channel=2 delta_scf_homo_band=430 delta_scf_lumo_band=431 pbc="T T T"
+Lattice="10.72113 0.0 0.0 0.0 10.72113 0.0 0.0 0.0 10.72113" Properties=species:S:1:pos:R:3 defect_center="5.7439766146 5.7439767031999995 5.743976791800001" defect_positions="_JSON [[6.2539922392000005, 6.2539923563999995, 6.2539924736], [5.23396099, 5.23396105, 5.23396111]]" gs_source=dft es_source=delta_scf delta_scf_spin_channel=2 delta_scf_homo_band=430 delta_scf_lumo_band=431 energy=-33418.55369189767 pbc="T T T"
 C        0.89237021       2.68062164       0.89237014
 C       -0.00049361      -0.00049351       1.78739366
 C        0.89237008       0.89237014       2.68062178

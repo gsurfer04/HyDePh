@@ -1,0 +1,22 @@
+{
+  "qc_passed": true,
+  "train_energy_rmse_meV_atom": 1.0508261068754414,
+  "train_force_rmse_eV_A": 0.029422673053531915,
+  "test_energy_rmse_meV_atom": 1.5855672771678841,
+  "test_force_rmse_eV_A": 0.03389653968668056,
+  "gs_residual_force_max_eV_A": 0.0014213855516823914,
+  "fc_path_energy_max_err_meV": 24.680607952177525,
+  "delta_erel_dft_eV": 0.18916879365133354,
+  "delta_erel_hybrid_eV": 0.16448818569915602,
+  "delta_erel_error_meV": 24.680607952177525,
+  "thresholds": {
+    "max_test_force_rmse_eV_A": 0.15,
+    "max_gs_residual_force_eV_A": 0.05
+  },
+  "gates": {
+    "test_force_rmse_gate": true,
+    "gs_residual_force_gate": true
+  },
+  "is_committee": false,
+  "committee_size": 1
+}

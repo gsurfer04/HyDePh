@@ -1,15 +1,21 @@
 {
-  "total_S": 2.9243250550734405,
-  "total_S_discrete": 2.9243250550734405,
-  "total_S_integrated": 2.9243250550734405,
-  "dwf_zero_temp": 0.053700924850515266,
+  "total_S": 2.26316578018004,
+  "total_S_std": null,
+  "total_S_discrete": 2.26316578018004,
+  "total_S_integrated": 2.2631657801800396,
+  "s_outside_dft_fraction": 0.6950195167200445,
+  "s_outside_dft_total": 1.5729443867980737,
+  "acoustic_cutoff_applied": false,
+  "acoustic_cutoff_moment_before_meV": null,
+  "acoustic_cutoff_moment_after_meV": null,
+  "dwf_zero_temp": 0.10402065641582603,
   "dwf_temperatures": {
-    "10.0": 0.05370092484790954,
-    "77.0": 0.052087371296934824,
-    "150.0": 0.03925271323736899,
-    "300.0": 0.01169982261858847
+    "10.0": 0.10402065560729785,
+    "77.0": 0.10159131526892251,
+    "150.0": 0.08384921855442116,
+    "300.0": 0.03733678703496132
   },
-  "n_normal_modes": 1191,
+  "n_normal_modes": 4599,
   "n_imaginary_modes": 0,
   "zpl_energy_eV": 1.096,
   "temperatures": [
@@ -17,5 +23,55 @@
     77.0,
     150.0,
     300.0
-  ]
+  ],
+  "anharmonic": {
+    "10.0": {
+      "regime": "cumulant",
+      "md_strategy": "NVT_thermalization_to_NVE_production",
+      "n_nvt_steps": 400,
+      "n_nve_steps": 3000,
+      "target_T_K": 10.0,
+      "equilibrated_T_K": 9.86021527738698,
+      "fwhm_meV": 1.749705155904735,
+      "sigma_du": 15.152400789444698,
+      "alpha_soft": 1.0,
+      "omega_T": 56.91303940786444
+    },
+    "77.0": {
+      "regime": "cumulant",
+      "md_strategy": "NVT_thermalization_to_NVE_production",
+      "n_nvt_steps": 400,
+      "n_nve_steps": 3000,
+      "target_T_K": 77.0,
+      "equilibrated_T_K": 76.68878778196427,
+      "fwhm_meV": 1.749705155904735,
+      "sigma_du": 39.66733651439133,
+      "alpha_soft": 1.0,
+      "omega_T": 56.91303940786444
+    },
+    "150.0": {
+      "regime": "cumulant",
+      "md_strategy": "NVT_thermalization_to_NVE_production",
+      "n_nvt_steps": 400,
+      "n_nve_steps": 3000,
+      "target_T_K": 150.0,
+      "equilibrated_T_K": 148.64432890685953,
+      "fwhm_meV": 3.499410311809413,
+      "sigma_du": 55.635171439300805,
+      "alpha_soft": 1.0,
+      "omega_T": 56.91303940786444
+    },
+    "300.0": {
+      "regime": "cumulant",
+      "md_strategy": "NVT_thermalization_to_NVE_production",
+      "n_nvt_steps": 400,
+      "n_nve_steps": 3000,
+      "target_T_K": 300.0,
+      "equilibrated_T_K": 297.56364462630233,
+      "fwhm_meV": 230.9610805794229,
+      "sigma_du": 78.67517354915748,
+      "alpha_soft": 1.0,
+      "omega_T": 56.91303940786444
+    }
+  }
 }

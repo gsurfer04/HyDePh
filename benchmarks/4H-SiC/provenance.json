@@ -1,38 +1,61 @@
 {
   "system": "4H-SiC",
-  "timestamp_utc": "2026-11-12T16:45:10.991005+00:00",
-  "hydeph_version": "0.9.0",
+  "timestamp_utc": "2026-11-19T01:08:03.349436+00:00",
+  "hydeph_version": "0.10.0",
   "python_version": "3.14.8",
   "ase_version": "3.29.0",
   "allow_fallbacks": false,
-  "excited_state_method": "spin_proxy",
+  "excited_state_method": "delta_scf",
   "paired_delta_nep": true,
-  "num_atoms": 142,
+  "phonon_supercell_repeat": "auto",
+  "hessian_embedding_mode": "auto",
+  "phonon_force_state": "auto",
+  "anharmonic_md_surface": "auto",
+  "anharmonic_n_trajectories": 16,
+  "anharmonic_md_steps": 3000,
+  "num_atoms_dft_supercell": 142,
+  "n_normal_modes": 4599,
   "chemical_formula": "C71Si71",
-  "total_huang_rhys_S": 2.9243250550734405,
-  "dwf_zero_temp": 0.053700924850515266,
-  "zpl_energy_eV": null,
-  "stokes_shift_eV": 0.27360662211413,
+  "total_huang_rhys_S": 2.26316578018004,
+  "dwf_zero_temp": 0.10402065641582603,
+  "zpl_energy_eV": 1.096,
+  "stokes_shift_eV": 0.19903588038869202,
   "data_files": {
-    "optical_lineshapes.csv": {
-      "bytes": 207867,
-      "sha256": "324c2643aefed4dacc4e750cb23c44cecab1a41ecaf6263ff19bde2d68b4bb33"
+    "pristine.xyz": {
+      "bytes": 500,
+      "sha256": "79c8091c18d8cdf8a3e3eee7cd2815785be9f761ddab7b0373cabf877db05b1c"
     },
-    "spectral_density.csv": {
-      "bytes": 20440,
-      "sha256": "6165a3fa95a85cabd5a52134e3ba7041f16dc46d99cca74e976c72ee2090c5ab"
-    },
-    "configuration_coordinate_curve.csv": {
-      "bytes": 2977,
-      "sha256": "3009d827e329abb4e83cc4046ed147f654f4bd812c497398f7e0f220236bf21d"
+    "defect.xyz": {
+      "bytes": 396,
+      "sha256": "919c71db7c4ccff3fbe97b662bad85bdc19b2b06b2dae762440d8c38a86d287b"
     },
     "relaxed_gs.xyz": {
-      "bytes": 7912,
-      "sha256": "d7a3fe04aab4776158f0e710551eacbfa816b410a3ea11af1b6c3589d7d6a257"
+      "bytes": 8004,
+      "sha256": "69805351d5228078ec0a8a194e0bab9d4308f1f3e9f175b689be00d33c449d0f"
     },
     "relaxed_es.xyz": {
-      "bytes": 7991,
-      "sha256": "73365e3d744f176d51c8434bc1c4fdbdb2e6dfc6c8f6ddd9c84b0eb28363451e"
+      "bytes": 15366,
+      "sha256": "e1601fd5f4d0348ac06344510a0dc35dee1ddecf630215ac0d2c10a36750f6cc"
+    },
+    "nep_delta_gs.txt": {
+      "bytes": 30401,
+      "sha256": "30672bd3743e66eaf914cad1d1b1f6970bb852411c7dbcf8597adaedf4df3e47"
+    },
+    "nep_delta_es.txt": {
+      "bytes": 30401,
+      "sha256": "3f9536710eaff319d0276132ca7ec33228f4e4608c4d18bcd2af246d1a1a560a"
+    },
+    "optical_lineshapes.csv": {
+      "bytes": 299420,
+      "sha256": "2ad5ba2e998172ff4a07934f740249ccb184b588079c17f761cf5ef661693c5e"
+    },
+    "spectral_density.csv": {
+      "bytes": 113641,
+      "sha256": "4432966971be78089794ae38669519c7c525be96a3b55a4a413b1dc61bc78fed"
+    },
+    "configuration_coordinate_curve.csv": {
+      "bytes": 3059,
+      "sha256": "471896cd28e201a715d5639b9ca8d0be912788aa274af3089013fa322fabe49a"
     }
   }
 }

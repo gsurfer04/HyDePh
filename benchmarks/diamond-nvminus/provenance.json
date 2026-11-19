@@ -1,38 +1,61 @@
 {
   "system": "diamond-nvminus",
-  "timestamp_utc": "2026-11-12T16:45:10.617336+00:00",
-  "hydeph_version": "0.9.0",
+  "timestamp_utc": "2026-11-19T01:08:03.344555+00:00",
+  "hydeph_version": "0.10.0",
   "python_version": "3.14.8",
   "ase_version": "3.29.0",
   "allow_fallbacks": false,
-  "excited_state_method": "spin_proxy",
+  "excited_state_method": "delta_scf",
   "paired_delta_nep": true,
-  "num_atoms": 215,
+  "phonon_supercell_repeat": "auto",
+  "hessian_embedding_mode": "auto",
+  "phonon_force_state": "absorption",
+  "anharmonic_md_surface": "auto",
+  "anharmonic_n_trajectories": 16,
+  "anharmonic_md_steps": 3000,
+  "num_atoms_dft_supercell": 215,
+  "n_normal_modes": 12282,
   "chemical_formula": "C214N",
-  "total_huang_rhys_S": 2.305207291125262,
-  "dwf_zero_temp": 0.09973812368272669,
-  "zpl_energy_eV": null,
-  "stokes_shift_eV": 0.2351449445777689,
+  "total_huang_rhys_S": 3.458243145632026,
+  "dwf_zero_temp": 0.03148502806603763,
+  "zpl_energy_eV": 1.945,
+  "stokes_shift_eV": 0.23515333689283602,
   "data_files": {
-    "optical_lineshapes.csv": {
-      "bytes": 194464,
-      "sha256": "675a3830d2641a741483d3687a3f8e6e0ebd8ccc1bfdac9d0ec0cbfbbf1a9901"
+    "pristine.xyz": {
+      "bytes": 495,
+      "sha256": "22ac73b2de06472b8331eec9decb2d762041b5e7dacf6f32422dc32744c469e6"
     },
-    "spectral_density.csv": {
-      "bytes": 154565,
-      "sha256": "12d11db112971780306732ee3d472fc1dce7b6f065c3684e038b25569f8d5555"
-    },
-    "configuration_coordinate_curve.csv": {
-      "bytes": 2977,
-      "sha256": "d41f97ca35262a231d14a78a347af93058ad6c4a2aa7cdb760498969a175359d"
+    "defect.xyz": {
+      "bytes": 476,
+      "sha256": "a4e17644ff0eb5e5fc87d608269d303920729e6f0b02edbda4872fe0e9cd5200"
     },
     "relaxed_gs.xyz": {
-      "bytes": 11945,
-      "sha256": "c928c63384aeeb747d1111079b8af9759755169c3219c047e9735fe57149cf59"
+      "bytes": 22937,
+      "sha256": "1fdf9fc1736fab6173a171eb599999456641a18bec77776409940dd9c64a7b25"
     },
     "relaxed_es.xyz": {
       "bytes": 12037,
-      "sha256": "952b2a2ac668af3453a9a30b63705f4319532c55be389b3cc4aca2bf02888b64"
+      "sha256": "f630026a123484dd89e3f139ef4e865ac3e32ed3048cc755d3f4201eaeb85f39"
+    },
+    "nep_delta_gs.txt": {
+      "bytes": 30400,
+      "sha256": "e49e57694e3f3b0a6542f0c4c348ffa5fa79e10cdd582f23c1af93ff6313ff5c"
+    },
+    "nep_delta_es.txt": {
+      "bytes": 30400,
+      "sha256": "e027f63780f61bbff8fcf0611f0cf81a82d547103d82d50548416f033c8587a4"
+    },
+    "optical_lineshapes.csv": {
+      "bytes": 299673,
+      "sha256": "092262c0a1f21d4ee4f069509df13bc320f898717eaa02e195c714a93d4b1351"
+    },
+    "spectral_density.csv": {
+      "bytes": 174905,
+      "sha256": "9250ebf746fb5d2ad7eaa11e00b4353489b507eb3277d2258151d174ef973561"
+    },
+    "configuration_coordinate_curve.csv": {
+      "bytes": 3059,
+      "sha256": "b60d6a51584b5da25d374919dc1309859620de5207bbad8c79fde47600b0205c"
     }
   }
 }
