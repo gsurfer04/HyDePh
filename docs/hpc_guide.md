@@ -42,7 +42,7 @@ parallel_hessian_workers: 16
 HPC software stacks frequently require environment modules to be loaded in a strict dependency sequence (for example, loading a domain profile module before the compiler or Quantum ESPRESSO module becomes visible).
 - Specify modules under `modules:` (or aliases `slurm_modules:`, `cluster_modules:`, `hpc_modules:`).
 - HyDePh emits `module purge` followed by `module load <name>` in the **exact order listed**, without heuristic availability loops.
-- No default modules are assumed. If cluster script generation is invoked with an empty module list, HyDePh logs a warning so you can verify that `pw.x` is available on the compute nodes' `PATH`.
+- If `slurm_modules` / `modules` is empty, HyDePh logs a warning so you can verify `pw.x` is on the compute nodes' `PATH`.
 
 ---
 
@@ -109,7 +109,7 @@ hydeph config.yaml --from-stage 4
 ```
 
 HyDePh automatically:
-1. Parses all converged `pw.out` files from `dft_calculations/` and `dft_calculations_es/` into `labeled_dft_frames.xyz` and `labeled_dft_frames_es.xyz`.
+1. Parses converged `pw.out` files from `dft_calculations/` and `dft_calculations_es/` into `labeled_dft_frames.xyz` and `labeled_frames_es.xyz`.
 2. Extracts adiabatic $E_{\mathrm{ZPL}}$, vertical absorption/emission energies, and Stokes shift.
 3. Trains paired $\Delta$-NEP models (`nep_delta_gs.txt`, `nep_delta_es.txt`) and verifies quality control gates (Stage 4–5).
 4. Runs the unified property-aware Stage 6 spectroscopy engine: sizes the embedded phonon supercell (`phonon_supercell_repeat="auto"`), evaluates bulk+core spliced or full supercell Hessians in parallel, routes exact DFT endpoint forces (`qe_gs_on_es` / `qe_es_relax`), and computes multi-temperature harmonic and `16 × 3,000`-step NVE cumulant anharmonic optical lineshapes.
@@ -176,14 +176,14 @@ hydeph config.yaml --workers 4
 
 ### Parallel Supercell Hessian Evaluation (Stage 6)
 
-In Stage 6, finite-difference phonon calculations on large supercells (e.g., 398 atoms $\to$ 2,388 displacements) are parallelized across CPU threads via `ParallelVibrations`:
+In Stage 6, finite-difference phonon displacements are parallelized across CPU workers via `ParallelVibrations` (for cells $\le 600$ atoms) and Alkauskas bulk+core Hessian splicing (`build_spliced_hessian`, above `600` atoms):
 
 ```yaml
 parallel_hessian: true
 parallel_hessian_workers: 16
 ```
 
-Each worker evaluates displaced structures with thread-local copies of `PairedDefectCalculator`, reducing supercell Hessian walltime from ~20 minutes to under 1 minute.
+Each worker evaluates displaced structures with its own calculator instance, keeping embedded supercell Hessian evaluation under a few minutes on multi-core nodes.
 
 ---
 

@@ -40,7 +40,7 @@ Key capabilities:
 3. **DFT Labeling & Resumption**: Drives Quantum ESPRESSO (`pw.x` / `pw.exe`) with $\Gamma$-point real wavefunctions (`K_POINTS gamma`), fixed occupations (`occupations = 'fixed'`), atom-scaled convergence thresholds, relative pseudopotential path resolution, and fail-closed disk caching.
 4. **Constrained $\Delta\text{SCF}$ Excited States**: Automatically selects the lowest-energy in-gap excitation across spin channels from ground-state Kohn-Sham eigenvalues, detects HOMO/LUMO orbital degeneracies, applies Jahn-Teller symmetry breaking, and extracts adiabatic Zero-Phonon Line ($E_{\mathrm{ZPL}}$), absorption, emission, and Stokes shift energies.
 5. **Paired GPU $\Delta$-NEP Training**: Fits independent ground-state and optical excited-state residuals in GPUMD with mean baseline offset subtraction ($\bar{\Delta e}_S$), automated quality control gates, and optional committee ensembles.
-6. **Large-Supercell Phonon Embedding & Acoustic Sum Rule**: Enforces tensorial Acoustic Sum Rule ($\sum_j \Phi_{ij} = 0$) and center-of-mass translation projection, and embeds localized defect vibrations and forces into large bulk phonon supercells ($L \ge 10\text{--}12\ \text{Å}$) via force or displacement projection.
+6. **Large-Supercell Phonon Embedding & Acoustic Sum Rule**: Enforces the tensorial Acoustic Sum Rule ($\sum_j \Phi_{ij} = 0$) and center-of-mass translation projection, and embeds localized defect forces into host-sized phonon supercells ($L \ge 20\text{--}27\ \text{Å}$) via Alkauskas bulk+core Hessian splicing.
 7. **Paired Cumulant Anharmonic Dynamics**: Computes multi-temperature emission lineshapes using NVT thermalization followed by unperturbed NVE microcanonical molecular dynamics with the physical energy-gap cumulant generating function and Linderälv Gaussian time-domain windowing.
 8. **1D Configuration Coordinate & Stokes Shift**: Evaluates paired potential surfaces along $\mathbf{R}(\lambda) = \mathbf{R}_{\mathrm{GS}} + \lambda (\mathbf{R}_{\mathrm{ES}} - \mathbf{R}_{\mathrm{GS}})$ to extract $\Delta Q$, asymmetric relaxation energies $\Delta E_{\mathrm{rel,GS}} \ne \Delta E_{\mathrm{rel,ES}}$, effective phonon energies $\hbar\Omega_{S}$, and Stokes shift $\Delta E_{\mathrm{Stokes}}$.
 9. **Provenance & Numerical Data Export**: Exports publication-ready figures, CSVs, `normal_modes.csv`, and `provenance.json` recording software versions, input SHA256 hashes, and execution metrics.
@@ -291,7 +291,7 @@ summary = run_pipeline(config)
 | `anharmonic_md_surface` | `str` | `"auto"` | Born-Oppenheimer PES (`"auto"`, `"es"`, or `"gs"`) used for NVE dynamics (`"auto"` chooses `"gs"` on embedded cells and `"es"` otherwise). |
 | `anharmonic_acf_damping_meV` | `float` | `2.0` | Gaussian time-domain window width $\gamma_{\mathrm{acf}}$ for smoothing autocorrelation truncation noise. |
 | `dephasing_gamma_meV` | `float` | `1.0` | Base ZPL instrument/lifetime dephasing width $\gamma_0$ in meV. |
-| `dephasing_temperature_coefficient` | `float` | `0.0` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). Defaults to 0.0 (no artificial thermal broadening). |
+| `dephasing_temperature_coefficient` | `float` | `0.0` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). |
 | `phonon_supercell_repeat` | `tuple` or `"auto"` | `None` | Supercell repeat for phonon embedding; `"auto"` sizes $(N_x,N_y,N_z)$ from host stiffness $\hbar\omega_{\max}$ and cell vectors. |
 | `phonon_embedding_method` | `str` | `"force"` | Embedding mode projection: `"force"` (Alkauskas/Razinkovas) or `"displacement"`. |
 | `hessian_embedding_mode` | `str` | `"auto"` | Embedded Hessian mode (`"auto"`, `"spliced"`, `"full"`); `"auto"` uses Alkauskas bulk+core splicing above `hessian_splice_threshold_atoms` (`600`). |
@@ -337,7 +337,7 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 |---|---|---|---|---|---|
 | **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` DFT; `(8, 8, 8)` emb | $215$ DFT / $4095$ emb | $\ge 10.7\ \text{Å}$ ($28.6\ \text{Å}$ emb) | Use $\ge 215$ atoms for DFT $\Delta$SCF, and `phonon_supercell_repeat=(7, 7, 7)`–`(8, 8, 8)` with Wigner-Seitz core force splicing to avoid $5\times 5\times 5$ zone-boundary peak splitting ($55/72\ \text{meV}$). |
 | **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` DFT; `(8, 8, 3)` emb | $142$ DFT / $1534$ emb | $\ge 9.2\ \text{Å}$ ($24.7\ \text{Å}$ emb) | Separates defect images across basal and $c$-axis hexagonal layers; `phonon_supercell_repeat="auto"` selects `(8, 8, 3)` spliced phonons. |
-| **Alkali Halides** (NaCl) | Rocksalt ($\Theta_D \approx 320\ \mathrm{K}$) | `(2, 2, 2)` DFT; `(4, 4, 4)` emb | $63$ DFT / $511$ emb | $\ge 11.4\ \text{Å}$ ($22.8\ \text{Å}$ emb) | `(2, 2, 2)` satisfies $L \ge 11\ \text{Å}$ for DFT; `(4, 4, 4)` embedding (`511` atoms) converges strong-coupling soft optical bands cleanly. |
+| **Alkali Halides** (NaCl) | Rocksalt ($\Theta_D \approx 320\ \mathrm{K}$) | `(2, 2, 2)` DFT; `(4, 4, 4)` emb | $63$ DFT / $511$ emb | $\ge 11.4\ \text{Å}$ ($22.8\ \text{Å}$ emb) | `(2, 2, 2)` satisfies $L \ge 11\ \text{Å}$ for DFT; `(4, 4, 4)` embedding (`511` atoms) converges strong-coupling soft optical bands. |
 
 ### Unified Property-Aware Workflow (`phonon_supercell_repeat="auto"`)
 
@@ -349,7 +349,7 @@ Setting `phonon_supercell_repeat="auto"` (paired with `"auto"` defaults for `hes
 
 ### Anharmonic MD-ACF & Surface Guidelines (Production Convergence)
 
-1. **Multi-Trajectory Ensemble Length (`anharmonic_n_trajectories >= 16`, `anharmonic_md_steps = 3000`)**: Because the power-spectrum-to-spectral-density map scales as $S_{\mathrm{MD}}(\omega) \propto J_{\mathrm{cl}}(\omega)/(\hbar\omega)^2$, localized modes exhibit large $1/\omega$ statistical variance in single or short MD runs ($1\text{--}8$ trajectories). Averaging **`16–24` independent `3,000`-step NVE trajectories (`48–72 ps`)** suppresses stochastic noise cleanly—eliminating artificial main-peak splitting in Diamond $\mathrm{NV}^-$ and eliminating `±50–70 meV` peak jitter in NaCl F-center temperature scans.
+1. **Multi-Trajectory Ensemble Length (`anharmonic_n_trajectories >= 16`, `anharmonic_md_steps = 3000`)**: Because $S_{\mathrm{MD}}(\omega) \propto J_{\mathrm{cl}}(\omega)/(\hbar\omega)^2$, localized modes exhibit large $1/\omega$ variance in short MD runs ($1\text{--}8$ trajectories). Averaging **`16–24` independent `3,000`-step NVE trajectories (`48–72 ps`)** suppresses this variance, eliminating main-peak splitting in Diamond $\mathrm{NV}^-$ and `±50–70 meV` peak jitter in NaCl F-center temperature scans.
 2. **Core-Localized Splicing on Large Embedded Supercells**: When pairing `phonon_supercell_repeat` with a fine-tuned foundation $\Delta$-NEP, restricting the $\mathrm{GS}/\mathrm{ES}$ NEP force difference to the Wigner-Seitz inscribed sphere around the defect core prevents cumulative far-field bulk drift from corrupting $\Delta U(t)$ and acoustic phonon tails.
 3. **Emission vs. Absorption Force & $\omega^3$ Prefactor in Soft Ionic Hosts**: Strongly coupled ionic centers exhibit marked excited/ground PES curvature asymmetry ($\hbar\Omega_{\mathrm{ES}} \ne \hbar\Omega_{\mathrm{GS}}$; e.g., NaCl F-center $S_{\mathrm{abs}} \approx 40.5$ from $\mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{GS}})$ vs. $S_{\mathrm{em}} \approx 17.6$ from $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}})$). For emission bands, match the final-state curvature using ground-state forces at $\mathbf{R}_{\mathrm{ES}}$ (`F_GS(R_ES) - F_ES(R_ES)`), and inspect the Einstein $(\hbar\omega)^3$-weighted `I_PL` band rather than the unweighted absorption-like lineshape $A(\hbar\omega)$.
 
@@ -367,9 +367,6 @@ Setting `phonon_supercell_repeat="auto"` (paired with `"auto"` defaults for `hes
 | **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $8\times 8\times 3$ spliced ($1534$) | $2.26$ / $2.33\text{--}2.62$ | $0.457$ | $1.096\ \mathrm{eV}$ | Conjugate `qe_gs_on_es` $\mathbf{F}_{\mathrm{em}}$ (`4,599` modes) reproduces attested $-34, -73, -96\ \mathrm{meV}$ peaks ($\mathrm{DWF}_0 = 10.40\%$, Stokes $199.0\ \mathrm{meV}$) to $300\ \mathrm{K}$ [Jin et al. PRM 2021] |
 | **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $4\times 4\times 4$ ($511$) | $11.74$ / $11.46\text{--}13.03$ | $2.208$ | $1.273\ \mathrm{eV}$ | Auto $\mathbf{F}_{\mathrm{em}}$ + $E^3 A$ (`1,530` modes, Stokes $550.4\ \mathrm{meV}$) places $I_{\mathrm{PL}}$ inside $0.97\text{--}1.10\ \mathrm{eV}$ expt (`1.082–1.106 eV`, FWHM $137.5 \to 238.1\ \mathrm{meV}$ across $10\text{--}300\ \mathrm{K}$) |
 
-> [!NOTE]
-> All three flagship benchmarks (`NaCl F-center`, `4H-SiC kk-VV0`, `Diamond NV-`) run through the same unified configuration (`phonon_supercell_repeat="auto"`, `hessian_embedding_mode="auto"`, `phonon_force_state="auto"`, `use_dft_core_forces="auto"`, `anharmonic_md_surface="auto"`), with `qe_gs_on_es` providing exact DFT emission forces $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$.
-
 ### 4H-SiC $kk$-Divacancy Benchmark Reproduction (Jin et al., PRM 2021)
 
 HyDePh reproduces the low-temperature photoluminescence spectrum and multi-temperature thermal evolution of the neutral axial-axial divacancy ($kk$-$\mathrm{VV}^0$) in 4H-SiC, benchmarked directly against first-principles hybrid-DFT calculations and experimental spectra from Jin *et al.* (*Phys. Rev. Materials* **5**, 084603, 2021):
@@ -383,7 +380,7 @@ HyDePh reproduces the low-temperature photoluminescence spectrum and multi-tempe
   2. **Peak 2 (Localized Defect Mode)**: $-73\ \mathrm{meV}$ (Expt: $-75\ \mathrm{meV}$, Jin et al.: $-71\ \mathrm{meV}$)
   3. **Peak 3 (Optical Bulk Phonon Band)**: $-96\ \mathrm{meV}$ (Expt: $-88\ \mathrm{meV}$, Jin et al.: $-97\ \mathrm{meV}$)
 * **Zero-Phonon Line (ZPL)**: Anchored to experimental $1.096\ \mathrm{eV}$ ($1.105\ \mathrm{eV}$ PBE), remaining prominent and distinctly resolved up to $300\ \mathrm{K}$.
-* **Clean Sideband Structure**: Embedded $(8\times 8\times 3)$ spliced supercell phonons (`1,534` atoms, `4,599` normal modes) prevent artificial zone-boundary phonon folding, yielding a continuous, physical luminescence profile.
+* **Continuous Sideband Structure**: Embedded $(8\times 8\times 3)$ spliced supercell phonons (`1,534` atoms, `4,599` normal modes) resolve bulk Brillouin-zone dispersion across the luminescence sideband.
 
 ---
 
@@ -442,10 +439,10 @@ docs/
 ├── THEORY_WALKTHROUGH.md          # Theoretical formulation & literature citations
 └── hpc_guide.md                   # HPC & SLURM cluster execution guide
 scripts/
-├── run_benchmarks.py              # Automated turnkey benchmark execution runner
-├── verify_benchmarks.py           # Rigorous physical invariant & sum-rule validator
-└── generate_benchmark_provenance.py  # Reproducible benchmark provenance manifest generator
-tests/                             # Automated test suite (228 unit, regression & integration tests)
+├── run_benchmarks.py              # Benchmark execution runner
+├── verify_benchmarks.py           # Physical invariant & sum-rule validator
+└── generate_benchmark_provenance.py  # Benchmark provenance manifest generator
+tests/                             # Unit, regression, and integration test suite
 CHANGELOG.md                       # Release notes and history
 CONTRIBUTING.md                    # Developer and contribution guidelines
 pyproject.toml                     # Packaging metadata, CLI scripts & dependencies

@@ -1,6 +1,6 @@
 # Benchmark: 4H-SiC $kk$ Divacancy Defect Emission Spectrum
 
-This benchmark documents the reproduction of the optical emission spectrum of the neutral divacancy center at the axial-axial $kk$ site ($kk$-$\mathrm{VV}^0$) in 4H-SiC using **HyDePh**'s unified property-aware Stage 6 workflow, benchmarked against:
+Optical emission benchmark for the neutral axial-axial divacancy ($kk$-$\mathrm{VV}^0$) in 4H-SiC under the unified Stage 6 workflow, compared against:
 
 > **Yu Jin, Marco Govoni, Gary Wolfowicz *et al.*, *"Photoluminescence spectra of point defects in semiconductors: Validation of first-principles calculations"*, *Phys. Rev. Materials* 5, 084603 (2021)** ([arXiv:2106.08608](https://arxiv.org/abs/2106.08608)).
 
