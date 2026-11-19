@@ -28,7 +28,7 @@ nv_json = os.path.join(repo_root, 'benchmarks', 'diamond-nvminus', 'lineshape_su
 nacl_csv = os.path.join(repo_root, 'benchmarks', 'NaCl', 'optical_lineshapes.csv')
 nacl_json = os.path.join(repo_root, 'benchmarks', 'NaCl', 'lineshape_summary.json')
 
-for p in [nv_csv, nv_json, nacm_csv := nacl_csv, nacl_json]:
+for p in [nv_csv, nv_json, nacl_csv, nacl_json]:
     if not os.path.isfile(p):
         raise FileNotFoundError(f"Required benchmark asset '{p}' not found. Run benchmark workflows first.")
 
@@ -117,7 +117,9 @@ ax2.plot(e_nacl, y_nacl_anh_300, color='#d62728', lw=2.4, linestyle='-',
 callout_nacl = (
     r"$\mathbf{Soft\ Host\ (NaCl\ F-Center)}:$" + "\n"
     r"• Giant coupling: $S = " + f"{meta_nacl['total_S']:.2f}" + r" \gg 1$" + "\n"
-    r"• ZPL suppressed: $\mathrm{DWF} = 9.4 \times 10^{-6}$" + "\n"
+    r"• ZPL suppressed: $\mathrm{DWF}(0) = " + (
+        f"{meta_nacl['dwf_zero_temp']:.1e}".replace("e-0", r" \times 10^{-") + "}"
+    ) + r"$" + "\n"
     r"• $\Theta_D \approx 320\ \mathrm{K}$, soft acoustic modes" + "\n"
     r"• Anharmonic broadening & softening" + "\n"
     r"   (" + f"{fwhm_10:.0f}" + r" $\to$ " + f"{fwhm_300:.0f}" + r" meV)"

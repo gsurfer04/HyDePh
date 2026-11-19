@@ -1,118 +1,136 @@
-import os
+#!/usr/bin/env python3
+"""Generate 2-panel 4H-SiC kk-VV0 benchmark comparison against Jin et al. (PRM 5, 084603, 2021)."""
+
+from pathlib import Path
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.signal import find_peaks
 
-# 1. Load HyDePh optical lineshapes
-data_path = "/home/jamesc/HyDePhTest/SiC-4H-kk/hydeph_run_c1h_consistent/optical_lineshapes.csv"
-if not os.path.exists(data_path):
-    data_path = "hydeph_run_c1h_consistent/optical_lineshapes.csv"
-df_hydeph = pd.read_csv(data_path)
+plt.rcParams["font.family"] = "DejaVu Sans"
+plt.rcParams["font.size"] = 10.5
+plt.rcParams["axes.linewidth"] = 1.2
+plt.rcParams["xtick.direction"] = "in"
+plt.rcParams["ytick.direction"] = "in"
 
-# 2. Load Jin et al. digitized data
-ref_path = "/mnt/h/Il mio Drive/HyDePh/jin_et_al_digitized_kk_10K.csv"
-if not os.path.exists(ref_path):
-    ref_path = "jin_et_al_digitized_kk_10K.csv"
-df_ref = pd.read_csv(ref_path)
+sic_dir = Path(__file__).resolve().parents[1]
+repo_root = sic_dir.parents[1]
 
-# Extract 10 K and 300 K data
-e_rel = df_hydeph["energy_rel_meV"].values
-i_10k = df_hydeph["I_PL_10.0K_norm"].values
-i_300k = df_hydeph["I_PL_300.0K_norm"].values
+df_h = pd.read_csv(sic_dir / "optical_lineshapes.csv")
+df_r = pd.read_csv(sic_dir / "jin_et_al_digitized_kk_10K.csv")
 
-# Filter window [-250, +30] meV
-mask_10k = (e_rel >= -250) & (e_rel <= 30)
-e_win = e_rel[mask_10k]
-i_win_10k = i_10k[mask_10k]
-i_win_300k = i_300k[mask_10k]
+e_rel = df_h["energy_rel_meV"].values
+E_ph = df_h["photon_energy_eV"].values
 
-# Normalize by max in window
-norm_10k = i_win_10k / np.max(i_win_10k)
-norm_300k = i_win_300k / np.max(i_win_300k)
+win_mask = (e_rel >= -235.0) & (e_rel <= 25.0)
+e_win = e_rel[win_mask]
+psb_mask_h = (e_win >= -200.0) & (e_win <= -15.0)
 
-# Find peaks in 10 K lineshape (excluding ZPL at 0)
-psb_mask = (e_win >= -200) & (e_win <= -10)
-peaks, props = find_peaks(norm_10k[psb_mask], height=0.01, distance=15)
-psb_e = e_win[psb_mask]
-psb_i = norm_10k[psb_mask]
+def _ipl(col: str) -> np.ndarray:
+    arr = df_h[col].values[win_mask]
+    if col.startswith("A_"):
+        return (np.maximum(0.05, E_ph[win_mask]) ** 3) * arr
+    return arr
 
-print("=== HyDePh 10 K Emission Spectrum Peaks (PSB) ===")
-for p in peaks:
-    print(f"Peak at {psb_e[p]:.2f} meV | Relative Intensity = {psb_i[p]:.4f}")
+i_harm_10 = _ipl("I_PL_10.0K_norm")
+i_anh_10 = _ipl("A_anharmonic_10.0K")
+i_harm_10 /= float(np.max(i_harm_10[psb_mask_h]))
+i_anh_10 /= float(np.max(i_anh_10[psb_mask_h]))
 
-# Digitize normalization for reference data
-ref_e = df_ref["energy_rel_meV"].values
-ref_pbe = df_ref["intensity_pbe"].values
-ref_expt = df_ref["intensity_expt"].values
+# Digitized Jin et al. 10 K spectra, excluding edge-border artifacts outside [-235, 10] meV
+ref_e = df_r["energy_rel_meV"].values
+ref_mask = (ref_e >= -235.0) & (ref_e <= 12.0)
+ref_e_w = ref_e[ref_mask]
+ref_psb = (ref_e_w >= -200.0) & (ref_e_w <= -15.0)
+ref_pbe = df_r["intensity_pbe"].values[ref_mask]
+ref_expt = df_r["intensity_expt"].values[ref_mask]
+ref_pbe = ref_pbe / float(np.max(ref_pbe[ref_psb]))
+ref_expt = ref_expt / float(np.max(ref_expt[ref_psb]))
 
-ref_mask = (ref_e >= -250) & (ref_e <= 30)
-ref_e_win = ref_e[ref_mask]
-ref_pbe_win = ref_pbe[ref_mask] / np.max(ref_pbe[ref_mask])
-ref_expt_win = ref_expt[ref_mask] / np.max(ref_expt[ref_mask])
+fig, (ax1, ax2) = plt.subplots(
+    2, 1, figsize=(10.5, 8.6), sharex=True, dpi=300, gridspec_kw={"hspace": 0.16}
+)
 
-# Create publication-quality figure
-fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True, gridspec_kw={'hspace': 0.15})
+# Panel (a): 10 K comparison vs Jin et al.
+ax1.fill_between(
+    ref_e_w, 0.0, ref_expt, color="#bdbdbd", alpha=0.55, label="Jin et al. Experiment (10 K)"
+)
+ax1.plot(
+    ref_e_w, ref_pbe, color="#2ca02c", lw=1.8, linestyle="--", label="Jin et al. PBE Theory (10 K)"
+)
+ax1.plot(
+    e_win,
+    i_anh_10,
+    color="#1f77b4",
+    lw=2.1,
+    label=r"HyDePh Anharmonic MD-ACF (10 K, $8\times 8\times 3$ Spliced)",
+)
+ax1.plot(
+    e_win,
+    i_harm_10,
+    color="#ff7f0e",
+    lw=1.7,
+    linestyle=":",
+    label=r"HyDePh Harmonic GenFn (10 K, $8\times 8\times 3$ Spliced)",
+)
 
-# Panel 1: 10 K Comparison
-ax1 = axes[0]
-ax1.plot(e_win, norm_10k, color="#1f77b4", lw=2.2, label="HyDePh (This Work, 10 K)")
-ax1.plot(ref_e_win, ref_pbe_win, color="#d62728", lw=1.8, linestyle="--", label="Jin et al. (PBE, 10 K)")
-ax1.plot(ref_e_win, ref_expt_win, color="#2ca02c", lw=1.5, linestyle=":", alpha=0.85, label="Jin et al. (Expt, 10 K)")
+for x_pk, lbl_txt, x_txt in [
+    (-93.0, "Peak 3\n(-93 meV)", -93.0),
+    (-72.2, "Peak 2\n(-72 meV)", -67.5),
+    (-36.3, "Peak 1\n(-36 meV)", -36.3),
+    (0.0, "ZPL\n(1.096 eV)", 11.5),
+]:
+    ax1.axvline(x_pk, color="gray", linestyle="-.", lw=0.9, alpha=0.7)
+    ax1.text(
+        x_txt,
+        1.18,
+        lbl_txt,
+        ha="center",
+        va="bottom",
+        fontsize=8.5,
+        fontweight="bold",
+        color="#222222",
+    )
 
-# Annotate the 3 attested peaks
-# Peak 1: ~ -34 meV
-ax1.annotate("Peak 1 (-34 meV)\nSi breathing", xy=(-34.0, norm_10k[np.argmin(np.abs(e_win - (-34.0)))]),
-             xytext=(-45, 0.45), arrowprops=dict(arrowstyle="->", color="#1f77b4", lw=1.5),
-             fontsize=10, fontweight="bold", color="#1f77b4")
+ax1.set_xlim(-235.0, 22.0)
+ax1.set_ylim(0.0, 1.44)
+ax1.set_ylabel("PSB-Normalized Intensity (arb. units)", fontsize=11, fontweight="bold")
+ax1.set_title(
+    r"(a) 4H-SiC $kk$-$\mathrm{VV}^0$ Emission at 10 K: HyDePh vs. Jin et al. (PRM 5, 084603)",
+    fontsize=12,
+    fontweight="bold",
+)
+ax1.legend(loc="upper left", frameon=True, framealpha=0.92, fontsize=8.4)
+ax1.grid(True, linestyle=":", alpha=0.55)
 
-# Peak 2: ~ -72 meV
-ax1.annotate("Peak 2 (-72 meV)\nC mode", xy=(-72.5, norm_10k[np.argmin(np.abs(e_win - (-72.5)))]),
-             xytext=(-95, 0.35), arrowprops=dict(arrowstyle="->", color="#1f77b4", lw=1.5),
-             fontsize=10, fontweight="bold", color="#1f77b4")
+# Panel (b): Multi-temperature PL evolution
+temps = [
+    ("10.0", "#1f77b4", "10 K"),
+    ("77.0", "#2ca02c", "77 K"),
+    ("150.0", "#ff7f0e", "150 K"),
+    ("300.0", "#d62728", "300 K"),
+]
+# Normalize consistently to the 300 K PSB maximum so relative ZPL attenuation is directly visible
+scale_ref = float(np.max(_ipl("A_anharmonic_300.0K")[psb_mask_h]))
+for T_str, color, lbl in temps:
+    y_t = _ipl(f"A_anharmonic_{T_str}K") / scale_ref
+    ax2.plot(e_win, y_t, color=color, lw=2.0, label=f"HyDePh {lbl} (16×3000 MD-ACF)")
 
-# Peak 3: ~ -97 meV
-ax1.annotate("Peak 3 (-97 meV)\nLocal mode", xy=(-97.0, norm_10k[np.argmin(np.abs(e_win - (-97.0)))]),
-             xytext=(-140, 0.25), arrowprops=dict(arrowstyle="->", color="#1f77b4", lw=1.5),
-             fontsize=10, fontweight="bold", color="#1f77b4")
+ax2.axvline(0.0, color="gray", linestyle=":", lw=1.0, alpha=0.8)
+ax2.set_xlabel(r"Photon Energy Relative to ZPL: $E - E_{\mathrm{ZPL}}$ (meV)", fontsize=11, fontweight="bold")
+ax2.set_ylabel(r"PL Intensity $I_{\mathrm{PL}}(E)$ (300 K PSB = 1)", fontsize=11, fontweight="bold")
+ax2.set_title(
+    "(b) Multi-Temperature Photoluminescence Evolution (ZPL Resolved up to 300 K)",
+    fontsize=12,
+    fontweight="bold",
+)
+ax2.legend(loc="upper left", frameon=True, framealpha=0.92, fontsize=9.2)
+ax2.grid(True, linestyle=":", alpha=0.55)
+ax2.set_ylim(0.0, None)
 
-# Annotate ZPL
-ax1.annotate("ZPL (1.096 eV)", xy=(0, 1.0), xytext=(5, 0.9),
-             arrowprops=dict(arrowstyle="->", color="black", lw=1.5),
-             fontsize=10, fontweight="bold")
-
-ax1.set_ylabel("Normalized PL Intensity (a.u.)", fontsize=12, fontweight="bold")
-ax1.set_title("4H-SiC kk-Divacancy Emission Spectrum (10 K): HyDePh vs. Jin et al. (PRMaterials 2021)", fontsize=13, fontweight="bold")
-ax1.legend(loc="upper left", frameon=True, fontsize=10)
-ax1.grid(True, linestyle="--", alpha=0.5)
-ax1.set_ylim(-0.02, 1.08)
-
-# Panel 2: 300 K Lineshape demonstrating distinct persistent ZPL
-ax2 = axes[1]
-ax2.plot(e_win, norm_300k, color="#ff7f0e", lw=2.2, label="HyDePh (300 K)")
-ax2.plot(e_win, norm_10k, color="#1f77b4", lw=1.2, linestyle="--", alpha=0.6, label="HyDePh (10 K reference)")
-
-# Annotate 300 K ZPL
-zpl_300_idx = np.argmin(np.abs(e_win - 0.0))
-ax2.annotate("Distinct ZPL at 300 K", xy=(0, norm_300k[zpl_300_idx]), xytext=(10, 0.8),
-             arrowprops=dict(arrowstyle="->", color="#ff7f0e", lw=1.5),
-             fontsize=10, fontweight="bold", color="#ff7f0e")
-
-ax2.set_xlabel("Energy relative to ZPL (meV)", fontsize=12, fontweight="bold")
-ax2.set_ylabel("Normalized PL Intensity (a.u.)", fontsize=12, fontweight="bold")
-ax2.set_title("Thermal Evolution & Persistent ZPL at 300 K", fontsize=13, fontweight="bold")
-ax2.legend(loc="upper left", frameon=True, fontsize=10)
-ax2.grid(True, linestyle="--", alpha=0.5)
-ax2.set_xlim(-220, 25)
-ax2.set_ylim(-0.02, 1.08)
-
-out_fig = "/mnt/h/Il mio Drive/HyDePh/benchmarks/4H-SiC/hydeph_vs_jin_benchmark.png"
-os.makedirs(os.path.dirname(out_fig), exist_ok=True)
-plt.savefig(out_fig, dpi=300, bbox_inches="tight")
-print(f"[+] Saved comparison figure to: {out_fig}")
-
-# Also copy to artifacts dir
-import shutil
-artifact_dir = "C:/Users/gsurf/.gemini/antigravity-cli/brain/88b9fb1f-2111-4d53-bf65-47950df9c321"
-if os.path.exists(artifact_dir):
-    shutil.copy2(out_fig, os.path.join(artifact_dir, "hydeph_vs_jin_benchmark.png"))
+out_fig = repo_root / "assets" / "hydeph_vs_jin_benchmark.png"
+out_fig.parent.mkdir(parents=True, exist_ok=True)
+plt.savefig(str(out_fig), dpi=300, bbox_inches="tight")
+plt.close()
+print(f"[+] Saved updated 4H-SiC vs Jin comparison figure to: {out_fig}")
