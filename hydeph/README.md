@@ -71,10 +71,11 @@ config = ToolkitConfig(
     # Delta-NEP Architecture Hyperparameters
     nep_steps=20000,
 
-    # Spectroscopy, Graphing & 1D Configuration Coordinate
+    # Unified Property-Aware Stage 6 Spectroscopy & 1D Configuration Coordinate
+    phonon_supercell_repeat="auto",
     temperatures=[10.0, 77.0, 150.0, 300.0],
     enable_anharmonic=True,
-    anharmonic_md_steps=1500,
+    anharmonic_md_steps=3000,
 )
 
 summary = run_pipeline(config)
@@ -84,7 +85,8 @@ summary = run_pipeline(config)
 
 ## Workspace Outputs
 
-- `relaxed_gs.xyz`, `relaxed_es.xyz`: Relaxed ground- and excited-state supercells.
+- `relaxed_gs.xyz`, `relaxed_es.xyz`: Relaxed ground- and excited-state supercells (carrying optional `dft_optical_forces_{abs,em}` arrays).
+- `qe_gs_on_es/`: Optional conjugate ground-state SCF at $\mathbf{R}_{\mathrm{ES}}$ providing exact DFT emission forces $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$.
 - `candidate_frames.xyz`: 4-phase candidate frame pool.
 - `labeled_dft_frames.xyz`, `labeled_frames_es.xyz`: DFT-labeled structures with energies and forces.
 - `nep_delta_gs.txt`, `nep_delta_es.txt`: Trained ground- and optical excited-state $\Delta$-NEP models.

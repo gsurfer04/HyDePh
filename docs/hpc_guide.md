@@ -62,7 +62,10 @@ hydeph config.yaml --prepare-relax
 This creates:
 - `qe_gs_relax/pw.in`: Ground-state BFGS relaxation deck (`occupations = 'fixed'`, supporting fixed-cell `relax` or variable-cell `vc-relax` via `relaxation_calculation`).
 - `qe_es_relax/pw.in`: Excited-state $\Delta\text{SCF}$ relaxation deck (`occupations = 'from_input'`), including symmetry-breaking Jahn-Teller distortion when `auto_jahn_teller_distortion: true`.
-- `submit_relaxations_pure_qe.slurm`: Standalone SLURM script (defaulting to 1 GPU and 1 hour via `slurm_relax_gpus: 1` and `slurm_relax_time: "01:00:00"` for rapid queue scheduling) that executes ground-state relaxation, extracts frontier Kohn-Sham eigenvalues to update the lowest-energy $\Delta\text{SCF}$ occupation card if needed, and runs excited-state relaxation.
+- `submit_relaxations_pure_qe.slurm`: Standalone SLURM script (defaulting to 1 GPU and 1 hour via `slurm_relax_gpus: 1` and `slurm_relax_time: "01:00:00"` for rapid queue scheduling) that executes:
+  1. `[1/3]` Ground-state relaxation (`qe_gs_relax/pw.in`),
+  2. `[2/3]` Excited-state $\Delta\text{SCF}$ relaxation (`qe_es_relax/pw.in`, updating the lowest-energy occupation card from frontier Kohn-Sham eigenvalues if needed), and
+  3. `[3/3]` Conjugate ground-state single-point SCF at the relaxed excited-state geometry $\mathbf{R}_{\mathrm{ES}}$ (`qe_gs_on_es/pw.in`), supplying exact DFT emission forces $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$ for the unified Stage 6 workflow.
 
 Submit on the cluster (from either the project root or `workspace_dir`):
 ```bash
@@ -109,7 +112,7 @@ HyDePh automatically:
 1. Parses all converged `pw.out` files from `dft_calculations/` and `dft_calculations_es/` into `labeled_dft_frames.xyz` and `labeled_dft_frames_es.xyz`.
 2. Extracts adiabatic $E_{\mathrm{ZPL}}$, vertical absorption/emission energies, and Stokes shift.
 3. Trains paired $\Delta$-NEP models (`nep_delta_gs.txt`, `nep_delta_es.txt`) and verifies quality control gates (Stage 4–5).
-4. Evaluates the supercell Hessian in parallel (`ParallelVibrations`) and computes multi-temperature harmonic and anharmonic optical lineshapes (Stage 6).
+4. Runs the unified property-aware Stage 6 spectroscopy engine: sizes the embedded phonon supercell (`phonon_supercell_repeat="auto"`), evaluates bulk+core spliced or full supercell Hessians in parallel, routes exact DFT endpoint forces (`qe_gs_on_es` / `qe_es_relax`), and computes multi-temperature harmonic and `16 × 3,000`-step NVE cumulant anharmonic optical lineshapes.
 
 ---
 

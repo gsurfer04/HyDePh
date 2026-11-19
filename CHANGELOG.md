@@ -5,6 +5,21 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-11-19
+
+### Added
+- **Unified Property-Aware Stage 6 Workflow (`hydeph/system_profile.py`)**:
+  - Added host-stiffness automatic phonon supercell sizing (`phonon_supercell_repeat="auto"`, `resolve_phonon_supercell_repeat`), Alkauskas bulk+core Hessian splicing (`hessian_embedding_mode="auto"`, `build_spliced_hessian`, `is_bulk_phonon_stable`), PES-asymmetry force routing (`assess_relaxation_asymmetry`, `phonon_force_state="auto"`), and automatic MD surface routing (`anharmonic_md_surface="auto"`).
+  - Added conjugate ground-state SCF at $\mathbf{R}_{\mathrm{ES}}$ (`qe_gs_on_es`) in Stage 1 (`DefectBuilder._ensure_gs_on_es_scf`) and SLURM (`submit_relaxations_pure_qe.slurm` step `[3/3]`) to supply exact DFT emission forces $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$.
+  - Added `tests/test_unified_workflow.py` covering auto-sizing, Hessian splicing, PES asymmetry routing, `qe_gs_on_es` loading/SLURM hooks, `extxyz` `.arrays` round-trip, and exact endpoint SCF precedence (test suite expanded to 228 passing tests).
+
+### Changed
+- **DFT Optical Force Loading (`load_dft_optical_forces`)**:
+  - Prioritized exact relaxation/conjugate endpoint SCFs (`qe_gs_on_es`/`qe_es_relax` and `qe_es_relax[0]`/`qe_gs_relax[-1]`) over Stage 3 active-learning frames (`labeled_dft_frames.xyz`/`labeled_frames_es.xyz`), and added native `extxyz` `.arrays` round-trip support for `dft_optical_forces_{em,abs}`.
+- **Benchmark Suite & Verification Scripts**:
+  - Removed legacy `benchmarks/CsI/` and updated `scripts/run_benchmarks.py`, `scripts/verify_benchmarks.py`, and `scripts/generate_benchmark_provenance.py` to support hyphenated/digit-prefixed benchmark directories via `importlib`, read real provenance fields from `config.py`/`lineshape_summary.json`, and enforce `n_nve_steps >= 3000` production convergence.
+  - Refreshed `benchmarks/diamond-nvminus`, `benchmarks/4H-SiC`, and `benchmarks/NaCl` with full `16 × 3,000`-step (`48 ps`) unified-workflow runs and updated `assets/unified_workflow_3benchmarks.png`.
+
 ## [0.10.0] - 2026-11-12
 
 ### Added

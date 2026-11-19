@@ -143,10 +143,11 @@ config = ToolkitConfig(
     # Delta-NEP Architecture Hyperparameters
     nep_steps=20000,
 
-    # Spectroscopy, Graphing & 1D Configuration Coordinate
+    # Unified Property-Aware Stage 6 Spectroscopy & 1D Configuration Coordinate
+    phonon_supercell_repeat="auto",
     temperatures=[10.0, 77.0, 150.0, 300.0],
     enable_anharmonic=True,
-    anharmonic_md_steps=1500,
+    anharmonic_md_steps=3000,
 )
 
 summary = run_pipeline(config)
@@ -295,8 +296,8 @@ summary = run_pipeline(config)
 | `phonon_embedding_method` | `str` | `"force"` | Embedding mode projection: `"force"` (Alkauskas/Razinkovas) or `"displacement"`. |
 | `hessian_embedding_mode` | `str` | `"auto"` | Embedded Hessian mode (`"auto"`, `"spliced"`, `"full"`); `"auto"` uses Alkauskas bulk+core splicing above `hessian_splice_threshold_atoms` (`600`). |
 | `spliced_bulk_potential` | `str` | `"auto"` | Bulk force-constant calculator (`"auto"`, `"foundation"`, `"hybrid"`); `"auto"` uses foundation if dynamically stable, else hybrid. |
-| `phonon_force_state` | `str` | `"auto"` | Force geometry (`"auto"`, `"emission"`, `"absorption"`); `"auto"` switches to $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}})-\mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$ when PES asymmetry $\ge 1.8$. |
-| `use_dft_core_forces` | `bool` or `"auto"` | `"auto"` | Uses exact paired DFT core forces from Stage 1/3 when available (`"auto"`, `True`, or `False`). |
+| `phonon_force_state` | `str` | `"auto"` | Force geometry (`"auto"`, `"emission"`, `"absorption"`); `"auto"` switches to $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}})-\mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$ when PES asymmetry $\ge 1.8$ or exact `qe_gs_on_es` DFT emission forces are available. |
+| `use_dft_core_forces` | `bool` or `"auto"` | `"auto"` | Uses exact paired DFT core forces (`"auto"`, `True`, or `False`), prioritizing exact Stage 1 endpoint SCFs (`qe_gs_on_es`/`qe_es_relax`) over Stage 3 labeled frames. |
 | `acoustic_sum_rule` | `bool` | `True` | Enforces tensorial Acoustic Sum Rule ($\sum_j \Phi_{ij} = 0$) and projects out center-of-mass translations from the dynamical matrix. |
 | `displacement_delta` | `float` | `0.01` | Finite-difference displacement step (Å) for numerical Hessian evaluation. |
 | `max_imaginary_modes` | `int` | `0` | Maximum imaginary normal modes permitted before raising a `ValueError`. |
@@ -335,7 +336,7 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 | Host Material Platform | Crystal Type | Recommended Supercell | Atom Count | Minimum Dimension $L$ | Guidelines & Expected Features |
 |---|---|---|---|---|---|
 | **Diamond** ($\text{NV}^-$, $\text{SiV}^-$, $\text{GeV}^-$) | Covalent ($\Theta_D \approx 2200\ \mathrm{K}$) | `(3, 3, 3)` DFT; `(8, 8, 8)` emb | $215$ DFT / $4095$ emb | $\ge 10.7\ \text{Å}$ ($28.6\ \text{Å}$ emb) | Use $\ge 215$ atoms for DFT $\Delta$SCF, and `phonon_supercell_repeat=(7, 7, 7)`–`(8, 8, 8)` with Wigner-Seitz core force splicing to avoid $5\times 5\times 5$ zone-boundary peak splitting ($55/72\ \text{meV}$). |
-| **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` DFT; `(5, 5, 2)` emb | $142\text{--}254$ DFT | $\ge 9.2\text{--}12.3\ \text{Å}$ | Separates defect images across basal and $c$-axis hexagonal layers. |
+| **4H-SiC** ($kk$-$\mathrm{VV}^0$, $V_{\mathrm{Si}}$) | Polar covalent ($\Theta_D \approx 1200\ \mathrm{K}$) | `(3, 3, 2)` DFT; `(8, 8, 3)` emb | $142$ DFT / $1534$ emb | $\ge 9.2\ \text{Å}$ ($24.7\ \text{Å}$ emb) | Separates defect images across basal and $c$-axis hexagonal layers; `phonon_supercell_repeat="auto"` selects `(8, 8, 3)` spliced phonons. |
 | **Alkali Halides** (NaCl) | Rocksalt ($\Theta_D \approx 320\ \mathrm{K}$) | `(2, 2, 2)` DFT; `(4, 4, 4)` emb | $63$ DFT / $511$ emb | $\ge 11.4\ \text{Å}$ ($22.8\ \text{Å}$ emb) | `(2, 2, 2)` satisfies $L \ge 11\ \text{Å}$ for DFT; `(4, 4, 4)` embedding (`511` atoms) converges strong-coupling soft optical bands cleanly. |
 
 ### Unified Property-Aware Workflow (`phonon_supercell_repeat="auto"`)
@@ -344,7 +345,7 @@ Setting `phonon_supercell_repeat="auto"` (paired with `"auto"` defaults for `hes
 
 - **Host-stiffness supercell sizing (`resolve_phonon_supercell_repeat`)**: Probes the pristine crystal's optical phonon bandwidth $\hbar\omega_{\max}$ and expands each cell axis to $L_{\min} = 27\ \text{Å}$ (stiff covalent $\ge 140\ \text{meV}$ $\to$ `8×8×8` Diamond), $24\ \text{Å}$ (polar covalent $75\text{--}140\ \text{meV}$ $\to$ `8×8×3` 4H-SiC), or $20\ \text{Å}$ (soft ionic $<75\ \text{meV}$ $\to$ `4×4×4` NaCl).
 - **Universal Alkauskas bulk+core Hessian splicing**: Above `600` atoms, tiles pristine `Phonons` bulk force constants (using the foundation potential when dynamically stable at the DFT lattice constant, or the hybrid potential if soft foundation bulk modes appear) and splices parallel defect-core columns within `max(R_WS, 5.5) Å`.
-- **PES-asymmetry force routing & exact DFT core forces**: Detects strong excited/ground curvature asymmetry ($\Delta E_{\mathrm{rel,ES}} / \Delta E_{\mathrm{rel,GS}} \ge 1.8$, e.g. NaCl F-center) to switch automatically to conjugate emission forces $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$, while prioritizing exact paired DFT core forces (`qe_es_relax`/`labeled_dft_frames`) whenever available.
+- **PES-asymmetry force routing & exact DFT core forces**: Stage 1 (and SLURM `submit_relaxations_pure_qe.slurm` step `[3/3]`) optionally computes a conjugate ground-state SCF at $\mathbf{R}_{\mathrm{ES}}$ (`qe_gs_on_es`). In Stage 6, `"auto"` detects strong excited/ground curvature asymmetry ($\Delta E_{\mathrm{rel,ES}} / \Delta E_{\mathrm{rel,GS}} \ge 1.8$, e.g. NaCl F-center) or available exact `qe_gs_on_es` emission forces to select $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$, prioritizing exact relaxation/conjugate endpoint SCFs over Stage 3 labeled frames.
 
 ### Anharmonic MD-ACF & Surface Guidelines (Production Convergence)
 
@@ -362,9 +363,9 @@ Setting `phonon_supercell_repeat="auto"` (paired with `"auto"` defaults for `hes
 
 | System | Host ($\Theta_D$) | Auto Phonon Supercell ($N_{\mathrm{atoms}}$) | $S_{\mathrm{harm}}$ / $S_{\mathrm{MD}}$ | $\Delta Q$ ($\mathrm{amu}^{1/2}\text{Å}$) | $E_{\mathrm{ZPL}}$ | Key Spectroscopic Result |
 |---|---|---|---|---|---|---|
-| **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $8\times 8\times 8$ spliced ($4095$) | $3.46$ / $3.71\text{--}3.87$ | $0.534$ | $1.945\ \mathrm{eV}$ | Single $69\text{--}70\ \mathrm{meV}$ main peak (no $5\times 5\times 5$ splitting); $\mathrm{DWF}_0 = 3.15\%$, ZPL preserved to $300\ \mathrm{K}$ |
-| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $8\times 8\times 3$ spliced ($1534$) | $2.26$ / $2.61\text{--}2.77$ | $0.457$ | $1.096\ \mathrm{eV}$ | Conjugate `qe_gs_on_es` $\mathbf{F}_{\mathrm{em}}$ reproduces attested $-34, -73, -96\ \mathrm{meV}$ peaks ($\mathrm{DWF}_0 = 10.40\%$) cleanly to $300\ \mathrm{K}$ [Jin et al. PRM 2021] |
-| **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $4\times 4\times 4$ ($511$) | $11.74$ ($17.61$ NEP) / $13.57\text{--}14.12$ | $2.208$ | $1.273\ \mathrm{eV}$ | Auto $\mathbf{F}_{\mathrm{em}}$ (`ratio=2.21`) + $E^3 A$ places $I_{\mathrm{PL}}$ inside $0.97\text{--}1.10\ \mathrm{eV}$ expt (`1.079 -> 1.084 eV`, FWHM $151 \to 257\ \mathrm{meV}$) |
+| **Diamond $\mathrm{NV}^-$** | Covalent ($2200\ \mathrm{K}$) | $8\times 8\times 8$ spliced ($4095$) | $3.46$ / $3.39\text{--}3.70$ | $0.534$ | $1.945\ \mathrm{eV}$ | Single $69\text{--}70\ \mathrm{meV}$ main peak (`12,282` modes); $\mathrm{DWF}_0 = 3.15\%$, Stokes $235.2\ \mathrm{meV}$, ZPL preserved to $300\ \mathrm{K}$ |
+| **4H-SiC $kk$-$\mathrm{VV}^0$** | Polar covalent ($1200\ \mathrm{K}$) | $8\times 8\times 3$ spliced ($1534$) | $2.26$ / $2.33\text{--}2.62$ | $0.457$ | $1.096\ \mathrm{eV}$ | Conjugate `qe_gs_on_es` $\mathbf{F}_{\mathrm{em}}$ (`4,599` modes) reproduces attested $-34, -73, -96\ \mathrm{meV}$ peaks ($\mathrm{DWF}_0 = 10.40\%$, Stokes $199.0\ \mathrm{meV}$) to $300\ \mathrm{K}$ [Jin et al. PRM 2021] |
+| **NaCl F-Center** | Rocksalt ($320\ \mathrm{K}$) | $4\times 4\times 4$ ($511$) | $11.74$ / $11.46\text{--}13.03$ | $2.208$ | $1.273\ \mathrm{eV}$ | Auto $\mathbf{F}_{\mathrm{em}}$ + $E^3 A$ (`1,530` modes, Stokes $550.4\ \mathrm{meV}$) places $I_{\mathrm{PL}}$ inside $0.97\text{--}1.10\ \mathrm{eV}$ expt (`1.082–1.106 eV`, FWHM $137.5 \to 238.1\ \mathrm{meV}$ across $10\text{--}300\ \mathrm{K}$) |
 
 > [!NOTE]
 > All three flagship benchmarks (`NaCl F-center`, `4H-SiC kk-VV0`, `Diamond NV-`) run through the same unified configuration (`phonon_supercell_repeat="auto"`, `hessian_embedding_mode="auto"`, `phonon_force_state="auto"`, `use_dft_core_forces="auto"`, `anharmonic_md_surface="auto"`), with `qe_gs_on_es` providing exact DFT emission forces $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$.
@@ -382,7 +383,7 @@ HyDePh reproduces the low-temperature photoluminescence spectrum and multi-tempe
   2. **Peak 2 (Localized Defect Mode)**: $-73\ \mathrm{meV}$ (Expt: $-75\ \mathrm{meV}$, Jin et al.: $-71\ \mathrm{meV}$)
   3. **Peak 3 (Optical Bulk Phonon Band)**: $-96\ \mathrm{meV}$ (Expt: $-88\ \mathrm{meV}$, Jin et al.: $-97\ \mathrm{meV}$)
 * **Zero-Phonon Line (ZPL)**: Anchored to experimental $1.096\ \mathrm{eV}$ ($1.105\ \mathrm{eV}$ PBE), remaining prominent and distinctly resolved up to $300\ \mathrm{K}$.
-* **Clean Sideband Structure**: Embedded $(5\times 5\times 2)$ supercell phonons prevent artificial zone-boundary phonon folding, yielding a continuous, physical luminescence profile.
+* **Clean Sideband Structure**: Embedded $(8\times 8\times 3)$ spliced supercell phonons (`1,534` atoms, `4,599` normal modes) prevent artificial zone-boundary phonon folding, yielding a continuous, physical luminescence profile.
 
 ---
 
@@ -422,6 +423,7 @@ hydeph/
 ├── qe_runner.py                   # Backward-compatible re-exports for QE subsystem
 ├── delta_trainer.py               # Baseline subtraction, GPUMD training & QC gates
 ├── calculator.py                  # HybridDefectCalculator & PairedDefectCalculator
+├── system_profile.py              # Host stiffness sizing, Alkauskas Hessian splicing & DFT force routing
 ├── lineshape.py                   # Quantum generating functions & NVE cumulant dynamics
 ├── cc_diagram.py                  # Paired 1D configuration coordinate & Stokes shift engine
 ├── provenance.py                  # Environmental provenance & SHA256 manifest tracking
@@ -433,17 +435,17 @@ hydeph/
     ├── parallel_vib.py            # Multi-threaded supercell Hessian evaluator
     └── array_worker.py            # Headless array task executor
 benchmarks/
-├── diamond-nvminus/               # Diamond NV- benchmark data & figures
-├── 4H-SiC/                        # 4H-SiC kk divacancy benchmark data & figures
-├── CsI/                           # CsI F-center ultra-strong coupling benchmark
-└── NaCl/                          # NaCl F-center benchmark data & figures
+├── diamond-nvminus/               # Diamond NV- benchmark data & figures (16x3000 unified workflow)
+├── 4H-SiC/                        # 4H-SiC kk divacancy benchmark data & figures (16x3000 unified workflow)
+└── NaCl/                          # NaCl F-center benchmark data & figures (16x3000 unified workflow)
 docs/
 ├── THEORY_WALKTHROUGH.md          # Theoretical formulation & literature citations
 └── hpc_guide.md                   # HPC & SLURM cluster execution guide
 scripts/
 ├── run_benchmarks.py              # Automated turnkey benchmark execution runner
-└── verify_benchmarks.py           # Rigorous physical invariant & sum-rule validator
-tests/                             # Automated test suite (191 unit, regression & integration tests)
+├── verify_benchmarks.py           # Rigorous physical invariant & sum-rule validator
+└── generate_benchmark_provenance.py  # Reproducible benchmark provenance manifest generator
+tests/                             # Automated test suite (228 unit, regression & integration tests)
 CHANGELOG.md                       # Release notes and history
 CONTRIBUTING.md                    # Developer and contribution guidelines
 pyproject.toml                     # Packaging metadata, CLI scripts & dependencies
