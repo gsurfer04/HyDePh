@@ -282,7 +282,7 @@ def test_qe_gs_on_es_conjugate_scf_loads_emission_forces_and_slurm_hook(tmp_path
     at_b.calc = SinglePointCalculator(at_b, energy=-9.0, forces=f_b)
 
     at_es_clean = at_es.copy()
-    with patch("hydeph.system_profile.ase.io.read", side_effect=lambda p, **kw: at_a if "qe_gs_on_es/pw.out" in str(p) else at_b):
+    with patch("hydeph.system_profile.ase.io.read", side_effect=lambda p, **kw: at_a if "qe_gs_on_es" in Path(p).parts else at_b):
         df_em = load_dft_optical_forces(at_es.copy(), at_es_clean, str(ws), force_state="emission")
     assert df_em is not None
     assert np.allclose(df_em, f_a - f_b)
