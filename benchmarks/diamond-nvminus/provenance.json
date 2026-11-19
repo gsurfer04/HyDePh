@@ -1,7 +1,7 @@
 {
   "system": "diamond-nvminus",
-  "timestamp_utc": "2026-11-19T01:08:03.344555+00:00",
-  "hydeph_version": "0.10.0",
+  "timestamp_utc": "2026-11-19T11:37:13.515911+00:00",
+  "hydeph_version": "0.11.0",
   "python_version": "3.14.8",
   "ase_version": "3.29.0",
   "allow_fallbacks": false,
