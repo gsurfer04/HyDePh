@@ -344,6 +344,13 @@ def run_pipeline(
                             os.makedirs(config.workspace_dir, exist_ok=True)
                             ase.io.write(es_xyz, at_parsed, format="extxyz")
                             logger.info(f"[+] Discovered converged excited relaxation output at '{cand_es_out}', extracted to '{es_xyz}'")
+                        else:
+                            raise RuntimeError(
+                                f"Cannot resume from stage {from_stage}: Excited-state relaxation output '{cand_es_out}' "
+                                "exists but did NOT converge. Inspect qe_es_relax/pw.out, fix SCF/BFGS convergence, and re-run."
+                            )
+                    except RuntimeError:
+                        raise
                     except Exception as e:
                         logger.warning(f"[-] Could not parse '{cand_es_out}': {e}")
         if os.path.isfile(es_xyz):

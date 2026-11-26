@@ -325,12 +325,17 @@ def write_qe_input(
     nbnd_line = f"\n  nbnd = {eff_nbnd}," if eff_nbnd is not None else ""
     mix_mode = getattr(config, "mixing_mode", None)
     mix_mode_line = f"\n  mixing_mode = '{mix_mode}'," if mix_mode else ""
+    cfg_maxstep = getattr(config, "electron_maxstep", None)
     if retry:
-        retry_lines = f"{mix_mode_line}\n  electron_maxstep = 150,"
-    elif mix_mode_line:
-        retry_lines = mix_mode_line
+        eff_maxstep = max(150, int(cfg_maxstep)) if cfg_maxstep is not None else 150
+        retry_lines = f"{mix_mode_line}\n  electron_maxstep = {eff_maxstep},"
     else:
-        retry_lines = ""
+        maxstep_line = ""
+        if cfg_maxstep is not None:
+            maxstep_line = f"\n  electron_maxstep = {int(cfg_maxstep)},"
+        elif occ_mode == "from_input":
+            maxstep_line = "\n  electron_maxstep = 200,"
+        retry_lines = f"{mix_mode_line}{maxstep_line}"
     forc_conv_line = f"\n  forc_conv_thr = {float(getattr(config, 'relax_forc_conv_thr', 1.0e-3))}," if calculation in ("relax", "vc-relax") else ""
     nstep_line = f"\n  nstep = {int(getattr(config, 'relax_nstep', 100))}," if calculation in ("relax", "vc-relax") else ""
 
@@ -343,6 +348,14 @@ def write_qe_input(
         hybrid_lines += f"\n  nqx1 = {int(config.nqx[0])},\n  nqx2 = {int(config.nqx[1])},\n  nqx3 = {int(config.nqx[2])},"
     if getattr(config, "ecutfock", None) is not None:
         hybrid_lines += f"\n  ecutfock = {float(config.ecutfock)},"
+    vdw_corr = getattr(config, "vdw_corr", None)
+    if vdw_corr and str(vdw_corr).strip().lower() != "none":
+        hybrid_lines += f"\n  vdw_corr = '{str(vdw_corr).strip()}',"
+        if getattr(config, "dftd3_version", None) is not None:
+            hybrid_lines += f"\n  dftd3_version = {int(config.dftd3_version)},"
+        if getattr(config, "dftd3_threebody", None) is not None:
+            tb_val = ".true." if config.dftd3_threebody else ".false."
+            hybrid_lines += f"\n  dftd3_threebody = {tb_val},"
 
     tstress_val = ".true." if calculation == "vc-relax" else ".false."
 
@@ -704,6 +717,25 @@ def check_pw_in_matches_atoms(
                 if not m_dft or m_dft.group(1).strip().lower() != str(input_dft_cfg).strip().lower():
                     return False
             elif m_dft:
+                return False
+
+            # 5b. vdw_corr (dispersion correction)
+            vdw_cfg = getattr(config, "vdw_corr", None)
+            vdw_active = str(vdw_cfg).strip().lower() if vdw_cfg else None
+            if vdw_active == "none":
+                vdw_active = None
+            m_vdw = re.search(r"vdw_corr\s*=\s*['\"]([^'\"]+)['\"]", text, re.IGNORECASE)
+            if vdw_active:
+                if not m_vdw or m_vdw.group(1).strip().lower() != vdw_active:
+                    return False
+                d3v_cfg = getattr(config, "dftd3_version", None)
+                m_d3v = re.search(r"dftd3_version\s*=\s*([-\d]+)", text, re.IGNORECASE)
+                if d3v_cfg is not None:
+                    if not m_d3v or int(m_d3v.group(1)) != int(d3v_cfg):
+                        return False
+                elif m_d3v:
+                    return False
+            elif m_vdw and m_vdw.group(1).strip().lower() != "none":
                 return False
 
             # 6. conv_thr

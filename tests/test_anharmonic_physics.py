@@ -583,3 +583,255 @@ def test_sub_acoustic_cutoff_and_bandwidth_scaled_acf(tmp_path, monkeypatch):
         return float(ab[-1] - ab[0])
 
     assert fwhm(res_scaled[300.0]["s_anh"]) > fwhm(res_narrow[300.0]["s_anh"]) + 5.0
+
+
+def test_anharmonic_planar_md_clamps_z_motion(tmp_path):
+    """Verify anharmonic_planar_md=True clamps z-motion while preserving 2D thermal dynamics."""
+    from hydeph.lineshape import _run_single_anharmonic_trajectory
+
+    p_file = tmp_path / "p_sheet.xyz"
+    at = Atoms(
+        "C2",
+        positions=[[0.0, 0.0, 10.0], [1.4, 0.0, 10.0]],
+        cell=[8.0, 8.0, 20.0],
+        pbc=True,
+    )
+    at.info["is_embedded"] = True
+    import ase.io
+    ase.io.write(str(p_file), at)
+    pot_file = tmp_path / "pot.txt"
+    pot_file.write_text("dummy")
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        foundation_potential_path=str(pot_file),
+        workspace_dir=str(tmp_path / "out"),
+        spin_multiplicity=1,
+        temperatures=[200.0],
+        anharmonic_md_steps=20,
+        anharmonic_thermalization_steps=10,
+        anharmonic_n_trajectories=1,
+        anharmonic_planar_md=True,
+        parallel_hessian=False,
+    )
+    cfg.validate()
+
+    cfg_bad = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        foundation_potential_path=str(pot_file),
+        workspace_dir=str(tmp_path / "out"),
+        spin_multiplicity=1,
+        anharmonic_planar_md="yes",
+    )
+    with pytest.raises(ValueError, match="anharmonic_planar_md"):
+        cfg_bad.validate()
+
+    calc_gs = SpyHarmonicCalculator(k=10.0)
+    z_seen = []
+
+    class RecordingHarmonic(SpyHarmonicCalculator):
+        def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
+            z_seen.append(atoms.positions[:, 2].copy())
+            super().calculate(atoms=atoms, properties=properties, system_changes=system_changes)
+
+    rec_calc = RecordingHarmonic(k=10.0)
+    u_opt = np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]], dtype=float)
+    dr_fc = np.zeros((2, 3), dtype=float)
+    f_core = np.array([[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]], dtype=float)
+
+    du, _, teq = _run_single_anharmonic_trajectory(
+        at_start=at,
+        T=200.0,
+        dt_fs=1.0,
+        n_therm=10,
+        n_steps=20,
+        u_opt=u_opt,
+        dr_fc=dr_fc,
+        calc_gs=rec_calc,
+        calc_es=None,
+        paired_calc=None,
+        seed=123,
+        show_progress=False,
+        f_core=f_core,
+        r_ref=at.positions.copy(),
+        planar_2d=True,
+    )
+    assert len(du) == 11
+    assert teq > 50.0
+    assert np.allclose(np.array(z_seen), 10.0, atol=1e-12)
+
+    eng = LineshapeEngine(cfg, calc_gs)
+    hw_grid = np.linspace(1.0, 100.0, 100)
+    res = eng.run_anharmonic_sampling(at, at.copy(), hw_grid, np.zeros_like(hw_grid), total_S=1.0, f_es_mode=f_core)
+    assert 200.0 in res
+
+
+def test_detect_stacked_layers_and_layer_com_constraint(tmp_path):
+    """Verify _detect_stacked_layers targets vdW multi-layer sheets and _LayerCOMConstraint pins sheet COM."""
+    from ase.build import bulk
+    from hydeph.lineshape import _detect_stacked_layers, _run_single_anharmonic_trajectory
+
+    # 1. 3D cubic crystal (diamond 2x2x2) must not trigger stacked layer detection
+    diam = bulk("C", "diamond", a=3.57, cubic=True).repeat((2, 2, 2))
+    layers_d, ax_d = _detect_stacked_layers(diam)
+    assert layers_d == [] and ax_d is None
+
+    # 1b. 3D ionic rocksalt (NaCl, plane spacing 2.82 A == bond length) must not trigger detection
+    nacl = bulk("NaCl", "rocksalt", a=5.64, cubic=True).repeat((2, 2, 2))
+    layers_nacl, ax_nacl = _detect_stacked_layers(nacl)
+    assert layers_nacl == [] and ax_nacl is None
+
+    # 2. Single 2D monolayer in vacuum must not trigger stacked layer detection (< 2 sheets)
+    mono = Atoms(
+        "C8",
+        positions=[[ix * 1.4, iy * 1.4, 10.0] for ix in range(2) for iy in range(4)],
+        cell=[8.0, 8.0, 20.0],
+        pbc=True,
+    )
+    layers_m, _ = _detect_stacked_layers(mono)
+    assert layers_m == []
+
+    # 3. 2-layer stacked 2D crystal (separated by 3.33 A) must be detected with 2 sheets along axis 2
+    bilayer = Atoms(
+        "B4N4B4N4",
+        positions=[
+            [x, y, z]
+            for z in (0.0, 3.33)
+            for x in (0.0, 1.25, 2.5, 3.75)
+            for y in (0.0, 2.5)
+        ],
+        cell=[5.0, 5.0, 6.66],
+        pbc=True,
+    )
+    layers_b, ax_b = _detect_stacked_layers(bilayer)
+    assert ax_b == 2
+    assert len(layers_b) == 2
+    assert sorted(len(cl) for cl in layers_b) == [8, 8]
+
+    # Run short trajectory with layer_com_axes=(0, 1) + planar_2d=True; sheet COM (x, y) must stay fixed
+    m = bilayer.get_masses()
+    ref_xy = [
+        np.sum(bilayer.positions[cl, :2] * m[cl][:, None], axis=0) / np.sum(m[cl])
+        for cl in layers_b
+    ]
+    seen_pos = []
+
+    class RecordingHarmonic(SpyHarmonicCalculator):
+        def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
+            seen_pos.append(atoms.positions.copy())
+            super().calculate(atoms=atoms, properties=properties, system_changes=system_changes)
+
+    rec = RecordingHarmonic(k=10.0)
+    u_opt = np.ones((len(bilayer), 3)) / np.sqrt(3.0 * len(bilayer))
+    du, _, teq = _run_single_anharmonic_trajectory(
+        at_start=bilayer,
+        T=250.0,
+        dt_fs=0.5,
+        n_therm=10,
+        n_steps=20,
+        u_opt=u_opt,
+        dr_fc=np.zeros((len(bilayer), 3)),
+        calc_gs=rec,
+        calc_es=None,
+        paired_calc=None,
+        seed=7,
+        show_progress=False,
+        planar_2d=True,
+        layer_com_axes=(0, 1),
+    )
+    assert len(du) == 11 and teq > 50.0
+    for pos in seen_pos:
+        for cl, c0 in zip(layers_b, ref_xy):
+            com_xy = np.sum(pos[cl, :2] * m[cl][:, None], axis=0) / np.sum(m[cl])
+            assert np.allclose(com_xy, c0, atol=1e-10)
+        assert np.allclose(pos[:, 2], bilayer.positions[:, 2], atol=1e-12)
+
+
+def test_config_validation_and_dft_md_supercell_option(tmp_path):
+    """Verify validation of anharmonic_layer_com_constraint / anharmonic_md_supercell and dft MD cell."""
+    import ase.io
+    from unittest.mock import patch
+
+    p_file = tmp_path / "p.xyz"
+    at = Atoms("C2", positions=[[0, 0, 0], [1.4, 0, 0]], cell=[6.0, 6.0, 6.0], pbc=True)
+    ase.io.write(str(p_file), at)
+    pot = tmp_path / "pot.txt"
+    pot.write_text("dummy")
+
+    with pytest.raises(ValueError, match="anharmonic_layer_com_constraint"):
+        ToolkitConfig(
+            pristine_cell_path=str(p_file),
+            foundation_potential_path=str(pot),
+            workspace_dir=str(tmp_path / "ws1"),
+            spin_multiplicity=1,
+            anharmonic_layer_com_constraint="bogus",
+        ).validate()
+
+    with pytest.raises(ValueError, match="anharmonic_md_supercell"):
+        ToolkitConfig(
+            pristine_cell_path=str(p_file),
+            foundation_potential_path=str(pot),
+            workspace_dir=str(tmp_path / "ws2"),
+            spin_multiplicity=1,
+            anharmonic_md_supercell="invalid",
+        ).validate()
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        foundation_potential_path=str(pot),
+        workspace_dir=str(tmp_path / "ws3"),
+        spin_multiplicity=1,
+        supercell_repeat=[2, 2, 2],
+        phonon_supercell_repeat=[3, 3, 3],
+        enable_anharmonic=True,
+        anharmonic_md_supercell="dft",
+        parallel_hessian=False,
+    )
+    cfg.validate()
+
+    at_dft = at.repeat((2, 2, 2))
+    del at_dft[0]
+    at_large = at.repeat((3, 3, 3))
+    del at_large[0]
+    at_large.info["is_embedded"] = True
+    calc = SpyHarmonicCalculator(k=10.0)
+    eng = LineshapeEngine(cfg, calc)
+
+    seen_md_natoms = []
+    with patch("hydeph.lineshape.embed_phonon_supercell", return_value=(at_large, np.zeros((len(at_large), 3)), None)):
+        with patch.object(eng, "_run_vibrations_for_calculator", return_value=(np.full(3 * len(at_large), 0.05), lambda i: np.zeros((len(at_large), 3)))):
+            def spy_md(g, e, *a, **kw):
+                seen_md_natoms.append(len(g))
+                return {}
+            with patch.object(eng, "run_anharmonic_sampling", side_effect=spy_md):
+                eng.calculate_spectral_density_and_lineshapes(at_dft, at_dft.copy())
+    assert seen_md_natoms == [len(at_dft)]
+
+
+def test_load_dft_optical_forces_rejects_local_geometry_mismatch(tmp_path):
+    """Verify load_dft_optical_forces checks max per-atom displacement, not just whole-cell RMSD."""
+    from unittest.mock import patch
+    from hydeph.system_profile import load_dft_optical_forces
+
+    ws = tmp_path / "ws"
+    (ws / "qe_es_relax").mkdir(parents=True)
+    (ws / "qe_gs_relax").mkdir(parents=True)
+    (ws / "qe_es_relax" / "pw.out").write_text("dummy")
+    (ws / "qe_gs_relax" / "pw.out").write_text("dummy")
+
+    # 32 atoms: moving one atom by 0.07 A keeps whole-cell RMSD ~0.012 A (< 0.02),
+    # which must still be rejected by the per-atom max-displacement guard.
+    at_gs = Atoms("C32", positions=[[i * 2.0, 0.0, 0.0] for i in range(32)], cell=[64.0, 10.0, 10.0], pbc=True)
+    at_es0 = at_gs.copy()
+    at_es0.positions[0, 0] += 0.07
+
+    from ase.calculators.singlepoint import SinglePointCalculator
+    at_gs.calc = SinglePointCalculator(at_gs, forces=np.zeros((32, 3)))
+    at_es0.calc = SinglePointCalculator(at_es0, forces=np.ones((32, 3)))
+
+    def fake_read(path, index=-1):
+        return at_es0 if "qe_es_relax" in str(path) else at_gs
+
+    with patch("ase.io.read", side_effect=fake_read):
+        res = load_dft_optical_forces(at_gs, at_gs.copy(), str(ws), force_state="absorption")
+    assert res is None

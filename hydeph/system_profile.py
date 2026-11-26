@@ -24,6 +24,29 @@ def _unwrap_bulk_calculator(calc: Any) -> Any:
     return getattr(calc, "calc_base", calc)
 
 
+def _detect_vacuum_axes(pristine_uc: Atoms, min_gap_A: float = 12.0) -> Tuple[bool, bool, bool]:
+    """Identify lattice axes with a periodic vacuum gap >= min_gap_A (2D slabs/monolayers)."""
+    n_at = len(pristine_uc)
+    if n_at == 0:
+        return (False, False, False)
+    lengths = np.asarray(pristine_uc.cell.lengths(), dtype=float)
+    frac = np.asarray(pristine_uc.get_scaled_positions(wrap=True), dtype=float)
+    is_vac = []
+    for ax in range(3):
+        L = float(lengths[ax])
+        if L < float(min_gap_A):
+            is_vac.append(False)
+            continue
+        vals = np.sort(frac[:, ax] % 1.0)
+        gaps = np.empty(n_at, dtype=float)
+        if n_at > 1:
+            gaps[:-1] = vals[1:] - vals[:-1]
+        gaps[-1] = (vals[0] + 1.0) - vals[-1]
+        max_gap_A = float(np.max(gaps)) * L
+        is_vac.append(max_gap_A >= float(min_gap_A))
+    return (is_vac[0], is_vac[1], is_vac[2])
+
+
 def is_bulk_phonon_stable(
     pristine_uc: Atoms,
     calc_bulk: Any,
@@ -34,7 +57,11 @@ def is_bulk_phonon_stable(
     from ase.phonons import Phonons
 
     lengths = np.asarray(pristine_uc.cell.lengths(), dtype=float)
-    bulk_rep = tuple(max(2, min(3, int(math.ceil(9.0 / max(1e-6, float(L)))))) for L in lengths)
+    vac = _detect_vacuum_axes(pristine_uc)
+    bulk_rep = tuple(
+        1 if vac[i] else max(2, min(3, int(math.ceil(9.0 / max(1e-6, float(lengths[i]))))))
+        for i in range(3)
+    )
     while int(len(pristine_uc) * np.prod(bulk_rep)) > 64 and max(bulk_rep) > 1:
         idx = int(np.argmax(bulk_rep))
         lst = list(bulk_rep)
@@ -76,7 +103,11 @@ def estimate_host_phonon_bandwidth(
     from ase.phonons import Phonons
 
     lengths = np.asarray(pristine_uc.cell.lengths(), dtype=float)
-    bulk_rep = tuple(max(1, min(3, int(math.ceil(8.0 / max(1e-6, float(L)))))) for L in lengths)
+    vac = _detect_vacuum_axes(pristine_uc)
+    bulk_rep = tuple(
+        1 if vac[i] else max(1, min(3, int(math.ceil(8.0 / max(1e-6, float(lengths[i]))))))
+        for i in range(3)
+    )
     # Keep quick bandwidth probe tiny (<= 64 atoms)
     while int(len(pristine_uc) * np.prod(bulk_rep)) > 64 and max(bulk_rep) > 1:
         idx = int(np.argmax(bulk_rep))
@@ -142,13 +173,22 @@ def resolve_phonon_supercell_repeat(
         host_class = "soft ionic"
 
     lengths = np.asarray(pristine_uc.cell.lengths(), dtype=float)
+    vac = _detect_vacuum_axes(pristine_uc)
     min_rep = tuple(max(1, int(x)) for x in min_repeat)
-    rep = [max(min_rep[i], int(math.ceil(l_target / max(1e-6, float(lengths[i]))))) for i in range(3)]
+    rep = [
+        min_rep[i] if vac[i] else max(min_rep[i], int(math.ceil(l_target / max(1e-6, float(lengths[i])))))
+        for i in range(3)
+    ]
 
     n_uc = max(1, len(pristine_uc))
     while int(n_uc * rep[0] * rep[1] * rep[2]) > int(max_atoms):
-        # Trim the axis with the largest supercell edge first while respecting min_repeat
-        edge_lens = [rep[i] * float(lengths[i]) if rep[i] > min_rep[i] else -1.0 for i in range(3)]
+        # Trim the non-vacuum axis with the largest supercell edge first while respecting min_repeat
+        edge_lens = [
+            rep[i] * float(lengths[i]) if (not vac[i] and rep[i] > min_rep[i]) else -1.0
+            for i in range(3)
+        ]
+        if max(edge_lens) < 0.0:
+            edge_lens = [rep[i] * float(lengths[i]) if rep[i] > min_rep[i] else -1.0 for i in range(3)]
         best_ax = int(np.argmax(edge_lens))
         if edge_lens[best_ax] < 0.0:
             break
@@ -508,6 +548,7 @@ def load_dft_optical_forces(
                     and gs_es.get_chemical_symbols() == syms
                     and es_last.get_chemical_symbols() == syms
                     and _pbc_rmsd(gs_es.positions, es_last.positions, cell) < 0.02
+                    and _pbc_max_disp(gs_es.positions, es_last.positions) < 0.015
                     and _pbc_rmsd(gs_es.positions, at_es.positions, cell) < 0.08
                     and _pbc_max_disp(gs_es.positions, at_es.positions) < 0.08
                 ):
@@ -525,7 +566,9 @@ def load_dft_optical_forces(
                     and es0.get_chemical_symbols() == syms
                     and gs_last.get_chemical_symbols() == syms
                     and _pbc_rmsd(es0.positions, gs_last.positions, cell) < 0.02
+                    and _pbc_max_disp(es0.positions, gs_last.positions) < 0.015
                     and _pbc_rmsd(es0.positions, at_gs.positions, cell) < 0.08
+                    and _pbc_max_disp(es0.positions, at_gs.positions) < 0.08
                 ):
                     return np.asarray(es0.get_forces() - gs_last.get_forces(), dtype=float)
             except Exception:

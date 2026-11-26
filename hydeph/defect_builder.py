@@ -452,12 +452,18 @@ class DefectBuilder:
             defect_positions.append(pos)
             logger.info(f"    [i] Auto-detected interstitial of {it['symbol']} at {pos}")
 
+        cell = np.array([rep[0] * a1, rep[1] * a2, rep[2] * a3])
         if not defect_positions:
             defect_pos = shift_center
+        elif len(defect_positions) == 1:
+            defect_pos = np.asarray(defect_positions[0], dtype=float)
         else:
-            defect_pos = res["centroid"] + shift_center
-            if len(defect_positions) > 1:
-                logger.info(f"    [i] Defect complex centroid ({len(defect_positions)} sites): {defect_pos}")
+            # Evaluate multi-site MIC centroid in the supercell rather than pristine_uc,
+            # preventing small-unit-cell periodic wrapping on dimer/complex defects.
+            ref_p = np.asarray(defect_positions[0], dtype=float)
+            rel_vecs = mic_displacement(defect_positions, ref_p, cell)
+            defect_pos = ref_p + np.mean(rel_vecs, axis=0)
+            logger.info(f"    [i] Defect complex centroid ({len(defect_positions)} sites): {defect_pos}")
 
         offsets = np.array([[i, j, k] for i in range(rep[0]) for j in range(rep[1]) for k in range(rep[2])], dtype=float)
         center_idx = ic * (rep[1] * rep[2]) + jc * rep[2] + kc
@@ -483,7 +489,6 @@ class DefectBuilder:
             sym_parts.extend(list(pristine_uc.get_chemical_symbols()) * (len(offsets) - center_idx - 1))
 
         all_positions = np.vstack(pos_parts)
-        cell = np.array([rep[0] * a1, rep[1] * a2, rep[2] * a3])
         supercell = Atoms(symbols=sym_parts, positions=all_positions, cell=cell, pbc=True)
         supercell.info["defect_center"] = np.asarray(defect_pos, dtype=float)
         supercell.info["defect_positions"] = [p.tolist() if hasattr(p, 'tolist') else list(p) for p in defect_positions]

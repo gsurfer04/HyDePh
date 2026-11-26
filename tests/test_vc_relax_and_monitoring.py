@@ -331,3 +331,62 @@ sys.stdout.flush()
     assert "BFGS Step 0 finished!" in log_text
     assert "BFGS Step 1 finished!" in log_text
     assert "BFGS converged in 2 SCF cycles and 1 BFGS steps!" in log_text
+
+
+def test_parse_qe_relaxation_output_fixed_relax_preserves_qe_cell_over_mismatched_template(tmp_path):
+    """Fixed-cell relaxations must preserve actual QE cell (pw.in / crystal axes) even if template_atoms differs."""
+    calc_dir = tmp_path / "qe_gs_relax"
+    calc_dir.mkdir()
+    actual_cell = np.diag([10.0, 10.0, 19.98])
+    at_actual = Atoms(
+        "BN",
+        positions=[[0.0, 0.0, 3.33], [1.25, 0.72, 16.65]],
+        cell=actual_cell,
+        pbc=True,
+    )
+    pw_in = calc_dir / "pw.in"
+    pw_in.write_text(
+        "&CONTROL\n  calculation = 'relax'\n/\n"
+        "&SYSTEM\n  nat = 2, ntyp = 2\n/\n"
+        "CELL_PARAMETERS (angstrom)\n"
+        "  10.00000000 0.00000000 0.00000000\n"
+        "  0.00000000 10.00000000 0.00000000\n"
+        "  0.00000000 0.00000000 19.98000000\n"
+        "ATOMIC_SPECIES\n  B 10.81 B.upf\n  N 14.007 N.upf\n"
+        "ATOMIC_POSITIONS (angstrom)\n"
+        "  B 0.0 0.0 3.33\n  N 1.25 0.72 16.65\n",
+        encoding="utf-8",
+    )
+    pw_out = calc_dir / "pw.out"
+    pw_out.write_text(
+        "     lattice parameter (alat)  =      18.897261  a.u.\n"
+        "     crystal axes: (cart. coord. in units of alat)\n"
+        "               a(1) = (   1.000000   0.000000   0.000000 )\n"
+        "               a(2) = (   0.000000   1.000000   0.000000 )\n"
+        "               a(3) = (   0.000000   0.000000   1.998000 )\n"
+        "     bfgs converged in   2 scf cycles and   1 bfgs steps\n"
+        "Begin final coordinates\n"
+        "ATOMIC_POSITIONS (angstrom)\n"
+        "B        0.00000000   0.00000000   3.33010000\n"
+        "N        1.25000000   0.72000000  16.64990000\n"
+        "End final coordinates\n"
+        "!    total energy              =     -50.00000000 Ry\n"
+        "   JOB DONE.\n",
+        encoding="utf-8",
+    )
+
+    # Pass a mismatched template (simulating stale/different pristine.xyz c=21.77 A)
+    mismatched_template = at_actual.copy()
+    mismatched_template.set_cell(np.diag([10.0, 10.0, 21.77475]), scale_atoms=False)
+
+    at_parsed, _ = parse_qe_relaxation_output(str(pw_out), template_atoms=mismatched_template, require_converged=True)
+    assert at_parsed is not None
+    assert at_parsed.cell.lengths()[2] == pytest.approx(19.98, abs=1e-4)
+
+    # Also verify crystal axes * alat fallback when pw.in is absent
+    pw_in.unlink()
+    at_parsed_out_only, _ = parse_qe_relaxation_output(
+        str(pw_out), template_atoms=mismatched_template, require_converged=True
+    )
+    assert at_parsed_out_only is not None
+    assert at_parsed_out_only.cell.lengths()[2] == pytest.approx(19.98, abs=1e-3)

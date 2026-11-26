@@ -276,7 +276,36 @@ def parse_qe_relaxation_output(
         return None, None
 
     if final_cell is None:
+        # For fixed-cell 'relax', pw.out omits CELL_PARAMETERS; read the actual QE cell
+        # from adjacent pw.in or pw.out 'crystal axes' before falling back to template_atoms.
+        pw_in_path = os.path.join(os.path.dirname(pw_out_path), "pw.in")
+        if os.path.isfile(pw_in_path):
+            try:
+                at_in = ase.io.read(pw_in_path, format="espresso-in")
+                if len(at_in) == len(template_atoms):
+                    final_cell = np.array(at_in.cell, dtype=float)
+            except Exception:
+                pass
+    if final_cell is None and alat_ang is not None:
+        axes_m = re.findall(
+            r"a\(\d\)\s*=\s*\(\s*([-\d\.Ee+]+)\s+([-\d\.Ee+]+)\s+([-\d\.Ee+]+)\s*\)",
+            text,
+        )
+        if len(axes_m) >= 3:
+            try:
+                final_cell = np.array([[float(x) for x in row] for row in axes_m[:3]], dtype=float) * alat_ang
+            except ValueError:
+                final_cell = None
+    if final_cell is None:
         final_cell = np.array(template_atoms.cell, dtype=float)
+    else:
+        tmpl_cell = np.array(template_atoms.cell, dtype=float)
+        if np.max(np.abs(final_cell - tmpl_cell)) > 1e-2:
+            logger.warning(
+                f"[!] Simulation cell in {pw_out_path} ({np.round(np.linalg.norm(final_cell, axis=1), 4).tolist()} A) "
+                f"differs from template cell ({np.round(np.linalg.norm(tmpl_cell, axis=1), 4).tolist()} A); "
+                f"preserving actual QE calculation cell."
+            )
 
     raw_pos = np.array(final_positions, dtype=float)
     pos_lower = pos_card.lower()

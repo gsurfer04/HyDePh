@@ -243,6 +243,171 @@ def _extract_hybrid_calc_spec(calc: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+class _PlanarOutOfPlaneConstraint:
+    """Vectorized ASE constraint clamping atomic z-coordinates to their initial plane."""
+
+    def __init__(self, z_ref: np.ndarray):
+        self.z_ref = np.asarray(z_ref, dtype=float).copy()
+
+    def get_removed_dof(self, atoms: Atoms) -> int:
+        return len(atoms)
+
+    def adjust_positions(self, atoms: Atoms, newpositions: np.ndarray) -> None:
+        newpositions[:, 2] = self.z_ref
+
+    def adjust_forces(self, atoms: Atoms, forces: np.ndarray) -> None:
+        forces[:, 2] = 0.0
+
+    def adjust_momenta(self, atoms: Atoms, momenta: np.ndarray) -> None:
+        momenta[:, 2] = 0.0
+
+    def copy(self) -> "_PlanarOutOfPlaneConstraint":
+        return _PlanarOutOfPlaneConstraint(self.z_ref)
+
+    def todict(self) -> Dict[str, Any]:
+        return {"name": "_PlanarOutOfPlaneConstraint", "kwargs": {"z_ref": self.z_ref.tolist()}}
+
+
+def _detect_stacked_layers(
+    atoms: Atoms,
+    min_gap_A: float = 2.2,
+    max_thickness_A: float = 1.0,
+    min_atoms_per_layer: int = 4,
+) -> Tuple[List[np.ndarray], Optional[int]]:
+    """Detects stacked 2D atomic sheets separated by van der Waals gaps along a periodic axis."""
+    nat = len(atoms)
+    if nat < 2 * min_atoms_per_layer or not np.all(atoms.pbc):
+        return [], None
+
+    cell = np.asarray(atoms.cell, dtype=float)
+    if abs(np.linalg.det(cell)) < 1e-8:
+        return [], None
+    inv_cell = np.linalg.inv(cell)
+    pos = np.asarray(atoms.positions, dtype=float)
+    frac = (pos @ inv_cell) % 1.0
+
+    for ax in (2, 0, 1):
+        ax1, ax2 = (i for i in (0, 1, 2) if i != ax)
+        normal = np.cross(cell[ax1], cell[ax2])
+        n_norm = float(np.linalg.norm(normal))
+        if n_norm < 1e-8:
+            continue
+        normal = normal / n_norm
+        d_perp = abs(float(np.dot(cell[ax], normal)))
+        if d_perp < 2.0 * min_gap_A:
+            continue
+
+        proj = frac[:, ax] * d_perp
+        order = np.argsort(proj)
+        sorted_p = proj[order]
+        gaps = np.empty(nat, dtype=float)
+        gaps[:-1] = np.diff(sorted_p)
+        gaps[-1] = d_perp - sorted_p[-1] + sorted_p[0]
+
+        split_idx = np.flatnonzero(gaps >= float(min_gap_A))
+        if len(split_idx) < 2:
+            continue
+
+        # Build contiguous periodic clusters starting right after the first large gap
+        layers: List[np.ndarray] = []
+        ok = True
+        for k in range(len(split_idx)):
+            s0 = (int(split_idx[k]) + 1) % nat
+            s1 = int(split_idx[(k + 1) % len(split_idx)])
+            if s0 <= s1:
+                cl_order = order[s0 : s1 + 1]
+                cl_p = sorted_p[s0 : s1 + 1]
+            else:
+                cl_order = np.concatenate([order[s0:], order[: s1 + 1]])
+                cl_p = np.concatenate([sorted_p[s0:], sorted_p[: s1 + 1] + d_perp])
+            if len(cl_order) < min_atoms_per_layer or float(np.ptp(cl_p)) > float(max_thickness_A):
+                ok = False
+                break
+            layers.append(np.asarray(cl_order, dtype=int))
+
+        if ok and len(layers) >= 2 and sum(len(cl) for cl in layers) == nat:
+            # Distinguish true van der Waals layered sheets from 3D ionic/cubic atomic planes
+            # (e.g., NaCl/LiCl/CsI have planar spacing ~2.3-2.8 A equal to their 3D bond length).
+            l0 = layers[0]
+            l1 = layers[1]
+            sub0 = l0[: min(64, len(l0))]
+            d_intra_diff = pos[None, l0, :] - pos[sub0, None, :]
+            d_intra_frac = d_intra_diff @ inv_cell
+            d_intra_frac -= np.round(d_intra_frac)
+            d_intra_mat = np.linalg.norm(d_intra_frac @ cell, axis=2)
+            d_intra_pos = d_intra_mat[d_intra_mat > 1e-6]
+            d_intra_min = float(np.min(d_intra_pos)) if len(d_intra_pos) > 0 else 0.0
+
+            d_inter_diff = pos[None, l1, :] - pos[sub0, None, :]
+            d_inter_frac = d_inter_diff @ inv_cell
+            d_inter_frac -= np.round(d_inter_frac)
+            d_inter_min = float(np.min(np.linalg.norm(d_inter_frac @ cell, axis=2)))
+            if d_inter_min >= 2.8 and d_intra_min > 1e-6 and (d_inter_min / d_intra_min) >= 1.35:
+                return layers, ax
+
+    return [], None
+
+
+class _LayerCOMConstraint:
+    """Mass-weighted per-layer center-of-mass constraint preventing rigid sheet-on-sheet sliding."""
+
+    def __init__(self, layers: List[np.ndarray], ref_coms: List[np.ndarray], axes: Tuple[int, ...] = (0, 1)):
+        self.layers = [np.asarray(idx, dtype=int) for idx in layers]
+        self.axes = tuple(int(a) for a in axes)
+        self.ax_arr = np.asarray(self.axes, dtype=int)
+        self.ref_coms = [np.asarray(c, dtype=float)[self.ax_arr].copy() for c in ref_coms]
+
+    def get_removed_dof(self, atoms: Atoms) -> int:
+        return len(self.axes) * len(self.layers)
+
+    def adjust_positions(self, atoms: Atoms, newpositions: np.ndarray) -> None:
+        m = atoms.get_masses()
+        for idx, c0 in zip(self.layers, self.ref_coms):
+            w = m[idx][:, None]
+            m_tot = float(np.sum(w))
+            if m_tot <= 0.0:
+                continue
+            com = np.sum(newpositions[idx[:, None], self.ax_arr] * w, axis=0) / m_tot
+            newpositions[idx[:, None], self.ax_arr] += c0 - com
+
+    def adjust_forces(self, atoms: Atoms, forces: np.ndarray) -> None:
+        m = atoms.get_masses()
+        for idx in self.layers:
+            w = m[idx][:, None]
+            m_tot = float(np.sum(w))
+            if m_tot <= 0.0:
+                continue
+            f_tot = np.sum(forces[idx[:, None], self.ax_arr], axis=0)
+            forces[idx[:, None], self.ax_arr] -= (w / m_tot) * f_tot
+
+    def adjust_momenta(self, atoms: Atoms, momenta: np.ndarray) -> None:
+        m = atoms.get_masses()
+        for idx in self.layers:
+            m_tot = float(np.sum(m[idx]))
+            if m_tot <= 0.0:
+                continue
+            v_cm = np.sum(momenta[idx[:, None], self.ax_arr], axis=0) / m_tot
+            momenta[idx[:, None], self.ax_arr] -= m[idx][:, None] * v_cm
+
+    def copy(self) -> "_LayerCOMConstraint":
+        ref_full = []
+        for rc in self.ref_coms:
+            arr = np.zeros(3, dtype=float)
+            arr[self.ax_arr] = rc
+            ref_full.append(arr)
+        return _LayerCOMConstraint(self.layers, ref_full, axes=self.axes)
+
+    def todict(self) -> Dict[str, Any]:
+        return {
+            "name": "_LayerCOMConstraint",
+            "kwargs": {
+                "layers": [cl.tolist() for cl in self.layers],
+                "ref_coms": [rc.tolist() for rc in self.ref_coms],
+                "axes": list(self.axes),
+            },
+        }
+
+
 def _run_single_anharmonic_trajectory(
     at_start: Atoms,
     T: float,
@@ -259,6 +424,8 @@ def _run_single_anharmonic_trajectory(
     desc_str: str = "Anharmonic MD",
     f_core: Optional[np.ndarray] = None,
     r_ref: Optional[np.ndarray] = None,
+    planar_2d: bool = False,
+    layer_com_axes: Optional[Tuple[int, ...]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Runs NVT Langevin thermalization followed by NVE VelocityVerlet production."""
     from ase import units
@@ -274,6 +441,22 @@ def _run_single_anharmonic_trajectory(
     r_ref_nz = np.asarray(r_ref[core_idx], dtype=float) if use_core_force_gap else None
 
     at = at_start.copy()
+    constraints = []
+    if planar_2d and len(at) > 0:
+        constraints.append(_PlanarOutOfPlaneConstraint(at.positions[:, 2]))
+    if layer_com_axes and len(at) > 0:
+        layers, _ = _detect_stacked_layers(at)
+        if len(layers) >= 2:
+            masses_c = at.get_masses()
+            ref_coms = [
+                np.sum(at.positions[idx] * masses_c[idx][:, None], axis=0) / max(1e-12, float(np.sum(masses_c[idx])))
+                for idx in layers
+            ]
+            constraints.append(_LayerCOMConstraint(layers, ref_coms, axes=tuple(layer_com_axes)))
+    if len(constraints) == 1:
+        at.set_constraint(constraints[0])
+    elif len(constraints) > 1:
+        at.set_constraint(constraints)
     at.calc = calc_es if has_paired else calc_gs
     at_disp = None
     if not has_paired and not use_core_force_gap:
@@ -381,11 +564,17 @@ def _run_anharmonic_window_worker(
     task_args: Tuple[Any, ...]
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Worker entry point executing one NVT->NVE trajectory using cached worker calculators."""
-    if len(task_args) == 10:
+    layer_com_axes = None
+    if len(task_args) == 12:
+        at_start, T, dt_fs, n_therm, n_steps, u_opt, dr_fc, seed, f_core, r_ref, planar_2d, layer_com_axes = task_args
+    elif len(task_args) == 11:
+        at_start, T, dt_fs, n_therm, n_steps, u_opt, dr_fc, seed, f_core, r_ref, planar_2d = task_args
+    elif len(task_args) == 10:
         at_start, T, dt_fs, n_therm, n_steps, u_opt, dr_fc, seed, f_core, r_ref = task_args
+        planar_2d = False
     else:
         at_start, T, dt_fs, n_therm, n_steps, u_opt, dr_fc, seed = task_args
-        f_core, r_ref = None, None
+        f_core, r_ref, planar_2d = None, None, False
     return _run_single_anharmonic_trajectory(
         at_start=at_start,
         T=T,
@@ -401,6 +590,8 @@ def _run_anharmonic_window_worker(
         show_progress=False,
         f_core=f_core,
         r_ref=r_ref,
+        planar_2d=bool(planar_2d),
+        layer_com_axes=layer_com_axes,
     )
 
 
@@ -526,8 +717,11 @@ def embed_phonon_supercell(
     logger.info(f"    [-] Relaxing large phonon supercell ({len(at_gs_large)} atoms) on hybrid potential...")
     at_gs_large.calc = calc_gs
     opt = LBFGS(at_gs_large, logfile=None) if len(at_gs_large) > 400 else BFGS(at_gs_large, logfile=None)
-    fmax_thr = getattr(config, "relax_forc_conv_thr", 0.01)
-    opt.run(fmax=fmax_thr, steps=100)
+    raw_fthr = float(getattr(config, "relax_forc_conv_thr", 1.0e-3))
+    # relax_forc_conv_thr is in QE Ry/Bohr (~25.711 eV/A); keep ASE LBFGS fmax in practical [0.01, 0.03] eV/A
+    fmax_thr = float(np.clip(raw_fthr * 25.711043, 0.01, 0.03))
+    opt_steps = 200 if len(at_gs_large) > 400 else 100
+    opt.run(fmax=fmax_thr, steps=opt_steps)
     e_large = at_gs_large.get_potential_energy()
     f_large_max = float(np.abs(at_gs_large.get_forces()).max())
     logger.info(f"    [+] Large phonon supercell relaxed: E = {e_large:.4f} eV, max |F| = {f_large_max:.4f} eV/A")
@@ -928,6 +1122,8 @@ class LineshapeEngine:
         phonon_rep = getattr(self.config, "phonon_supercell_repeat", None)
         supercell_rep = getattr(self.config, "supercell_repeat", (2, 2, 2))
         f_es_mode = None
+        at_gs_dft = at_gs.copy()
+        at_es_dft = at_es.copy()
         is_embedded = (str(phonon_rep).strip().lower() == "auto") or (
             phonon_rep is not None and tuple(phonon_rep) != tuple(supercell_rep)
         )
@@ -1399,16 +1595,36 @@ class LineshapeEngine:
 
         anharmonic_dict = None
         if self.config.enable_anharmonic:
-            if is_embedded:
+            md_sc_pref = str(getattr(self.config, "anharmonic_md_supercell", "auto")).strip().lower()
+            use_dft_md = is_embedded and (md_sc_pref == "dft")
+            if use_dft_md:
+                at_md_gs, at_md_es = at_gs_dft, at_es_dft
+                f_es_md = None
+                if (
+                    str(getattr(self.config, "anharmonic_md_surface", "auto")).lower() == "gs"
+                    and getattr(self, "calc_es", None) is not None
+                ):
+                    at_p = at_md_gs.copy()
+                    at_p.calc = self.calc_es
+                    f_p_es = at_p.get_forces().copy()
+                    at_p.calc = self.calc
+                    f_es_md = f_p_es - at_p.get_forces().copy()
                 logger.info(
-                    f"    [-] Running anharmonic MD on embedded {len(at_gs)}-atom phonon supercell "
-                    f"to resolve Brillouin-zone acoustic modes."
+                    f"    [-] Running anharmonic MD on {len(at_md_gs)}-atom DFT supercell (anharmonic_md_supercell='dft')."
                 )
+            else:
+                at_md_gs, at_md_es = at_gs, at_es
+                f_es_md = f_es_mode
+                if is_embedded:
+                    logger.info(
+                        f"    [-] Running anharmonic MD on embedded {len(at_gs)}-atom phonon supercell "
+                        f"to resolve Brillouin-zone acoustic modes."
+                    )
             hw_min_ph = float(np.min(hw_modes)) if len(hw_modes) > 0 else None
             hw_max_ph = float(np.max(hw_modes)) if len(hw_modes) > 0 else None
             anharmonic_dict = self.run_anharmonic_sampling(
-                at_gs, at_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts,
-                f_es_mode=f_es_mode,
+                at_md_gs, at_md_es, hw_grid, s_cont, total_S=total_S, e_min=e_min, e_max=e_max, n_pts=n_pts,
+                f_es_mode=f_es_md,
                 hw_min_phonon=hw_min_ph,
                 hw_max_phonon=hw_max_ph,
             )
@@ -1694,8 +1910,29 @@ class LineshapeEngine:
                 pass
 
         n_therm = getattr(self.config, "anharmonic_thermalization_steps", 400)
+        planar_2d = bool(getattr(self.config, "anharmonic_planar_md", False))
+        if planar_2d:
+            logger.info(
+                "    [+] Planar 2D MD constraint enabled (anharmonic_planar_md=True): "
+                "clamping out-of-plane z-motion to suppress unsupported ZA thermal rippling."
+            )
         at_start_bare = (at_es_eq if has_paired else at_gs_eq).copy()
         at_start_bare.calc = None
+
+        layer_com_axes = None
+        lcom_cfg = getattr(self.config, "anharmonic_layer_com_constraint", "auto")
+        lcom_str = "xy" if lcom_cfg is True else ("none" if lcom_cfg is False else str(lcom_cfg).strip().lower())
+        if lcom_str in ("auto", "xy", "xyz"):
+            stacked_layers, stack_ax = _detect_stacked_layers(at_start_bare)
+            if len(stacked_layers) >= 2 and stack_ax is not None:
+                if lcom_str == "xyz":
+                    layer_com_axes = (0, 1, 2)
+                else:
+                    layer_com_axes = tuple(i for i in (0, 1, 2) if i != stack_ax)
+                logger.info(
+                    f"    [+] Layered crystal per-layer COM constraint active ({len(stacked_layers)} sheets, "
+                    f"axes={layer_com_axes}): preventing interlayer sliding while keeping internal vibrations free."
+                )
 
         use_parallel = bool(getattr(self.config, "parallel_hessian", True)) and n_trajectories > 1
         gs_spec = _extract_hybrid_calc_spec(self.calc) if use_parallel else None
@@ -1740,6 +1977,8 @@ class LineshapeEngine:
                         int(round(T * 100.0)) * 1000 + traj_idx,
                         f_core_pass,
                         r_ref_pass,
+                        planar_2d,
+                        layer_com_axes,
                     )
                     for T in self.config.temperatures
                     for traj_idx in range(n_trajectories)
@@ -1782,6 +2021,8 @@ class LineshapeEngine:
                             ),
                             f_core=f_core_pass,
                             r_ref=r_ref_pass,
+                            planar_2d=planar_2d,
+                            layer_com_axes=layer_com_axes,
                         )
                         for traj_idx in range(n_trajectories)
                     ]

@@ -247,6 +247,10 @@ summary = run_pipeline(config)
 | `conv_thr` | `str` | `None` | SCF convergence threshold in QE (defaults to $10^{-10}\ \text{Ry/atom}$). |
 | `mixing_beta` | `float` | `0.4` | SCF charge density mixing factor. |
 | `diagonalization` | `str` | `"david"` | Diagonalization method in QE (`'david'`, `'cg'`). |
+| `electron_maxstep` | `int` | `None` | Maximum SCF iterations per ionic step in QE (defaults to `200` for constrained $\Delta\text{SCF}$ `from_input` runs and QE's default `100` otherwise). |
+| `vdw_corr` | `str` | `None` | Van der Waals dispersion correction in QE (`'dft-d3'`, `'grimme-d3'`, `'grimme-d2'`, `'vdw-df'`, `'tkatchenko-scheffler'`, `'xdm'`). |
+| `dftd3_version` | `int` | `None` | Grimme DFT-D3 damping variant in QE (`3`: zero-damping, `4`: Becke-Johnson). |
+| `dftd3_threebody` | `bool` | `None` | Enables three-body Axilrod-Teller-Muto dispersion terms in QE DFT-D3 when set. |
 
 ### Sampling & Resumption
 
@@ -289,6 +293,9 @@ summary = run_pipeline(config)
 | `anharmonic_md_steps` | `int` | `3000` | NVE production steps per trajectory ($3.0\ \text{ps}$ at `1.0 fs`) for energy-gap autocorrelation sampling. |
 | `anharmonic_n_trajectories` | `int` | `16` | Number of independent NVE trajectories for ensemble averaging ($16\text{--}24$ recommended; $48\text{--}72\ \text{ps}$ total). |
 | `anharmonic_md_surface` | `str` | `"auto"` | Born-Oppenheimer PES (`"auto"`, `"es"`, or `"gs"`) used for NVE dynamics (`"auto"` chooses `"gs"` on embedded cells and `"es"` otherwise). |
+| `anharmonic_planar_md` | `bool` | `False` | Clamps out-of-plane $z$ motion during anharmonic MD to model substrate-supported 2D sheets (suppresses $ZA$ thermal rippling). |
+| `anharmonic_layer_com_constraint` | `str` or `bool` | `"auto"` | Pins each sheet's center-of-mass (`"auto"`/`"xy"` or `"xyz"`) during anharmonic MD for stacked layered crystals (`>= 2` vdW layers) to prevent rigid sheet-on-sheet sliding. |
+| `anharmonic_md_supercell` | `str` | `"auto"` | Supercell for anharmonic MD when phonon embedding is active (`"auto"`/`"embedded"` or `"dft"` to keep MD on the smaller DFT cell). |
 | `anharmonic_acf_damping_meV` | `float` | `2.0` | Gaussian time-domain window width $\gamma_{\mathrm{acf}}$ for smoothing autocorrelation truncation noise. |
 | `dephasing_gamma_meV` | `float` | `1.0` | Base ZPL instrument/lifetime dephasing width $\gamma_0$ in meV. |
 | `dephasing_temperature_coefficient` | `float` | `0.0` | Quadratic acoustic Raman dephasing coefficient $\alpha_{\mathrm{deph}}$ ($\text{meV/K}^2$). |
@@ -300,7 +307,7 @@ summary = run_pipeline(config)
 | `use_dft_core_forces` | `bool` or `"auto"` | `"auto"` | Uses exact paired DFT core forces (`"auto"`, `True`, or `False`), prioritizing exact Stage 1 endpoint SCFs (`qe_gs_on_es`/`qe_es_relax`) over Stage 3 labeled frames. |
 | `acoustic_sum_rule` | `bool` | `True` | Enforces tensorial Acoustic Sum Rule ($\sum_j \Phi_{ij} = 0$) and projects out center-of-mass translations from the dynamical matrix. |
 | `displacement_delta` | `float` | `0.01` | Finite-difference displacement step (Å) for numerical Hessian evaluation. |
-| `max_imaginary_modes` | `int` | `0` | Maximum imaginary normal modes permitted before raising a `ValueError`. |
+| `max_imaginary_modes` | `int` | `0` | Maximum imaginary normal modes permitted before raising a `RuntimeError`. |
 | `phonon_y_min` / `phonon_y_max` | `float` | `None` | Explicit y-axis limits for phonon spectral density plots. |
 | `plot_configuration_coordinate` | `bool` | `True` | Generates 2-panel 1D configuration coordinate and Stokes shift figure. |
 
@@ -312,7 +319,7 @@ summary = run_pipeline(config)
 | `cluster_profile` | `str` | `"auto"` | Hardware profile: `"leonardo_booster"`, `"leonardo_dcgp"`, or `"generic_slurm"`. |
 | `slurm_account` | `str` | `None` | SLURM account string (reads `$CINECA_ACCOUNT` or `$SLURM_ACCOUNT`). |
 | `slurm_partition` | `str` | `None` | Target partition (e.g. `boost_usr_prod`). |
-| `slurm_modules` / `modules` | `list of str` | `[]` | Environment modules loaded in exact sequence (e.g. `['profile/chem-phys', 'quantum-espresso/7.2--openmpi--4.1.4--cuda--11.8']`). |
+| `slurm_modules` | `list of str` | `[]` | Environment modules loaded in exact sequence (e.g. `['profile/chem-phys', 'quantum-espresso/7.2--openmpi--4.1.4--cuda--11.8']`). |
 | `slurm_relax_gpus` | `int` | `1` | GPUs requested in `submit_relaxations_pure_qe.slurm` (alias: `relax_gpus`). |
 | `slurm_relax_time` | `str` | `"01:00:00"` | Walltime limit for relaxation SLURM jobs (alias: `relax_time`). |
 | `slurm_relax_qos` | `str` | `None` | Optional QoS for relaxation SLURM jobs (e.g. `"boost_qos_dbg"`; alias: `relax_qos`). |
@@ -343,7 +350,7 @@ Under periodic boundary conditions, the physical supercell edge length **$L \ge 
 
 Setting `phonon_supercell_repeat="auto"` (paired with `"auto"` defaults for `hessian_embedding_mode`, `spliced_bulk_potential`, `phonon_force_state`, `use_dft_core_forces`, and `anharmonic_md_surface`) routes each defect–host system through one shared physics-driven workflow:
 
-- **Host-stiffness supercell sizing (`resolve_phonon_supercell_repeat`)**: Probes the pristine crystal's optical phonon bandwidth $\hbar\omega_{\max}$ and expands each cell axis to $L_{\min} = 27\ \text{Å}$ (stiff covalent $\ge 140\ \text{meV}$ $\to$ `8×8×8` Diamond), $24\ \text{Å}$ (polar covalent $75\text{--}140\ \text{meV}$ $\to$ `8×8×3` 4H-SiC), or $20\ \text{Å}$ (soft ionic $<75\ \text{meV}$ $\to$ `4×4×4` NaCl).
+- **Host-stiffness supercell sizing (`resolve_phonon_supercell_repeat`)**: Probes the pristine crystal's optical phonon bandwidth $\hbar\omega_{\max}$ and expands each periodic cell axis to $L_{\min} = 27\ \text{Å}$ (stiff covalent $\ge 140\ \text{meV}$ $\to$ `8×8×8` Diamond), $24\ \text{Å}$ (polar covalent $75\text{--}140\ \text{meV}$ $\to$ `8×8×3` 4H-SiC), or $20\ \text{Å}$ (soft ionic $<75\ \text{meV}$ $\to$ `4×4×4` NaCl), while keeping vacuum axes fixed for 2D monolayers and slabs.
 - **Universal Alkauskas bulk+core Hessian splicing**: Above `600` atoms, tiles pristine `Phonons` bulk force constants (using the foundation potential when dynamically stable at the DFT lattice constant, or the hybrid potential if soft foundation bulk modes appear) and splices parallel defect-core columns within `max(R_WS, 5.5) Å`.
 - **PES-asymmetry force routing & exact DFT core forces**: Stage 1 (and SLURM `submit_relaxations_pure_qe.slurm` step `[3/3]`) optionally computes a conjugate ground-state SCF at $\mathbf{R}_{\mathrm{ES}}$ (`qe_gs_on_es`). In Stage 6, `"auto"` detects strong excited/ground curvature asymmetry ($\Delta E_{\mathrm{rel,ES}} / \Delta E_{\mathrm{rel,GS}} \ge 1.8$, e.g. NaCl F-center) or available exact `qe_gs_on_es` emission forces to select $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$, prioritizing exact relaxation/conjugate endpoint SCFs over Stage 3 labeled frames.
 
@@ -352,6 +359,7 @@ Setting `phonon_supercell_repeat="auto"` (paired with `"auto"` defaults for `hes
 1. **Multi-Trajectory Ensemble Length (`anharmonic_n_trajectories >= 16`, `anharmonic_md_steps = 3000`)**: Because $S_{\mathrm{MD}}(\omega) \propto J_{\mathrm{cl}}(\omega)/(\hbar\omega)^2$, localized modes exhibit large $1/\omega$ variance in short MD runs ($1\text{--}8$ trajectories). Averaging **`16–24` independent `3,000`-step NVE trajectories (`48–72 ps`)** suppresses this variance, eliminating main-peak splitting in Diamond $\mathrm{NV}^-$ and `±50–70 meV` peak jitter in NaCl F-center temperature scans.
 2. **Core-Localized Splicing on Large Embedded Supercells**: When pairing `phonon_supercell_repeat` with a fine-tuned foundation $\Delta$-NEP, restricting the $\mathrm{GS}/\mathrm{ES}$ NEP force difference to the Wigner-Seitz inscribed sphere around the defect core prevents cumulative far-field bulk drift from corrupting $\Delta U(t)$ and acoustic phonon tails.
 3. **Emission vs. Absorption Force & $\omega^3$ Prefactor in Soft Ionic Hosts**: Strongly coupled ionic centers exhibit marked excited/ground PES curvature asymmetry ($\hbar\Omega_{\mathrm{ES}} \ne \hbar\Omega_{\mathrm{GS}}$; e.g., NaCl F-center $S_{\mathrm{abs}} \approx 40.5$ from $\mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{GS}})$ vs. $S_{\mathrm{em}} \approx 17.6$ from $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}})$). For emission bands, match the final-state curvature using ground-state forces at $\mathbf{R}_{\mathrm{ES}}$ (`F_GS(R_ES) - F_ES(R_ES)`), and inspect the Einstein $(\hbar\omega)^3$-weighted `I_PL` band rather than the unweighted absorption-like lineshape $A(\hbar\omega)$.
+4. **2D & Layered vdW Hosts**: Set `anharmonic_planar_md: true` to clamp out-of-plane $z$ motion for substrate-supported 2D sheets or to suppress unsupported flexural ($ZA$) rippling. For stacked vdW crystals ($\ge 2$ sheets), `anharmonic_layer_com_constraint: "auto"` pins per-sheet in-plane center-of-mass drift while leaving intralayer vibrations free. Keep `anharmonic_md_supercell: "auto"` to sample Brillouin-zone dispersion on the embedded phonon supercell, or set `"dft"` for faster small-cell $V_{\mathrm{ES}}$ sampling.
 
 ---
 

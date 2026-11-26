@@ -1204,6 +1204,37 @@ if [ -n "$PSEUDO_DIR" ]; then
     done
 fi
 
+# Convergence guard for standalone QE relaxations (pw.x exits 0 on non-convergence)
+_check_qe_relax_converged() {{
+    local pwo="$1"
+    local label="$2"
+    if [ ! -f "$pwo" ]; then
+        echo "[!] ERROR: $label output file missing: $pwo" >&2
+        return 1
+    fi
+    if ! grep -qiE "bfgs converged in|begin final coordinates" "$pwo" \
+       || grep -qi "the maximum number of steps has been reached" "$pwo" \
+       || {{ grep -qi "convergence not achieved" "$pwo" && ! grep -qi "begin final coordinates" "$pwo"; }}; then
+        echo "[!] ERROR: $label relaxation did NOT converge (see $pwo)." >&2
+        grep -iE "convergence not achieved|bfgs|maximum number of steps|stopping|error" "$pwo" | tail -n 15 >&2 || true
+        return 1
+    fi
+}}
+
+_check_qe_scf_converged() {{
+    local pwo="$1"
+    local label="$2"
+    if [ ! -f "$pwo" ]; then
+        echo "[!] ERROR: $label output file missing: $pwo" >&2
+        return 1
+    fi
+    if ! grep -q "JOB DONE." "$pwo" || grep -qi "convergence not achieved" "$pwo"; then
+        echo "[!] ERROR: $label SCF did NOT converge (see $pwo)." >&2
+        grep -iE "convergence not achieved|stopping|error" "$pwo" | tail -n 15 >&2 || true
+        return 1
+    fi
+}}
+
 # 1. Run Ground State Relaxation
 if [ -f "$WORKSPACE_DIR/qe_gs_relax/pw.in" ]; then
     echo "=============================================================================="
@@ -1211,7 +1242,8 @@ if [ -f "$WORKSPACE_DIR/qe_gs_relax/pw.in" ]; then
     echo "=============================================================================="
     cd "$WORKSPACE_DIR/qe_gs_relax"
     srun --cpu-bind=cores pw.x -in pw.in > pw.out 2>&1
-    echo "[+] Ground-state relaxation finished at $(date)"
+    _check_qe_relax_converged "$WORKSPACE_DIR/qe_gs_relax/pw.out" "Ground-state"
+    echo "[+] Ground-state relaxation converged at $(date)"
     cd "$WORKSPACE_DIR"
 fi
 
@@ -1222,7 +1254,8 @@ if [ -f "$WORKSPACE_DIR/qe_es_relax/pw.in" ]; then
     echo "=============================================================================="
     cd "$WORKSPACE_DIR/qe_es_relax"
     srun --cpu-bind=cores pw.x -in pw.in > pw.out 2>&1
-    echo "[+] Excited-state relaxation finished at $(date)"
+    _check_qe_relax_converged "$WORKSPACE_DIR/qe_es_relax/pw.out" "Excited-state"
+    echo "[+] Excited-state relaxation converged at $(date)"
     cd "$WORKSPACE_DIR"
 fi
 
@@ -1231,42 +1264,66 @@ echo "==========================================================================
 echo " [Extraction] Extracting relaxed geometries to relaxed_gs.xyz and relaxed_es.xyz..."
 echo "=============================================================================="
 python3 -c "
-import os, ase.io
-from hydeph.qe_runner import parse_qe_relaxation_output
-for sub_d, out_f in [('qe_gs_relax', 'relaxed_gs.xyz'), ('qe_es_relax', 'relaxed_es.xyz')]:
-    p_out = os.path.join('$WORKSPACE_DIR', sub_d, 'pw.out')
-    if os.path.isfile(p_out):
-        try:
-            at, e = parse_qe_relaxation_output(p_out)
-            if at is not None:
-                target_p = os.path.join('$WORKSPACE_DIR', out_f)
-                ase.io.write(target_p, at, format='extxyz')
-                print(f'[+] Successfully extracted {{target_p}} (energy = {{e:.4f}} eV)')
-        except Exception as exc:
-            print(f'[-] Extraction notice for {{out_f}}: {{exc}}')
-" 2>/dev/null || true
+import importlib.util, os
+if importlib.util.find_spec('hydeph') is None or importlib.util.find_spec('ase') is None:
+    print('[i] HyDePh/ASE not available on compute node Python; geometries will be extracted from pw.out on resume.')
+else:
+    import ase.io
+    from hydeph.qe_runner import parse_qe_relaxation_output
+    for sub_d, out_f in [('qe_gs_relax', 'relaxed_gs.xyz'), ('qe_es_relax', 'relaxed_es.xyz')]:
+        p_out = os.path.join('$WORKSPACE_DIR', sub_d, 'pw.out')
+        if os.path.isfile(p_out):
+            at, e = parse_qe_relaxation_output(p_out, require_converged=True)
+            if at is None:
+                raise SystemExit(f'[!] ERROR: {{p_out}} failed convergence/geometry extraction.')
+            target_p = os.path.join('$WORKSPACE_DIR', out_f)
+            ase.io.write(target_p, at, format='extxyz')
+            print(f'[+] Successfully extracted {{target_p}} (energy = {{e:.4f}} eV)')
+"
 
 # 4. Conjugate Ground-State Single-Point SCF at R_ES (for exact DFT emission forces)
-if [ -f "$WORKSPACE_DIR/relaxed_es.xyz" ] && [ -f "$WORKSPACE_DIR/qe_gs_scf/pw.in" ]; then
+if [ -f "$WORKSPACE_DIR/qe_es_relax/pw.out" ] && [ -f "$WORKSPACE_DIR/qe_gs_scf/pw.in" ]; then
     echo "=============================================================================="
     echo " [3/3] Launching Conjugate Ground-State SCF at R_ES in qe_gs_on_es..."
     echo "=============================================================================="
     mkdir -p "$WORKSPACE_DIR/qe_gs_on_es"
-    python3 -c "
-import os, re, ase.io
-at_es = ase.io.read('$WORKSPACE_DIR/relaxed_es.xyz')
-with open('$WORKSPACE_DIR/qe_gs_scf/pw.in', 'r', encoding='utf-8') as f:
+    python3 - "$WORKSPACE_DIR" <<'PYEOF'
+import os
+import re
+import sys
+
+ws_dir = sys.argv[1]
+es_xyz = os.path.join(ws_dir, "relaxed_es.xyz")
+es_out = os.path.join(ws_dir, "qe_es_relax", "pw.out")
+if os.path.isfile(es_xyz):
+    lines = open(es_xyz, "r", encoding="utf-8").read().splitlines()
+    nat = int(lines[0].strip())
+    pos_lines = ["ATOMIC_POSITIONS (angstrom)"]
+    for ln in lines[2:2 + nat]:
+        toks = ln.split()
+        pos_lines.append(f"  {{toks[0]:4s}} {{float(toks[1]):14.8f}} {{float(toks[2]):14.8f}} {{float(toks[3]):14.8f}}")
+    pos_block = "\\n".join(pos_lines)
+else:
+    pw_txt = open(es_out, "r", encoding="utf-8", errors="replace").read()
+    blocks = re.findall(
+        r"(ATOMIC_POSITIONS\\s*\\([^)]+\\)\\s*\\n(?:[A-Za-z]+\\s+[-\\d.Ee+]+\\s+[-\\d.Ee+]+\\s+[-\\d.Ee+]+[^\\n]*\\n)+)",
+        pw_txt,
+    )
+    if not blocks:
+        raise SystemExit(f"[!] ERROR: Could not locate ATOMIC_POSITIONS in {{es_out}} for qe_gs_on_es.")
+    pos_block = blocks[-1].strip()
+with open(os.path.join(ws_dir, "qe_gs_scf", "pw.in"), "r", encoding="utf-8") as f:
     tpl = f.read()
-lines_pos = ['ATOMIC_POSITIONS (angstrom)'] + [f'  {{s:4s}} {{x:14.8f}} {{y:14.8f}} {{z:14.8f}}' for s, (x, y, z) in zip(at_es.get_chemical_symbols(), at_es.positions)]
-out_txt = re.sub(r'ATOMIC_POSITIONS.*?(?=K_POINTS|\\Z)', '\\n'.join(lines_pos) + '\\n\\n', tpl, flags=re.S)
-with open('$WORKSPACE_DIR/qe_gs_on_es/pw.in', 'w', encoding='utf-8') as f:
+out_txt = re.sub(r"ATOMIC_POSITIONS.*?(?=K_POINTS|\\Z)", pos_block + "\\n\\n", tpl, flags=re.S)
+with open(os.path.join(ws_dir, "qe_gs_on_es", "pw.in"), "w", encoding="utf-8") as f:
     f.write(out_txt)
-"
+PYEOF
     if [ -n "$PSEUDO_DIR" ] && [ ! -e "$WORKSPACE_DIR/qe_gs_on_es/pseudo" ]; then
         ln -sfn "$PSEUDO_DIR" "$WORKSPACE_DIR/qe_gs_on_es/pseudo"
     fi
     cd "$WORKSPACE_DIR/qe_gs_on_es"
     srun --cpu-bind=cores pw.x -in pw.in > pw.out 2>&1
+    _check_qe_scf_converged "$WORKSPACE_DIR/qe_gs_on_es/pw.out" "Conjugate GS-on-ES"
     echo "[+] Conjugate GS-on-ES SCF finished at $(date)"
     cd "$WORKSPACE_DIR"
 fi

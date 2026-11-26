@@ -940,8 +940,233 @@ def test_warning_when_no_modules_specified_in_cluster_preparation(tmp_path, capl
     assert "module purge" in content
     assert "# Note: No cluster environment modules specified in configuration." in content
     assert "q-e" not in content
+def test_slurm_relaxation_checks_qe_convergence(tmp_path):
+    """Verify submit_relaxations_pure_qe.slurm aborts on unconverged QE output."""
+    import shutil
+    import subprocess
+    import sys
+    import ase.io
+    from hydeph.qe_runner import QERunner
+
+    ws = str(tmp_path / "ws")
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(ws, exist_ok=True)
+    os.makedirs(pseudo_dir, exist_ok=True)
+    with open(os.path.join(pseudo_dir, "C.upf"), "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+
+    pristine_xyz = str(tmp_path / "pristine.xyz")
+    at = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    ase.io.write(pristine_xyz, at)
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=pristine_xyz,
+        workspace_dir=ws,
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        slurm_account="cin_staff",
+        spin_multiplicity=1,
+    )
+    qe = QERunner(cfg, pw_exe="pw.x")
+    rel_res = qe.prepare_relaxation_inputs(at)
+
+    with open(rel_res["slurm_script"], "r") as f:
+        content = f.read()
+
+    assert "_check_qe_relax_converged" in content
+    assert "_check_qe_scf_converged" in content
+    assert "2>/dev/null || true" not in content
+
+    if sys.platform != "win32" and shutil.which("bash"):
+        syntax_chk = subprocess.run(["bash", "-n", rel_res["slurm_script"]], capture_output=True, text=True)
+        assert syntax_chk.returncode == 0, syntax_chk.stderr
+
+        helper_lines = []
+        in_fn = False
+        for line in content.splitlines():
+            if line.startswith(("_check_qe_relax_converged()", "_check_qe_scf_converged()")):
+                in_fn = True
+            if in_fn:
+                helper_lines.append(line)
+                if line.strip() == "}":
+                    in_fn = False
+        helper_src = "\n".join(helper_lines)
+        assert "_check_qe_relax_converged()" in helper_src
+        assert "_check_qe_scf_converged()" in helper_src
+
+        relax_script = (
+            "set -e\n"
+            f"{helper_src}\n"
+            '_check_qe_relax_converged "$1" "Excited-state"\n'
+            'echo "SHOULD_NOT_REACH"\n'
+        )
+        unconv_pw_out = tmp_path / "unconverged_pw.out"
+        unconv_pw_out.write_text(
+            "     convergence NOT achieved after 100 iterations: stopping\n"
+            "     JOB DONE.\n"
+        )
+        fail_res = subprocess.run(
+            ["bash", "-s", str(unconv_pw_out)],
+            input=relax_script,
+            capture_output=True,
+            text=True,
+        )
+        assert fail_res.returncode != 0
+        assert "SHOULD_NOT_REACH" not in fail_res.stdout
+        assert "did NOT converge" in fail_res.stderr
+
+        conv_pw_out = tmp_path / "converged_pw.out"
+        conv_pw_out.write_text(
+            "     bfgs converged in   5 scf cycles and   4 bfgs steps\n"
+            "Begin final coordinates\n"
+        )
+        ok_res = subprocess.run(
+            ["bash", "-s", str(conv_pw_out)],
+            input=relax_script,
+            capture_output=True,
+            text=True,
+        )
+        assert ok_res.returncode == 0
+        assert "SHOULD_NOT_REACH" in ok_res.stdout
+
+        scf_script = (
+            "set -e\n"
+            f"{helper_src}\n"
+            '_check_qe_scf_converged "$1" "Conjugate GS-on-ES"\n'
+            'echo "SCF_OK"\n'
+        )
+        scf_fail = subprocess.run(
+            ["bash", "-s", str(unconv_pw_out)],
+            input=scf_script,
+            capture_output=True,
+            text=True,
+        )
+        assert scf_fail.returncode != 0
+        assert "SCF_OK" not in scf_fail.stdout
+
+        scf_conv_out = tmp_path / "scf_ok.out"
+        scf_conv_out.write_text("     convergence has been achieved in  14 iterations\n     JOB DONE.\n")
+        scf_ok = subprocess.run(
+            ["bash", "-s", str(scf_conv_out)],
+            input=scf_script,
+            capture_output=True,
+            text=True,
+        )
+        assert scf_ok.returncode == 0
+        assert "SCF_OK" in scf_ok.stdout
+
+        # Verify generated [3/3] qe_gs_on_es python snippet runs cleanly without syntax/escape errors
+        py_match = content.split("<<'PYEOF'\n", 1)[1].split("\nPYEOF", 1)[0]
+        sim_ws = tmp_path / "sim_ws"
+        (sim_ws / "qe_es_relax").mkdir(parents=True)
+        (sim_ws / "qe_gs_on_es").mkdir(parents=True)
+        (sim_ws / "qe_es_relax" / "pw.out").write_text(
+            "ATOMIC_POSITIONS (angstrom)\nC   0.10000000   0.00000000   0.00000000\nC   0.00000000   0.00000000   1.40000000\n"
+        )
+        # Ensure template exists from prepare_relaxation_inputs
+        import shutil as _shutil
+        _shutil.copytree(os.path.join(ws, "qe_gs_scf"), str(sim_ws / "qe_gs_scf"))
+        py_res = subprocess.run(["python3", "-", str(sim_ws)], input=py_match, capture_output=True, text=True)
+        assert py_res.returncode == 0, py_res.stderr
+        gen_pw_in = (sim_ws / "qe_gs_on_es" / "pw.in").read_text()
+        assert "0.10000000" in gen_pw_in
 
 
+def test_resume_stage2_raises_on_unconverged_es_relax(tmp_path):
+    """Verify --from-stage 2 fails loudly when qe_es_relax/pw.out exists without convergence."""
+    from unittest.mock import patch
+    import ase.io
+    from hydeph.pipeline import run_pipeline
+
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    p_file = tmp_path / "pristine.xyz"
+    at = Atoms("C2", cell=[3, 3, 3], positions=[[0, 0, 0], [1, 1, 1]], pbc=True)
+    ase.io.write(str(p_file), at)
+    ase.io.write(str(ws / "relaxed_gs.xyz"), at, format="extxyz")
+
+    pot_file = tmp_path / "nep.txt"
+    pot_file.write_text("dummy\n")
+    pw_exe = tmp_path / "pw.exe"
+    pw_exe.write_text("dummy pw\n")
+
+    es_dir = ws / "qe_es_relax"
+    es_dir.mkdir(parents=True, exist_ok=True)
+    (es_dir / "pw.out").write_text(
+        "     Program PWSCF v.7.4.1 starts\n"
+        "     convergence NOT achieved after 100 iterations: stopping\n"
+        "     JOB DONE.\n"
+    )
+
+    cfg = ToolkitConfig(
+        pristine_cell_path=str(p_file),
+        foundation_potential_path=str(pot_file),
+        pw_exe=str(pw_exe),
+        workspace_dir=str(ws),
+        spin_multiplicity=2,
+    )
+
+    with patch("hydeph.calculator.CPUNEP"):
+        with pytest.raises(RuntimeError, match="did NOT converge"):
+            run_pipeline(cfg, from_stage=2)
 
 
+def test_electron_maxstep_config_and_delta_scf_default(tmp_path):
+    """Verify electron_maxstep validation, explicit override, and 200 default for from_input."""
+    from pathlib import Path
+    from hydeph.qe.io import write_qe_input
 
+    pseudo_dir = str(tmp_path / "pseudo")
+    os.makedirs(pseudo_dir, exist_ok=True)
+    with open(os.path.join(pseudo_dir, "C.upf"), "w") as f:
+        f.write('<PP_HEADER z_valence="4.0" />\n')
+    pristine_xyz = str(tmp_path / "pristine.xyz")
+    at = Atoms("C2", positions=[(0, 0, 0), (0, 0, 1.4)], cell=[10, 10, 10], pbc=True)
+    import ase.io
+    ase.io.write(pristine_xyz, at)
+
+    pot_file = str(tmp_path / "nep.txt")
+    Path(pot_file).write_text("dummy\n")
+    bad_cfg = ToolkitConfig(
+        pristine_cell_path=pristine_xyz,
+        foundation_potential_path=pot_file,
+        workspace_dir=str(tmp_path / "ws_bad"),
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=1,
+        electron_maxstep=0,
+    )
+    with pytest.raises(ValueError, match="electron_maxstep"):
+        bad_cfg.validate()
+
+    cfg_default = ToolkitConfig(
+        pristine_cell_path=pristine_xyz,
+        workspace_dir=str(tmp_path / "ws_def"),
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=3,
+    )
+    pw_es = str(tmp_path / "pw_es.in")
+    write_qe_input(
+        at,
+        pw_es,
+        cfg_default,
+        calculation="relax",
+        tot_magnetization=2,
+        nspin=2,
+        occupations_mode="from_input",
+        constrained_occupations=([1.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 0.0]),
+    )
+    assert "electron_maxstep = 200," in open(pw_es).read()
+
+    cfg_override = ToolkitConfig(
+        pristine_cell_path=pristine_xyz,
+        workspace_dir=str(tmp_path / "ws_ovr"),
+        pseudo_dir=pseudo_dir,
+        pseudopotentials={"C": "C.upf"},
+        spin_multiplicity=3,
+        electron_maxstep=250,
+    )
+    pw_ovr = str(tmp_path / "pw_ovr.in")
+    write_qe_input(at, pw_ovr, cfg_override, calculation="relax", tot_magnetization=2, nspin=2)
+    assert "electron_maxstep = 250," in open(pw_ovr).read()

@@ -375,3 +375,106 @@ def test_load_dft_optical_forces_prefers_exact_endpoint_scf_over_labeled_frames(
         loaded = load_dft_optical_forces(at_gs, at_es, str(ws), force_state="emission")
     assert loaded is not None
     assert np.allclose(loaded, f_exact_gs - f_exact_es)
+
+
+def test_vdw_corr_qe_io_and_validation(tmp_path):
+    """Verify vdw_corr / dftd3_version / dftd3_threebody emit into QE inputs and guard resume checks."""
+    from hydeph.qe.io import write_qe_input, check_pw_in_matches_atoms
+
+    uc = bulk("C", "diamond", a=3.57, cubic=True)
+    pdir = tmp_path / "pseudo"
+    pdir.mkdir()
+    (pdir / "C.upf").write_text('<UPF version="2.0.1"><PP_HEADER element="C" pseudo_type="NC" z_valence="4.00"/></UPF>')
+
+    cfg_d3 = _make_base_cfg(
+        tmp_path,
+        uc,
+        pseudo_dir=str(pdir),
+        pseudopotentials={"C": "C.upf"},
+        vdw_corr="dft-d3",
+        dftd3_version=4,
+        dftd3_threebody=True,
+    )
+    pw_in = tmp_path / "pw.in"
+    write_qe_input(uc, str(pw_in), cfg_d3, calculation="scf")
+    txt = pw_in.read_text(encoding="utf-8")
+    assert "vdw_corr = 'dft-d3'" in txt
+    assert "dftd3_version = 4" in txt
+    assert "dftd3_threebody = .true." in txt
+    assert check_pw_in_matches_atoms(str(pw_in), uc, config=cfg_d3) is True
+
+    # Changing vdw_corr or dftd3_version must invalidate stale pw.in reuse
+    cfg_nod3 = _make_base_cfg(tmp_path, uc, pseudo_dir=str(pdir), pseudopotentials={"C": "C.upf"})
+    assert check_pw_in_matches_atoms(str(pw_in), uc, config=cfg_nod3) is False
+    cfg_d3v3 = _make_base_cfg(
+        tmp_path, uc, pseudo_dir=str(pdir), pseudopotentials={"C": "C.upf"}, vdw_corr="dft-d3", dftd3_version=3
+    )
+    assert check_pw_in_matches_atoms(str(pw_in), uc, config=cfg_d3v3) is False
+
+    with pytest.raises(ValueError, match="Invalid vdw_corr"):
+        _make_base_cfg(tmp_path, uc, pseudo_dir=str(pdir), pseudopotentials={"C": "C.upf"}, vdw_corr="bogus_vdw").validate()
+    with pytest.raises(ValueError, match="Invalid dftd3_version"):
+        _make_base_cfg(
+            tmp_path, uc, pseudo_dir=str(pdir), pseudopotentials={"C": "C.upf"}, vdw_corr="dft-d3", dftd3_version=99
+        ).validate()
+
+
+def test_embed_defect_unitcell_hexagonal_dimer_centroid_no_uc_wrap(tmp_path):
+    """Dimer spanning > a/2 in a small hexagonal unit cell must compute centroid in the large supercell."""
+    from ase import Atoms
+    from hydeph.defect_builder import DefectBuilder, mic_displacement
+
+    cell = np.array([
+        [2.51594, 0.0, 0.0],
+        [-1.25797, 2.17887, 0.0],
+        [0.0, 0.0, 6.66],
+    ])
+    pristine_uc = Atoms(
+        ["B", "B", "N", "N"],
+        positions=[
+            [0.0, 0.0, 1.665],
+            [0.0, 0.0, 4.995],
+            [-0.0000016, 1.45258, 4.995],
+            [1.25797, 0.72629, 1.665],
+        ],
+        cell=cell,
+        pbc=True,
+    )
+    defect_uc = pristine_uc.copy()
+    defect_uc[0].symbol = "C"
+    defect_uc[3].symbol = "C"
+
+    pr_p = tmp_path / "pristine.xyz"
+    df_p = tmp_path / "defect.xyz"
+    import ase.io
+
+    ase.io.write(str(pr_p), pristine_uc, format="extxyz")
+    ase.io.write(str(df_p), defect_uc, format="extxyz")
+
+    cfg = _make_base_cfg(
+        tmp_path,
+        pristine_uc,
+        pristine_cell_path=str(pr_p),
+        defect_cell_path=str(df_p),
+        supercell_repeat=(4, 4, 3),
+    )
+    builder = DefectBuilder(cfg, calc_foundation=AsymmetricHarmonicCalc(k=1.0, idx_a=0, idx_b=1, x0_a=0.0, x0_b=0.0))
+    at_large, c_large = builder.embed_defect_unitcell(pristine_uc, defect_uc, (11, 11, 5))
+
+    c_indices = [i for i, a in enumerate(at_large) if a.symbol == "C"]
+    assert len(c_indices) == 2
+    # Must match midpoint of the two C atoms in the large supercell (~1.45 A apart, not wrapped by -a1/2!)
+    rel = mic_displacement(at_large.positions[c_indices], at_large.positions[c_indices[0]], at_large.cell)
+    expected_mid = at_large.positions[c_indices[0]] + np.mean(rel, axis=0)
+    assert np.allclose(c_large, expected_mid, atol=1e-4)
+
+
+def test_resolve_phonon_supercell_repeat_preserves_monolayer_vacuum_axis():
+    """Auto supercell sizing must keep nz=1 along a 2D vacuum axis (>= 12 A gap)."""
+    uc_hbn_mono = Atoms(
+        ["B", "N"],
+        positions=[[0.0, 0.0, 10.0], [1.25797, 0.72629, 10.0]],
+        cell=[[2.51594, 0.0, 0.0], [-1.25797, 2.17887, 0.0], [0.0, 0.0, 20.0]],
+        pbc=True,
+    )
+    assert resolve_phonon_supercell_repeat(uc_hbn_mono, min_repeat=(7, 7, 1), hw_max_meV=175.0) == (11, 11, 1)

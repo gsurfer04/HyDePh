@@ -5,6 +5,27 @@ All notable changes to HyDePh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-11-26
+
+### Added
+- **2D & Layered vdW Anharmonic MD Controls (`hydeph/config.py`, `hydeph/lineshape.py`)**:
+  - Added `anharmonic_planar_md` to clamp out-of-plane $z$-coordinates during anharmonic MD (suppressing unsupported 2D flexural $ZA$ rippling).
+  - Added automatic stacked-layer detection (`_detect_stacked_layers`) and per-layer center-of-mass pinning (`_LayerCOMConstraint`, `anharmonic_layer_com_constraint="auto"`) to prevent rigid sheet-on-sheet sliding in layered vdW crystals ($\ge 2$ sheets) while leaving intralayer vibrations unconstrained.
+  - Added `anharmonic_md_supercell` (`"auto"`, `"embedded"`, `"dft"`) to control whether anharmonic MD runs on the embedded phonon supercell or the smaller DFT supercell.
+  - Added vacuum-axis detection (`_detect_vacuum_axes`) in `resolve_phonon_supercell_repeat` so 2D monolayers and slabs expand only along periodic axes.
+- **Quantum ESPRESSO Dispersion & SCF Iteration Controls (`hydeph/config.py`, `hydeph/qe/io.py`)**:
+  - Added `vdw_corr`, `dftd3_version`, and `dftd3_threebody` with cache-invalidation checks in `check_pw_in_matches_atoms`.
+  - Added `electron_maxstep` (defaulting to `200` for constrained $\Delta\text{SCF}$ `from_input` calculations and QE's default `100` otherwise).
+- **Strict SLURM Relaxation & SCF Convergence Guards (`hydeph/qe/runner.py`, `hydeph/pipeline.py`)**:
+  - Added `_check_qe_relax_converged` and `_check_qe_scf_converged` checks in `submit_relaxations_pure_qe.slurm` and `require_converged=True` enforcement on Stage 1/Stage 2 resumption so unconverged BFGS or SCF runs fail fast instead of propagating silently.
+
+### Fixed
+- **Embedded Phonon Relaxation Units (`hydeph/lineshape.py`)**: Fixed `Ry/Bohr` vs. `eV/Å` force-threshold conversion in `embed_phonon_supercell` LBFGS relaxation.
+- **DFT Core Optical Force Geometry Guard (`hydeph/system_profile.py`)**: Added `_pbc_max_disp < 0.015 Å` matching guard to `load_dft_optical_forces` so mismatched unrelaxed `es[0]` / `gs[-1]` frames cannot corrupt core optical forces.
+- **Multi-Site Defect Centroid Wrapping (`hydeph/defect_builder.py`)**: Evaluated multi-site MIC defect centroids in the tiled supercell rather than the pristine unit cell, preventing periodic wrapping artifacts on dimer/complex defects.
+- **Fixed-Cell `relax` Output Parsing & Compute-Node `qe_gs_on_es` Extraction (`hydeph/qe/parsers.py`, `hydeph/qe/runner.py`)**: Read actual QE cell vectors from adjacent `pw.in` or `pw.out` `crystal axes` when `CELL_PARAMETERS` is omitted, and made `submit_relaxations_pure_qe.slurm` step `[3/3]` extract `ATOMIC_POSITIONS` using only the Python standard library.
+- Expanded automated test coverage across `tests/test_anharmonic_physics.py`, `tests/test_leonardo_hpc.py`, `tests/test_unified_workflow.py`, and `tests/test_vc_relax_and_monitoring.py` (`239` passing tests).
+
 ## [0.11.0] - 2026-11-19
 
 ### Added

@@ -352,6 +352,9 @@ class ToolkitConfig:
         Diagonalization method ('david', 'cg', etc.). Default is "david".
     diago_david_ndim : int
         Subspace dimension multiplier for Davidson diagonalization (2 or 4). Default is 2.
+    electron_maxstep : int, optional
+        Maximum SCF iterations per ionic step in Quantum ESPRESSO. If omitted (None, default),
+        uses 200 for constrained Delta-SCF ('from_input') calculations and QE's default (100) otherwise.
     nbnd : int, optional
         Number of Kohn-Sham bands. If omitted, automatically sized from valence electron count when UPF metadata is available.
     auto_spin_parity : bool
@@ -396,6 +399,13 @@ class ToolkitConfig:
         Monkhorst-Pack q-point grid for exact exchange evaluations (e.g. (1, 1, 1)).
     ecutfock : float, optional
         Plane-wave cutoff energy for exact exchange operator (Ry).
+    vdw_corr : str, optional
+        Van der Waals dispersion correction in Quantum ESPRESSO
+        (e.g. "dft-d3", "grimme-d3", "grimme-d2", "vdw-df", "tkatchenko-scheffler").
+    dftd3_version : int, optional
+        Grimme DFT-D3 damping variant in Quantum ESPRESSO (e.g. 3 for zero-damping, 4 for BJ).
+    dftd3_threebody : bool, optional
+        Whether to enable three-body Axilrod-Teller-Muto terms in QE DFT-D3.
 
     n_fc_frames : int
         Number of Franck-Condon 1D path frames to sample. Default is 7.
@@ -459,6 +469,16 @@ class ToolkitConfig:
     anharmonic_md_surface : str
         Potential energy surface used to propagate NVE dynamics ("auto", "es", or "gs"). Default is "auto"
         ("gs" on embedded emission supercells to avoid ES ML state-mixing instabilities; "es" otherwise).
+    anharmonic_planar_md : bool
+        If True, clamps out-of-plane atomic z-coordinates during anharmonic MD to suppress
+        unsupported 2D flexural (ZA) membrane rippling (substrate-supported limit). Default is False.
+    anharmonic_layer_com_constraint : str or bool, optional
+        Per-layer center-of-mass constraint during anharmonic MD for stacked 2D/layered crystals
+        ("auto", "xy", "xyz", "none", True, or False). Default is "auto" (pins rigid in-plane
+        layer COM drift when >= 2 stacked vdW sheets are detected, leaving intralayer modes free).
+    anharmonic_md_supercell : str
+        Supercell used for anharmonic MD when phonon embedding is enabled ("auto", "embedded", or "dft").
+        Default is "auto" (uses the embedded cell; set "dft" on huge 3D embedded cells to run MD on the DFT supercell).
     hessian_embedding_mode : str
         Hessian evaluation mode on embedded supercells ("auto", "spliced", or "full"). Default is "auto"
         (uses Alkauskas bulk+core splicing above hessian_splice_threshold_atoms).
@@ -557,6 +577,7 @@ class ToolkitConfig:
     mixing_ndim: int = 8
     diagonalization: str = "david"
     diago_david_ndim: int = 2
+    electron_maxstep: Optional[int] = None
     nbnd: Optional[int] = None
     auto_spin_parity: bool = False
     qe_occupations: str = "fixed"
@@ -577,6 +598,9 @@ class ToolkitConfig:
     exx_fraction: Optional[float] = None
     nqx: Optional[Tuple[int, int, int]] = None
     ecutfock: Optional[float] = None
+    vdw_corr: Optional[str] = None
+    dftd3_version: Optional[int] = None
+    dftd3_threebody: Optional[bool] = None
 
     n_fc_frames: int = 7
     n_phonon_frames: int = 12
@@ -661,6 +685,9 @@ class ToolkitConfig:
     anharmonic_n_trajectories: int = 16
     anharmonic_acf_damping_meV: float = 2.0
     anharmonic_md_surface: str = "auto"  # "auto", "es" (excited-state PES), or "gs" (ground-state PES)
+    anharmonic_planar_md: bool = False
+    anharmonic_layer_com_constraint: Any = "auto"
+    anharmonic_md_supercell: str = "auto"
     calculate_pl_intensity: bool = True
     finite_size_acoustic_cutoff: Optional[bool] = None
     lineshape_n_points: int = 1500
@@ -1278,8 +1305,36 @@ class ToolkitConfig:
             if self.ecutfock is not None and float(self.ecutfock) <= 0.0:
                 raise ValueError(f"Invalid ecutfock: {self.ecutfock}. Must be > 0.")
 
+        if self.vdw_corr is not None:
+            vdw_str = str(self.vdw_corr).strip().lower()
+            self.vdw_corr = vdw_str if vdw_str else None
+            valid_vdw = {
+                "none",
+                "grimme-d2",
+                "dft-d",
+                "grimme-d3",
+                "dft-d3",
+                "tkatchenko-scheffler",
+                "ts",
+                "ts-vdw",
+                "mbd_vdw",
+                "xdm",
+            }
+            if self.vdw_corr is not None and self.vdw_corr not in valid_vdw:
+                raise ValueError(
+                    f"Invalid vdw_corr: '{self.vdw_corr}'. Must be one of: {sorted(valid_vdw)}."
+                )
+
+        if self.dftd3_version is not None and int(self.dftd3_version) not in (2, 3, 4, 5, 6):
+            raise ValueError(
+                f"Invalid dftd3_version: {self.dftd3_version}. Must be an integer in {{2, 3, 4, 5, 6}}."
+            )
+
         if self.conv_thr is not None and not str(self.conv_thr).strip():
             raise ValueError("conv_thr cannot be an empty string. Provide a valid threshold or None for auto-scaling.")
+
+        if self.electron_maxstep is not None and int(self.electron_maxstep) < 1:
+            raise ValueError(f"Invalid electron_maxstep: {self.electron_maxstep}. Must be >= 1.")
 
         if self.spin_polarized and (self.spin_multiplicity is None or self.tot_magnetization is None):
             raise ValueError(
@@ -1404,6 +1459,21 @@ class ToolkitConfig:
             )
         if float(self.anharmonic_acf_damping_meV) <= 0.0:
             raise ValueError(f"Invalid anharmonic_acf_damping_meV: {self.anharmonic_acf_damping_meV}. Must be > 0.")
+        if not isinstance(self.anharmonic_planar_md, bool):
+            raise ValueError(f"Invalid anharmonic_planar_md: {self.anharmonic_planar_md}. Must be a boolean.")
+        lcom_val = self.anharmonic_layer_com_constraint
+        if not isinstance(lcom_val, bool):
+            lcom_str = str(lcom_val).strip().lower()
+            if lcom_str not in ("auto", "xy", "xyz", "none", "false", "true"):
+                raise ValueError(
+                    f"Invalid anharmonic_layer_com_constraint: '{lcom_val}'. "
+                    "Must be 'auto', 'xy', 'xyz', 'none', or a boolean."
+                )
+        if str(self.anharmonic_md_supercell).strip().lower() not in ("auto", "embedded", "dft"):
+            raise ValueError(
+                f"Invalid anharmonic_md_supercell: '{self.anharmonic_md_supercell}'. "
+                "Must be 'auto', 'embedded', or 'dft'."
+            )
         if self.time_window_tau_fs is not None and float(self.time_window_tau_fs) <= 0.0:
             raise ValueError(f"Invalid time_window_tau_fs: {self.time_window_tau_fs}. Must be > 0 fs.")
         if int(self.max_imaginary_modes) < 0:

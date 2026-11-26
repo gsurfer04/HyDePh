@@ -28,7 +28,7 @@ slurm_relax_time: "01:00:00"
 slurm_relax_qos: null               # e.g. "boost_qos_dbg" for fast debug queues
 
 # Environment modules (loaded in exact specified order)
-modules:
+slurm_modules:
   - profile/chem-phys
   - autoload
   - quantum-espresso/7.2--openmpi--4.1.4--cuda--11.8
@@ -40,7 +40,7 @@ parallel_hessian_workers: 16
 
 ### Deterministic Module Loading
 HPC software stacks frequently require environment modules to be loaded in a strict dependency sequence (for example, loading a domain profile module before the compiler or Quantum ESPRESSO module becomes visible).
-- Specify modules under `modules:` (or aliases `slurm_modules:`, `cluster_modules:`, `hpc_modules:`).
+- Specify modules under `slurm_modules:` in exact load order.
 - HyDePh emits `module purge` followed by `module load <name>` in the **exact order listed**, without heuristic availability loops.
 - If `slurm_modules` / `modules` is empty, HyDePh logs a warning so you can verify `pw.x` is on the compute nodes' `PATH`.
 
@@ -66,6 +66,7 @@ This creates:
   1. `[1/3]` Ground-state relaxation (`qe_gs_relax/pw.in`),
   2. `[2/3]` Excited-state $\Delta\text{SCF}$ relaxation (`qe_es_relax/pw.in`, updating the lowest-energy occupation card from frontier Kohn-Sham eigenvalues if needed), and
   3. `[3/3]` Conjugate ground-state single-point SCF at the relaxed excited-state geometry $\mathbf{R}_{\mathrm{ES}}$ (`qe_gs_on_es/pw.in`), supplying exact DFT emission forces $\mathbf{F}_{\mathrm{GS}}(\mathbf{R}_{\mathrm{ES}}) - \mathbf{F}_{\mathrm{ES}}(\mathbf{R}_{\mathrm{ES}})$ for the unified Stage 6 workflow.
+- Each step verifies BFGS/SCF convergence in `pw.out` (`_check_qe_relax_converged` / `_check_qe_scf_converged`) and exits non-zero on failure. Step `[3/3]` extracts `ATOMIC_POSITIONS` from `relaxed_es.xyz` or `qe_es_relax/pw.out` using only the Python standard library.
 
 Submit on the cluster (from either the project root or `workspace_dir`):
 ```bash
@@ -226,7 +227,7 @@ slurm_gpus_per_node: 4
 slurm_cpus_per_task: 8
 
 # Explicit CINECA module loading order
-modules:
+slurm_modules:
   - profile/chem-phys
   - autoload
   - quantum-espresso/7.2--openmpi--4.1.4--cuda--11.8
